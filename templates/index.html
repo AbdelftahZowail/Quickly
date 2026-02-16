@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Campaign Engine — Home{% endblock %}
+{% block content %}
+<h1>Campaign Engine</h1>
+<p style="color: var(--muted); margin-bottom: 2rem;">Simple email campaigns: leads, sequences, and a smart queue. No login.</p>
+<div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1rem;">
+  <a href="/campaigns" class="card" style="text-decoration: none; color: inherit;">
+    <strong>Campaigns</strong>
+    <p style="margin: 0.5rem 0 0 0; color: var(--muted); font-size: 0.9rem;">Create campaigns with email sequences, assign one or more inboxes, set sending windows and daily limits, view the queue.</p>
+  </a>
+  <a href="/inboxes" class="card" style="text-decoration: none; color: inherit;">
+    <strong>Inboxes</strong>
+    <p style="margin: 0.5rem 0 0 0; color: var(--muted); font-size: 0.9rem;">Add sending addresses and max emails per day. Campaigns use these inboxes; the queue spreads sends across them.</p>
+  </a>
+  <a href="/leads" class="card" style="text-decoration: none; color: inherit;">
+    <strong>Leads</strong>
+    <p style="margin: 0.5rem 0 0 0; color: var(--muted); font-size: 0.9rem;">All leads, status, campaigns they’re in, and email history.</p>
+  </a>
+  <a href="/leads/add" class="card" style="text-decoration: none; color: inherit;">
+    <strong>Add Lead</strong>
+    <p style="margin: 0.5rem 0 0 0; color: var(--muted); font-size: 0.9rem;">Add a lead with email, name, custom fields, and optionally assign to a campaign.</p>
+  </a>
+</div>
+<p style="margin-top: 2rem; font-size: 0.85rem; color: var(--muted);">
+  API: <span class="mono">/api/leads</span>, <span class="mono">/api/campaigns</span>, <span class="mono">/api/inboxes</span>
+</p>
+{% endblock %}

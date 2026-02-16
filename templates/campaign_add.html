@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}Create Campaign{% endblock %}
+{% block content %}
+<h1>Create campaign</h1>
+<p style="color: var(--muted); margin-bottom: 1.5rem;">Set name, one or more sending inboxes, and schedule. The queue will spread sends across inboxes by daily capacity.</p>
+<form id="create-campaign-form" class="card" style="max-width: 520px;">
+  <div class="form-group">
+    <label>Campaign name *</label>
+    <input type="text" name="name" required placeholder="e.g. Q1 Outreach">
+  </div>
+  <div class="form-group">
+    <label>Sending inboxes * (select at least one; order = priority)</label>
+    <div id="inbox-checkboxes" style="display: flex; flex-wrap: wrap; flex-direction: column; gap: 0.35rem; max-height: 200px; overflow-y: auto; padding: 0.5rem 0; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);"></div>
+    <p style="margin: 0.25rem 0 0 0; font-size: 0.85rem; color: var(--muted);">No inboxes? <a href="/inboxes">Add inboxes first</a>.</p>
+  </div>
+  <div class="form-group">
+    <label>Sending days</label>
+    <div class="sending-days" style="display: flex; flex-wrap: wrap; gap: 0.5rem 1rem;">
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="0"> Mon</label>
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="1"> Tue</label>
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="2"> Wed</label>
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="3"> Thu</label>
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="4"> Fri</label>
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="5"> Sat</label>
+      <label style="display: flex; align-items: center; gap: 0.35rem; cursor: pointer; font-weight: normal;"><input type="checkbox" name="day" value="6"> Sun</label>
+    </div>
+  </div>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
+    <div class="form-group">
+      <label>Sending window start</label>
+      <input type="text" name="sending_hours_start" value="09:00" placeholder="09:00">
+    </div>
+    <div class="form-group">
+      <label>Sending window end</label>
+      <input type="text" name="sending_hours_end" value="17:00" placeholder="17:00">
+    </div>
+  </div>
+  <div class="form-group">
+    <label>Wait between emails (minutes)</label>
+    <input type="number" name="wait_minutes_between" value="5" min="1" max="120">
+  </div>
+  <div class="form-group">
+    <label style="display: flex; align-items: center; gap: 0.5rem; cursor: pointer;">
+      <input type="checkbox" name="stop_on_reply" checked>
+      Stop sending sequence when lead replies
+    </label>
+  </div>
+  <div style="display: flex; gap: 0.75rem; align-items: center;">
+    <button type="submit" class="btn">Create campaign</button>
+    <a href="/campaigns" class="btn secondary">Cancel</a>
+  </div>
+</form>
+<div id="message" style="margin-top: 1rem;"></div>
+{% endblock %}
+{% block extra_js %}
+<script>
+(function() {
+  const form = document.getElementById('create-campaign-form');
+  const messageEl = document.getElementById('message');
+  const container = document.getElementById('inbox-checkboxes');
+
+  fetch('/api/inboxes')
+    .then(r => r.json())
+    .then(inboxes => {
+      container.innerHTML = '';
+      inboxes.forEach(i => {
+        const label = document.createElement('label');
+        label.style.cssText = 'display: flex; align-items: center; gap: 0.5rem; cursor: pointer; font-weight: normal;';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.name = 'inbox_id';
+        cb.value = i.id;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(i.email + (i.display_name ? ' (' + i.display_name + ')' : '') + ' — max ' + i.max_emails_per_day + '/day'));
+        container.appendChild(label);
+      });
+      [0,1,2,3,4].forEach(d => {
+        const cb = form.querySelector('input[name="day"][value="' + d + '"]');
+        if (cb) cb.checked = true;
+      });
+    })
+    .catch(() => {
+      messageEl.innerHTML = '<span style="color: var(--danger)">Could not load inboxes. <a href="/inboxes">Add inboxes</a> first.</span>';
+    });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const inboxIds = Array.from(form.querySelectorAll('input[name="inbox_id"]:checked')).map(c => parseInt(c.value, 10));
+    if (!inboxIds.length) {
+      messageEl.innerHTML = '<span style="color: var(--danger)">Select at least one inbox.</span>';
+      return;
+    }
+    const sendingDays = Array.from(form.querySelectorAll('input[name="day"]:checked')).map(c => parseInt(c.value, 10)).sort((a,b) => a - b);
+    const body = {
+      name: form.name.value.trim(),
+      inbox_ids: inboxIds,
+      sending_days: sendingDays.length ? sendingDays : [0, 1, 2, 3, 4],
+      sending_hours_start: form.sending_hours_start.value.trim() || '09:00',
+      sending_hours_end: form.sending_hours_end.value.trim() || '17:00',
+      wait_minutes_between: parseInt(form.wait_minutes_between.value, 10) || 5,
+      stop_on_reply: form.stop_on_reply.checked,
+    };
+    messageEl.innerHTML = '';
+    const res = await fetch('/api/campaigns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      const campaign = await res.json();
+      messageEl.innerHTML = '<span style="color: var(--success)">Campaign created. <a href="/campaigns/' + campaign.id + '">Open campaign</a> or <a href="/campaigns">back to list</a>.</span>';
+      form.querySelector('button[type="submit"]').disabled = true;
+    } else {
+      const text = await res.text();
+      messageEl.innerHTML = '<span style="color: var(--danger)">Error: ' + escapeHtml(text) + '</span>';
+    }
+  });
+})();
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+</script>
+{% endblock %}

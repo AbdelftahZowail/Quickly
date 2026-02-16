@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Inboxes{% endblock %}
+{% block content %}
+<h1>Inboxes</h1>
+<p style="color: var(--muted); margin-bottom: 1.5rem;">Sending addresses. Each inbox has a daily send limit. Campaigns can use one or more inboxes; the queue spreads sends across them.</p>
+
+<div class="card" style="max-width: 520px; margin-bottom: 2rem;">
+  <h2 style="margin-top: 0;">Add inbox</h2>
+  <form id="add-inbox-form">
+    <div class="form-group">
+      <label>Email *</label>
+      <input type="email" name="email" required placeholder="sales@company.com">
+    </div>
+    <div class="form-group">
+      <label>Display name</label>
+      <input type="text" name="display_name" placeholder="Sales Team">
+    </div>
+    <div class="form-group">
+      <label>Max emails per day</label>
+      <input type="number" name="max_emails_per_day" value="50" min="1" max="1000">
+    </div>
+    <button type="submit" class="btn">Add inbox</button>
+  </form>
+  <div id="form-message" style="margin-top: 0.75rem;"></div>
+</div>
+
+<h2>Inbox list</h2>
+<div id="inbox-list"></div>
+{% endblock %}
+{% block extra_js %}
+<script>
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+async function loadInboxes() {
+  const listEl = document.getElementById('inbox-list');
+  try {
+    const res = await fetch('/api/inboxes');
+    const inboxes = await res.json();
+    if (!inboxes.length) {
+      listEl.innerHTML = '<p class="card">No inboxes yet. Add one above to use in campaigns.</p>';
+      return;
+    }
+    listEl.innerHTML = '<table><thead><tr><th>Email</th><th>Display name</th><th>Max/day</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>';
+    const tbody = listEl.querySelector('tbody');
+    inboxes.forEach(i => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mono">${escapeHtml(i.email)}</td>
+        <td>${escapeHtml(i.display_name || '—')}</td>
+        <td>${i.max_emails_per_day}</td>
+        <td>${new Date(i.created_at).toLocaleDateString()}</td>
+        <td><button class="btn danger" onclick="deleteInbox(${i.id}, '${escapeHtml(i.email).replace(/'/g, "\\'")}')">Delete</button></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  } catch (e) {
+    listEl.innerHTML = '<p class="card" style="color: var(--danger);">Failed to load inboxes.</p>';
+  }
+}
+
+document.getElementById('add-inbox-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const msgEl = document.getElementById('form-message');
+  const body = {
+    email: form.email.value.trim(),
+    display_name: form.display_name.value.trim(),
+    max_emails_per_day: parseInt(form.max_emails_per_day.value, 10) || 50,
+  };
+  msgEl.innerHTML = '';
+  try {
+    const res = await fetch('/api/inboxes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      msgEl.innerHTML = '<span style="color: var(--success)">Inbox added.</span>';
+      form.reset();
+      form.max_emails_per_day.value = 50;
+      loadInboxes();
+    } else {
+      const text = await res.text();
+      msgEl.innerHTML = '<span style="color: var(--danger)">' + escapeHtml(text) + '</span>';
+    }
+  } catch (err) {
+    msgEl.innerHTML = '<span style="color: var(--danger)">Request failed.</span>';
+  }
+});
+
+async function deleteInbox(id, email) {
+  if (!confirm('Delete inbox "' + email + '"?')) return;
+  const res = await fetch('/api/inboxes/' + id, { method: 'DELETE' });
+  if (res.ok) {
+    loadInboxes();
+  } else {
+    let msg = 'Error deleting inbox.';
+    try {
+      const data = await res.json();
+      msg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data);
+    } catch (_) {
+      msg = await res.text() || msg;
+    }
+    alert(msg);
+  }
+}
+
+loadInboxes();
+</script>
+{% endblock %}

@@ -1,0 +1,748 @@
+{% extends "base.html" %}
+{% block title %}Campaign {{ campaign_id }}{% endblock %}
+{% block extra_css %}
+/* Sequence modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.6);
+  z-index: 100;
+  align-items: center;
+  justify-content: center;
+}
+.modal-overlay.open { display: flex; }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.5rem;
+  width: 100%;
+  max-width: 580px;
+  max-height: 90vh;
+  overflow-y: auto;
+  position: relative;
+}
+.modal h3 { margin: 0 0 1rem 0; font-size: 1.1rem; }
+.modal-close {
+  position: absolute;
+  top: 0.75rem;
+  right: 1rem;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1.3rem;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); }
+.modal textarea { max-width: 100%; }
+.modal input[type="text"], .modal input[type="number"] { max-width: 100%; }
+.seq-actions { display: flex; gap: 0.4rem; }
+.seq-actions button {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: inherit;
+  font-weight: 500;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+.seq-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.seq-actions button.del { color: var(--danger); border-color: transparent; }
+.seq-actions button.del:hover { border-color: var(--danger); background: rgba(244,63,94,0.1); }
+/* Campaign settings modal extras */
+.day-checks { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; }
+.day-checks label {
+  display: flex; align-items: center; gap: 0.35rem;
+  cursor: pointer; font-weight: normal; color: var(--text); font-size: 0.9rem;
+}
+.day-checks input[type="checkbox"] { width: auto; }
+.inbox-checks {
+  display: flex; flex-direction: column; gap: 0.35rem;
+  max-height: 180px; overflow-y: auto;
+  padding: 0.5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+}
+.inbox-checks label {
+  display: flex; align-items: center; gap: 0.5rem;
+  cursor: pointer; font-weight: normal; color: var(--text); font-size: 0.9rem;
+}
+.inbox-checks input[type="checkbox"] { width: auto; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+/* Queue calendar styles */
+.queue-toolbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+.queue-toolbar .filter-label { color: var(--accent); font-weight: 600; font-size: 0.9rem; }
+.queue-section-header {
+  cursor: pointer; user-select: none; color: var(--muted); font-size: 0.9rem; font-weight: 600;
+  padding: 0.5rem 0; display: flex; align-items: center; gap: 0.4rem;
+}
+.queue-section-header:hover { color: var(--text); }
+.queue-section-header .arrow { transition: transform 0.15s; display: inline-block; }
+.queue-section-header .arrow.open { transform: rotate(90deg); }
+tr.sent-row td { color: var(--muted); }
+tr.lead-clickable td { cursor: pointer; }
+tr.lead-clickable:hover td { color: var(--accent); }
+{% endblock %}
+{% block content %}
+<div style="display:flex;align-items:center;gap:1rem;margin-bottom:0.25rem;">
+  <h1 id="campaign-name" style="margin:0;">Campaign</h1>
+  <button class="btn danger" onclick="deleteCampaign()" style="margin-left:auto;">Delete campaign</button>
+</div>
+<div id="campaign-meta" class="card" style="margin-bottom: 1.5rem;"></div>
+
+<!-- Campaign settings modal -->
+<div class="modal-overlay" id="settings-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeSettingsModal()">&times;</button>
+    <h3>Edit Campaign Settings</h3>
+    <form id="settings-form">
+      <div class="form-group">
+        <label>Campaign name *</label>
+        <input type="text" id="set-name" required style="max-width:100%;">
+      </div>
+      <div class="form-group">
+        <label>Sending inboxes * (select at least one)</label>
+        <div class="inbox-checks" id="set-inboxes"></div>
+      </div>
+      <div class="form-group">
+        <label>Sending days</label>
+        <div class="day-checks">
+          <label><input type="checkbox" name="set-day" value="0"> Mon</label>
+          <label><input type="checkbox" name="set-day" value="1"> Tue</label>
+          <label><input type="checkbox" name="set-day" value="2"> Wed</label>
+          <label><input type="checkbox" name="set-day" value="3"> Thu</label>
+          <label><input type="checkbox" name="set-day" value="4"> Fri</label>
+          <label><input type="checkbox" name="set-day" value="5"> Sat</label>
+          <label><input type="checkbox" name="set-day" value="6"> Sun</label>
+        </div>
+      </div>
+      <div class="settings-grid">
+        <div class="form-group">
+          <label>Sending window start</label>
+          <input type="text" id="set-hours-start" placeholder="09:00" style="max-width:100%;">
+        </div>
+        <div class="form-group">
+          <label>Sending window end</label>
+          <input type="text" id="set-hours-end" placeholder="17:00" style="max-width:100%;">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Wait between emails (minutes)</label>
+        <input type="number" id="set-wait" min="1" max="120" style="max-width:100%;">
+      </div>
+      <div class="form-group">
+        <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
+          <input type="checkbox" id="set-stop-reply" style="width:auto;">
+          Stop sending sequence when lead replies
+        </label>
+      </div>
+      <div style="display:flex;gap:0.5rem;align-items:center;">
+        <button type="submit" class="btn">Save settings</button>
+        <button type="button" class="btn secondary" onclick="closeSettingsModal()">Cancel</button>
+      </div>
+      <div id="settings-message" style="margin-top:0.5rem;"></div>
+    </form>
+  </div>
+</div>
+
+<h2>Sequences</h2>
+<div id="sequences"></div>
+<div class="card" style="max-width: 640px;">
+  <h3 style="margin: 0 0 0.75rem 0; font-size: 1rem;">Add sequence</h3>
+  <form id="add-sequence-form">
+    <input type="hidden" name="position" id="seq-position" value="0">
+    <div class="form-group">
+      <label>Subject (leave empty to reply in same thread)</label>
+      <input type="text" name="subject" placeholder="e.g. Introduction">
+    </div>
+    <div class="form-group">
+      <label>Body * (use {{"{{name}}"}}, {{"{{email}}"}}, {{"{{company}}"}} for placeholders)</label>
+      <textarea name="body" rows="4" required placeholder="Hi {{"{{name}}"}}..."></textarea>
+    </div>
+    <div class="form-group">
+      <label>Wait days after previous email</label>
+      <input type="number" name="wait_days_after_previous" value="0" min="0">
+    </div>
+    <button type="submit" class="btn">Add sequence</button>
+  </form>
+  <div id="sequence-message" style="margin-top: 0.5rem;"></div>
+</div>
+
+<!-- Sequence view / edit modal -->
+<div class="modal-overlay" id="seq-modal">
+  <div class="modal">
+    <button class="modal-close" id="seq-modal-close">&times;</button>
+    <h3 id="seq-modal-title">Sequence</h3>
+    <form id="seq-edit-form">
+      <input type="hidden" id="seq-edit-id">
+      <div class="form-group">
+        <label>Subject (leave empty to reply in same thread)</label>
+        <input type="text" id="seq-edit-subject" placeholder="(reply in thread)">
+      </div>
+      <div class="form-group">
+        <label>Body</label>
+        <textarea id="seq-edit-body" rows="6" required></textarea>
+      </div>
+      <div class="form-group">
+        <label>Wait days after previous email</label>
+        <input type="number" id="seq-edit-wait" value="0" min="0">
+      </div>
+      <div style="display: flex; gap: 0.5rem; align-items: center;">
+        <button type="submit" class="btn" id="seq-edit-save">Save changes</button>
+        <button type="button" class="btn secondary" id="seq-modal-cancel">Cancel</button>
+      </div>
+      <div id="seq-edit-message" style="margin-top: 0.5rem;"></div>
+    </form>
+  </div>
+</div>
+
+<h2>Enrolled leads</h2>
+<div id="leads"></div>
+<div class="card" style="max-width: 480px;">
+  <h3 style="margin: 0 0 0.75rem 0; font-size: 1rem;">Assign lead to this campaign</h3>
+  <form id="assign-lead-form">
+    <div class="form-group">
+      <label>Select lead</label>
+      <select name="lead_id" id="assign-lead-select">
+        <option value="">— Select lead —</option>
+      </select>
+    </div>
+    <button type="submit" class="btn">Assign to campaign</button>
+  </form>
+  <div id="assign-message" style="margin-top: 0.5rem;"></div>
+</div>
+
+<h2>Queue (calendar)</h2>
+<div id="queue-toolbar" class="queue-toolbar" style="display:none;">
+  <button class="btn secondary" id="recalc-btn" onclick="recalculateQueue()">Recalculate queue</button>
+  <span id="queue-filter-info"></span>
+</div>
+<div id="queue" class="card"></div>
+{% endblock %}
+{% block extra_js %}
+<script>
+const campaignId = {{ campaign_id }};
+
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+/* ---- Delete campaign ---- */
+async function deleteCampaign() {
+  const name = document.getElementById('campaign-name').textContent || 'this campaign';
+  if (!confirm('Delete "' + name + '"? This will remove all sequences, enrolled leads, and queue slots. This cannot be undone.')) return;
+  const res = await fetch('/api/campaigns/' + campaignId, { method: 'DELETE' });
+  if (res.ok) {
+    window.location.href = '/campaigns';
+  } else {
+    const t = await res.text();
+    alert('Error deleting campaign: ' + t);
+  }
+}
+
+/* ---- Campaign settings modal ---- */
+function openSettingsModal() {
+  if (!_campaign) return;
+  document.getElementById('set-name').value = _campaign.name || '';
+  document.getElementById('set-hours-start').value = _campaign.sending_hours_start || '09:00';
+  document.getElementById('set-hours-end').value = _campaign.sending_hours_end || '17:00';
+  document.getElementById('set-wait').value = _campaign.wait_minutes_between ?? 5;
+  document.getElementById('set-stop-reply').checked = !!_campaign.stop_on_reply;
+  document.getElementById('settings-message').innerHTML = '';
+
+  // Sending days checkboxes
+  const days = new Set(_campaign.sending_days || []);
+  document.querySelectorAll('input[name="set-day"]').forEach(cb => {
+    cb.checked = days.has(parseInt(cb.value, 10));
+  });
+
+  // Inbox checkboxes
+  const container = document.getElementById('set-inboxes');
+  const selectedIds = new Set(_campaign.inbox_ids || []);
+  container.innerHTML = '';
+  _allInboxes.forEach(i => {
+    const label = document.createElement('label');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.name = 'set-inbox';
+    cb.value = i.id;
+    cb.checked = selectedIds.has(i.id);
+    label.appendChild(cb);
+    label.appendChild(document.createTextNode(' ' + i.email + (i.display_name ? ' (' + i.display_name + ')' : '') + ' — max ' + i.max_emails_per_day + '/day'));
+    container.appendChild(label);
+  });
+
+  document.getElementById('settings-modal').classList.add('open');
+}
+
+function closeSettingsModal() {
+  document.getElementById('settings-modal').classList.remove('open');
+}
+
+document.getElementById('settings-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeSettingsModal();
+});
+
+document.getElementById('settings-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const msg = document.getElementById('settings-message');
+  const inboxIds = Array.from(document.querySelectorAll('input[name="set-inbox"]:checked')).map(c => parseInt(c.value, 10));
+  if (!inboxIds.length) {
+    msg.innerHTML = '<span style="color:var(--danger)">Select at least one inbox.</span>';
+    return;
+  }
+  const sendingDays = Array.from(document.querySelectorAll('input[name="set-day"]:checked')).map(c => parseInt(c.value, 10)).sort((a, b) => a - b);
+  const payload = {
+    name: document.getElementById('set-name').value.trim(),
+    inbox_ids: inboxIds,
+    sending_days: sendingDays.length ? sendingDays : [0, 1, 2, 3, 4],
+    sending_hours_start: document.getElementById('set-hours-start').value.trim() || '09:00',
+    sending_hours_end: document.getElementById('set-hours-end').value.trim() || '17:00',
+    wait_minutes_between: parseInt(document.getElementById('set-wait').value, 10) || 5,
+    stop_on_reply: document.getElementById('set-stop-reply').checked,
+  };
+  if (!payload.name) {
+    msg.innerHTML = '<span style="color:var(--danger)">Name is required.</span>';
+    return;
+  }
+  msg.innerHTML = '';
+  const res = await fetch('/api/campaigns/' + campaignId, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    closeSettingsModal();
+    loadAll();
+  } else {
+    const t = await res.text();
+    msg.innerHTML = '<span style="color:var(--danger)">' + escapeHtml(t) + '</span>';
+  }
+});
+
+/* ---- Safe fetch helper: returns fallback on error ---- */
+async function safeFetch(url, fallback) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return fallback;
+    return await r.json();
+  } catch { return fallback; }
+}
+
+/* ---- Keep data in memory for modal access ---- */
+let _sequences = [];
+let _campaign = null;
+let _allInboxes = [];
+
+function renderCampaign(campaign, inboxes) {
+  _campaign = campaign;
+  _allInboxes = inboxes;
+  const inboxIds = campaign.inbox_ids || [];
+  const inboxList = inboxIds.map(id => {
+    const i = inboxes.find(x => x.id === id);
+    return i ? (i.email + (i.max_emails_per_day ? ' (' + i.max_emails_per_day + '/day)' : '')) : 'id ' + id;
+  }).join(', ');
+  document.getElementById('campaign-name').textContent = campaign.name;
+  document.getElementById('campaign-meta').innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;">
+      <div>
+        <strong>Inboxes:</strong> ${escapeHtml(inboxList || 'None')}<br>
+        <strong>Sending days:</strong> ${(campaign.sending_days || []).map(d => ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).join(', ')}<br>
+        <strong>Hours:</strong> ${campaign.sending_hours_start}–${campaign.sending_hours_end}<br>
+        <strong>Wait between emails:</strong> ${campaign.wait_minutes_between} min &nbsp; <strong>Stop on reply:</strong> ${campaign.stop_on_reply ? 'Yes' : 'No'}
+      </div>
+      <button class="btn secondary" onclick="openSettingsModal()" style="flex-shrink:0;">Edit settings</button>
+    </div>
+  `;
+}
+
+function renderSequences(sequences) {
+  _sequences = sequences;
+  const seqEl = document.getElementById('sequences');
+  document.getElementById('seq-position').value = sequences.length;
+  if (!sequences.length) {
+    seqEl.innerHTML = '<p class="card">No sequences yet. Add one below.</p>';
+    return;
+  }
+  seqEl.innerHTML = '<table><thead><tr><th>#</th><th>Wait days</th><th>Subject</th><th>Body</th><th>Actions</th></tr></thead><tbody></tbody></table>';
+  const tbody = seqEl.querySelector('tbody');
+  sequences.forEach(s => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${s.position + 1}</td>
+      <td>${s.wait_days_after_previous} after previous</td>
+      <td>${escapeHtml(s.subject || '(reply in thread)')}</td>
+      <td style="max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(s.body?.slice(0,80) || '')}…</td>
+      <td>
+        <div class="seq-actions">
+          <button onclick="openSeqModal(${s.id}, true)">View</button>
+          <button onclick="openSeqModal(${s.id}, false)">Edit</button>
+          <button class="del" onclick="deleteSequence(${s.id})">Delete</button>
+        </div>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function renderLeads(leads) {
+  const leadsEl = document.getElementById('leads');
+  if (!leads.length) leadsEl.innerHTML = '<p class="card">No leads in this campaign. Add one below.</p>';
+  else {
+    leadsEl.innerHTML = '<table><thead><tr><th>Email</th><th>Name</th><th>Status</th><th>Stage</th><th>Enrolled</th><th></th></tr></thead><tbody></tbody></table>';
+    const tbody = leadsEl.querySelector('tbody');
+    leads.forEach(l => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mono"><a href="#" onclick="filterQueueByLead('${escapeHtml(l.email)}'); return false;">${escapeHtml(l.email)}</a></td>
+        <td>${escapeHtml(l.name)}</td>
+        <td><span class="badge ${l.status}">${l.status}</span></td>
+        <td>${escapeHtml(l.stage || '—')}</td>
+        <td>${new Date(l.enrolled_at).toLocaleDateString()}</td>
+        <td style="display:flex;gap:0.4rem;">
+          <a href="/leads/add?lead=${l.lead_id}" class="btn secondary">Edit</a>
+          <button class="btn danger" onclick="removeLeadFromCampaign(${l.lead_id}, '${escapeHtml(l.email).replace(/'/g, "\\'")}')">Remove</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+}
+
+/* ---- Remove lead from campaign ---- */
+async function removeLeadFromCampaign(leadId, email) {
+  if (!confirm('Remove ' + email + ' from this campaign? Their pending queue slots will be deleted.')) return;
+  const res = await fetch('/api/campaigns/' + campaignId + '/leads/' + leadId, { method: 'DELETE' });
+  if (res.ok) {
+    loadAll();
+  } else {
+    const t = await res.text();
+    alert('Error removing lead: ' + t);
+  }
+}
+
+/* ---- Queue: state ---- */
+let _queueData = [];
+let _sentData = [];
+let _queueFilterLead = null;   // null = show all, string = lead email
+let _pastExpanded = false;
+
+function filterQueueByLead(email) {
+  _queueFilterLead = email;
+  _renderQueueView();
+  document.getElementById('queue').scrollIntoView({ behavior: 'smooth' });
+}
+
+function clearQueueFilter() {
+  _queueFilterLead = null;
+  _renderQueueView();
+}
+
+function togglePast() {
+  _pastExpanded = !_pastExpanded;
+  _renderQueueView();
+}
+
+async function recalculateQueue() {
+  const btn = document.getElementById('recalc-btn');
+  btn.disabled = true;
+  btn.textContent = 'Recalculating...';
+  try {
+    const res = await fetch('/api/campaigns/' + campaignId + '/recalculate-queue', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      btn.textContent = 'Done (' + data.slots + ' slots)';
+      // Reload queue + sent
+      const [queue, sent] = await Promise.all([
+        safeFetch('/api/campaigns/' + campaignId + '/queue', []),
+        safeFetch('/api/campaigns/' + campaignId + '/sent', []),
+      ]);
+      _queueData = queue;
+      _sentData = sent;
+      _renderQueueView();
+    } else {
+      const t = await res.text();
+      alert('Error recalculating: ' + t);
+    }
+  } finally {
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Recalculate queue'; }, 1500);
+  }
+}
+
+/* Compute estimated send time for an upcoming slot based on campaign settings */
+function estimatedTime(positionInDay) {
+  if (!_campaign) return '';
+  const start = _campaign.sending_hours_start || '09:00';
+  const parts = start.split(':');
+  let h = parseInt(parts[0], 10) || 9;
+  let m = parseInt(parts[1], 10) || 0;
+  const waitMin = _campaign.wait_minutes_between || 5;
+  const offset = (positionInDay - 1) * waitMin;
+  m += offset;
+  h += Math.floor(m / 60);
+  m = m % 60;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+
+/* Format a sent_at ISO string to HH:MM */
+function formatSentTime(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+}
+
+function _renderQueueView() {
+  const queueEl = document.getElementById('queue');
+  const toolbar = document.getElementById('queue-toolbar');
+  const filterInfo = document.getElementById('queue-filter-info');
+  toolbar.style.display = 'flex';
+
+  // Filter
+  const filter = _queueFilterLead;
+  if (filter) {
+    filterInfo.innerHTML = '<span class="filter-label">Showing: ' + escapeHtml(filter) + '</span> <button class="btn secondary" onclick="clearQueueFilter()" style="padding:0.2rem 0.6rem;font-size:0.8rem;">Show all</button>';
+  } else {
+    filterInfo.innerHTML = '';
+  }
+
+  const sent = filter ? _sentData.filter(s => s.lead_email === filter) : _sentData;
+  const upcoming = filter ? _queueData.filter(q => q.lead_email === filter) : _queueData;
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (!sent.length && !upcoming.length) {
+    queueEl.innerHTML = '<p>No emails sent or scheduled.</p>';
+    return;
+  }
+
+  let html = '';
+
+  // --- Past (sent) section ---
+  if (sent.length) {
+    const arrowCls = _pastExpanded ? 'arrow open' : 'arrow';
+    html += `<div class="queue-section-header" onclick="togglePast()"><span class="${arrowCls}">&#9654;</span> Sent (${sent.length} email${sent.length !== 1 ? 's' : ''})</div>`;
+    if (_pastExpanded) {
+      const byDate = {};
+      sent.forEach(s => {
+        const d = s.sent_date || 'unknown';
+        if (!byDate[d]) byDate[d] = [];
+        byDate[d].push(s);
+      });
+      const dates = Object.keys(byDate).sort();
+      html += '<table><thead><tr><th>Date</th><th>Time</th><th>Lead</th><th>Sequence</th><th>Subject</th></tr></thead><tbody>';
+      dates.forEach(d => {
+        byDate[d].forEach((s, i) => {
+          const time = formatSentTime(s.sent_at);
+          html += `<tr class="sent-row${!filter ? ' lead-clickable' : ''}"${!filter ? ' onclick="filterQueueByLead(\'' + escapeHtml(s.lead_email).replace(/'/g, "\\'") + '\')"' : ''}>`;
+          html += `<td>${i === 0 ? escapeHtml(d) : ''}</td>`;
+          html += `<td>${time}</td>`;
+          html += `<td class="mono">${escapeHtml(s.lead_email)}</td>`;
+          html += `<td>Seq ${s.sequence_index + 1}</td>`;
+          html += `<td>${escapeHtml(s.subject || '')}</td>`;
+          html += '</tr>';
+        });
+      });
+      html += '</tbody></table>';
+    }
+  }
+
+  // --- Upcoming section ---
+  if (upcoming.length) {
+    html += `<div style="color:var(--muted);font-size:0.9rem;font-weight:600;padding:0.5rem 0;">Upcoming (${upcoming.length} scheduled)</div>`;
+    const byDate = {};
+    upcoming.forEach(q => {
+      const d = (q.scheduled_date && q.scheduled_date.includes('T')) ? q.scheduled_date.slice(0, 10) : q.scheduled_date;
+      if (!byDate[d]) byDate[d] = [];
+      byDate[d].push(q);
+    });
+    const dates = Object.keys(byDate).sort();
+    html += '<table><thead><tr><th>Date</th><th>Est. time</th><th>#</th><th>From (inbox)</th><th>Lead</th><th>Sequence</th></tr></thead><tbody>';
+    dates.forEach(d => {
+      byDate[d].sort((a, b) => (a.scheduled_date || '').localeCompare(b.scheduled_date || '') || a.position_in_day - b.position_in_day).forEach((q, i) => {
+        const isPast = d < today;
+        const time = (q.scheduled_date && q.scheduled_date.includes('T')) ? formatSentTime(q.scheduled_date) : estimatedTime(q.position_in_day);
+        html += `<tr class="${isPast ? 'sent-row' : ''}${!filter ? ' lead-clickable' : ''}"${!filter ? ' onclick="filterQueueByLead(\'' + escapeHtml(q.lead_email).replace(/'/g, "\\'") + '\')"' : ''}>`;
+        html += `<td>${i === 0 ? d : ''}</td>`;
+        html += `<td>${time}</td>`;
+        html += `<td>${q.position_in_day}</td>`;
+        html += `<td class="mono">${escapeHtml(q.inbox_email || '')}</td>`;
+        html += `<td class="mono">${escapeHtml(q.lead_email)}</td>`;
+        html += `<td>Seq ${q.sequence_index + 1}</td>`;
+        html += '</tr>';
+      });
+    });
+    html += '</tbody></table>';
+  } else if (!sent.length) {
+    html += '<p>No scheduled emails in queue.</p>';
+  }
+
+  queueEl.innerHTML = html;
+}
+
+/* ---- Load all data (each section independent) ---- */
+async function loadAll() {
+  const [campaign, sequences, leads, queue, sent, inboxes, allLeads] = await Promise.all([
+    safeFetch('/api/campaigns/' + campaignId, null),
+    safeFetch('/api/campaigns/' + campaignId + '/sequences', []),
+    safeFetch('/api/campaigns/' + campaignId + '/leads', []),
+    safeFetch('/api/campaigns/' + campaignId + '/queue', []),
+    safeFetch('/api/campaigns/' + campaignId + '/sent', []),
+    safeFetch('/api/inboxes', []),
+    safeFetch('/api/leads', []),
+  ]);
+  if (campaign) {
+    renderCampaign(campaign, inboxes);
+  } else {
+    document.getElementById('campaign-name').textContent = 'Error loading campaign';
+  }
+  renderSequences(sequences);
+  renderLeads(leads);
+  _queueData = queue;
+  _sentData = sent;
+  // Debug: queue and sent data in console
+  console.log('[Campaign Queue Debug] queue (upcoming):', JSON.parse(JSON.stringify(queue)));
+  console.log('[Campaign Queue Debug] sent (history):', JSON.parse(JSON.stringify(sent)));
+  _renderQueueView();
+
+  const sel = document.getElementById('assign-lead-select');
+  sel.innerHTML = '<option value="">— Select lead —</option>';
+  const enrolledIds = new Set(leads.map(l => l.lead_id));
+  allLeads.filter(l => !enrolledIds.has(l.id)).forEach(l => {
+    const opt = document.createElement('option');
+    opt.value = l.id;
+    opt.textContent = l.email + (l.name ? ' (' + l.name + ')' : '');
+    sel.appendChild(opt);
+  });
+}
+
+loadAll();
+
+/* ---- Reload just sequences ---- */
+async function reloadSequences() {
+  const sequences = await safeFetch('/api/campaigns/' + campaignId + '/sequences', []);
+  renderSequences(sequences);
+}
+
+/* ---- Sequence modal ---- */
+function openSeqModal(seqId, viewOnly) {
+  const seq = _sequences.find(s => s.id === seqId);
+  if (!seq) return;
+  document.getElementById('seq-edit-id').value = seq.id;
+  document.getElementById('seq-edit-subject').value = seq.subject || '';
+  document.getElementById('seq-edit-body').value = seq.body || '';
+  document.getElementById('seq-edit-wait').value = seq.wait_days_after_previous;
+  document.getElementById('seq-edit-message').innerHTML = '';
+
+  const isView = !!viewOnly;
+  document.getElementById('seq-modal-title').textContent = isView ? ('Sequence ' + (seq.position + 1)) : ('Edit Sequence ' + (seq.position + 1));
+  document.getElementById('seq-edit-subject').readOnly = isView;
+  document.getElementById('seq-edit-body').readOnly = isView;
+  document.getElementById('seq-edit-wait').readOnly = isView;
+  document.getElementById('seq-edit-save').style.display = isView ? 'none' : '';
+  document.getElementById('seq-modal-cancel').textContent = isView ? 'Close' : 'Cancel';
+
+  document.getElementById('seq-modal').classList.add('open');
+}
+
+function closeSeqModal() {
+  document.getElementById('seq-modal').classList.remove('open');
+}
+
+document.getElementById('seq-modal-close').addEventListener('click', closeSeqModal);
+document.getElementById('seq-modal-cancel').addEventListener('click', closeSeqModal);
+document.getElementById('seq-modal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeSeqModal();
+});
+
+/* ---- Edit sequence ---- */
+document.getElementById('seq-edit-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const seqId = document.getElementById('seq-edit-id').value;
+  const msg = document.getElementById('seq-edit-message');
+  const payload = {
+    subject: document.getElementById('seq-edit-subject').value.trim() || null,
+    body: document.getElementById('seq-edit-body').value.trim(),
+    wait_days_after_previous: parseInt(document.getElementById('seq-edit-wait').value, 10) || 0,
+  };
+  if (!payload.body) { msg.innerHTML = '<span style="color:var(--danger)">Body is required.</span>'; return; }
+  msg.innerHTML = '';
+  const res = await fetch('/api/campaigns/' + campaignId + '/sequences/' + seqId, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    closeSeqModal();
+    await reloadSequences();
+  } else {
+    const t = await res.text();
+    msg.innerHTML = '<span style="color:var(--danger)">' + escapeHtml(t) + '</span>';
+  }
+});
+
+/* ---- Delete sequence ---- */
+async function deleteSequence(seqId) {
+  const seq = _sequences.find(s => s.id === seqId);
+  if (!seq) return;
+  if (!confirm('Delete sequence ' + (seq.position + 1) + '? This cannot be undone.')) return;
+  const res = await fetch('/api/campaigns/' + campaignId + '/sequences/' + seqId, { method: 'DELETE' });
+  if (res.ok) {
+    await reloadSequences();
+  } else {
+    const t = await res.text();
+    alert('Error deleting sequence: ' + t);
+  }
+}
+
+/* ---- Add sequence ---- */
+document.getElementById('add-sequence-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const msg = document.getElementById('sequence-message');
+  const position = parseInt(form.querySelector('#seq-position').value, 10);
+  const body = {
+    position,
+    subject: form.subject.value.trim() || null,
+    body: form.body.value.trim(),
+    wait_days_after_previous: parseInt(form.wait_days_after_previous.value, 10) || 0,
+  };
+  msg.innerHTML = '';
+  const res = await fetch('/api/campaigns/' + campaignId + '/sequences', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (res.ok) {
+    msg.innerHTML = '<span style="color:var(--success)">Sequence added.</span>';
+    form.body.value = '';
+    form.subject.value = '';
+    form.wait_days_after_previous.value = '0';
+    await reloadSequences();
+  } else {
+    const t = await res.text();
+    msg.innerHTML = '<span style="color:var(--danger)">' + escapeHtml(t) + '</span>';
+  }
+});
+
+/* ---- Assign lead ---- */
+document.getElementById('assign-lead-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const leadId = document.getElementById('assign-lead-select').value;
+  if (!leadId) return;
+  const msg = document.getElementById('assign-message');
+  msg.innerHTML = '';
+  const res = await fetch('/api/campaigns/' + campaignId + '/leads/' + leadId, { method: 'POST' });
+  let errMsg = 'Error';
+  if (!res.ok) {
+    try {
+      const data = await res.json();
+      errMsg = typeof data.detail === 'string' ? data.detail : JSON.stringify(data.detail || data);
+    } catch (_) {
+      errMsg = await res.text() || 'Error';
+    }
+    msg.innerHTML = '<span style="color:var(--danger)">' + escapeHtml(errMsg) + '</span>';
+    return;
+  }
+  msg.innerHTML = '<span style="color:var(--success)">Lead assigned.</span>';
+  loadAll();
+});
+</script>
+{% endblock %}

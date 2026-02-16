@@ -1,0 +1,14 @@
+# Environment and secrets
+.env
+
+# Database
+*.db
+
+# Logs
+logs/
+
+# Python
+__pycache__/
+.venv/
+venv/
+*.pyc

@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Add Lead{% endblock %}
+{% block content %}
+<h1 id="page-title">Add Lead</h1>
+<p id="page-desc" style="color: var(--muted); margin-bottom: 1rem;">Add a lead with email, name, and optional custom fields. Optionally assign to a campaign.</p>
+<form id="add-lead-form" class="card" style="max-width: 480px;">
+  <input type="hidden" id="lead-id" name="lead_id" value="">
+  <div class="form-group">
+    <label>Email *</label>
+    <input type="email" name="email" required placeholder="lead@example.com">
+  </div>
+  <div class="form-group">
+    <label>Name</label>
+    <input type="text" name="name" placeholder="Jane Doe">
+  </div>
+  <div class="form-group">
+    <label>Custom fields (JSON, e.g. {"company": "Acme", "title": "CEO"})</label>
+    <textarea name="custom_data" rows="3" placeholder='{"company": "", "title": ""}'></textarea>
+  </div>
+  <div class="form-group" id="status-group" style="display: none;">
+    <label>Status</label>
+    <select name="status">
+      <option value="active">active</option>
+      <option value="unsubscribed">unsubscribed</option>
+      <option value="bounced">bounced</option>
+      <option value="replied">replied</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label>Assign to campaign (optional)</label>
+    <select name="campaign_id">
+      <option value="">— None —</option>
+    </select>
+  </div>
+  <button type="submit" class="btn" id="submit-btn">Add lead</button>
+</form>
+<div id="message" style="margin-top:1rem;"></div>
+{% endblock %}
+{% block extra_js %}
+<script>
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+(function() {
+  const form = document.getElementById('add-lead-form');
+  const params = new URLSearchParams(window.location.search);
+  const leadId = params.get('lead');
+
+  Promise.all([
+    fetch('/api/campaigns').then(r => r.json()),
+    leadId ? fetch('/api/leads/' + leadId).then(r => r.ok ? r.json() : null) : Promise.resolve(null),
+  ]).then(function([campaigns, lead]) {
+    const sel = form.querySelector('select[name="campaign_id"]');
+    campaigns.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      sel.appendChild(opt);
+    });
+
+    if (lead) {
+      document.getElementById('page-title').textContent = 'Edit Lead';
+      document.getElementById('page-desc').textContent = 'Update lead details and optionally assign to another campaign.';
+      document.getElementById('submit-btn').textContent = 'Save changes';
+      document.getElementById('lead-id').value = lead.id;
+      form.email.value = lead.email || '';
+      form.email.readOnly = true;
+      form.name.value = lead.name || '';
+      form.custom_data.value = lead.custom_data && Object.keys(lead.custom_data).length
+        ? JSON.stringify(lead.custom_data, null, 2)
+        : '';
+      form.status.value = lead.status || 'active';
+      document.getElementById('status-group').style.display = 'block';
+    }
+  }).catch(function() {});
+})();
+
+document.getElementById('add-lead-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const form = e.target;
+  const leadId = form.querySelector('#lead-id').value;
+  const isEdit = !!leadId;
+  let custom_data = {};
+  try {
+    const raw = form.custom_data.value.trim();
+    if (raw) custom_data = JSON.parse(raw);
+  } catch (err) {
+    document.getElementById('message').innerHTML = '<span style="color:var(--danger)">Invalid JSON in custom fields.</span>';
+    return;
+  }
+  const msg = document.getElementById('message');
+  msg.innerHTML = '';
+
+  if (isEdit) {
+    const res = await fetch('/api/leads/' + leadId, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: form.name.value.trim(),
+        custom_data,
+        status: form.status ? form.status.value : undefined,
+      }),
+    });
+    if (res.ok) {
+      msg.innerHTML = '<span style="color:var(--success)">Lead updated. <a href="/leads">View leads</a></span>';
+    } else {
+      const t = await res.text();
+      msg.innerHTML = '<span style="color:var(--danger)">Error: ' + escapeHtml(t) + '</span>';
+      return;
+    }
+    const campaignId = form.campaign_id.value;
+    if (campaignId) {
+      const addRes = await fetch('/api/campaigns/' + campaignId + '/leads/' + leadId, { method: 'POST' });
+      if (addRes.ok) {
+        msg.innerHTML = '<span style="color:var(--success)">Lead updated and assigned to campaign. <a href="/leads">View leads</a></span>';
+      }
+    }
+  } else {
+    const body = {
+      email: form.email.value.trim(),
+      name: form.name.value.trim(),
+      custom_data,
+      campaign_id: form.campaign_id.value ? parseInt(form.campaign_id.value, 10) : null,
+    };
+    const res = await fetch('/api/leads', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) {
+      const lead = await res.json();
+      msg.innerHTML = '<span style="color:var(--success)">Lead added (id ' + lead.id + '). <a href="/leads">View leads</a></span>';
+      form.reset();
+      form.querySelector('#lead-id').value = '';
+    } else {
+      const t = await res.text();
+      msg.innerHTML = '<span style="color:var(--danger)">Error: ' + escapeHtml(t) + '</span>';
+    }
+  }
+});
+</script>
+{% endblock %}

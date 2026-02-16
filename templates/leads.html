@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Leads{% endblock %}
+{% block content %}
+<h1>Leads</h1>
+<p style="color: var(--muted); margin-bottom: 1rem;">All leads, status, and campaigns.</p>
+<div id="lead-list"></div>
+{% endblock %}
+{% block extra_js %}
+<script>
+(async function() {
+  const res = await fetch('/api/leads');
+  const leads = await res.json();
+  const listEl = document.getElementById('lead-list');
+  if (!leads.length) {
+    listEl.innerHTML = '<p class="card">No leads yet. <a href="/leads/add">Add a lead</a>.</p>';
+    return;
+  }
+  listEl.innerHTML = '<table><thead><tr><th>Email</th><th>Name</th><th>Status</th><th>Custom</th><th></th></tr></thead><tbody></tbody></table>';
+  const tbody = listEl.querySelector('tbody');
+  leads.forEach(l => {
+    const tr = document.createElement('tr');
+    tr.dataset.leadId = l.id;
+    const custom = l.custom_data && Object.keys(l.custom_data).length ? JSON.stringify(l.custom_data) : '—';
+    tr.innerHTML = `
+      <td class="mono">${escapeHtml(l.email)}</td>
+      <td>${escapeHtml(l.name)}</td>
+      <td><span class="badge ${l.status}">${l.status}</span></td>
+      <td style="font-size:0.85rem;color:var(--muted)">${escapeHtml(custom)}</td>
+      <td>
+        <a href="/leads/add?lead=${l.id}" class="btn secondary">View / Edit</a>
+        <button type="button" class="btn danger btn-delete-lead" data-lead-id="${l.id}" data-email="${escapeHtml(l.email)}" style="margin-left:0.5rem;">Delete</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+  tbody.querySelectorAll('.btn-delete-lead').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      const leadId = this.dataset.leadId;
+      const email = this.dataset.email;
+      if (!confirm('Delete lead ' + email + '? This cannot be undone.')) return;
+      fetch('/api/leads/' + leadId, { method: 'DELETE' }).then(function(r) {
+        if (r.ok) {
+          const row = listEl.querySelector('tr[data-lead-id="' + leadId + '"]');
+          if (row) row.remove();
+          if (tbody.rows.length === 0)
+            listEl.innerHTML = '<p class="card">No leads yet. <a href="/leads/add">Add a lead</a>.</p>';
+        } else {
+          r.json().then(function(d) { alert('Failed: ' + (d.detail || 'Unknown error')); }).catch(function() { alert('Failed to delete lead.'); });
+        }
+      }).catch(function() { alert('Failed to delete lead.'); });
+    });
+  });
+})();
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+</script>
+{% endblock %}

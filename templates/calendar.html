@@ -1,0 +1,336 @@
+{% extends "base.html" %}
+{% block title %}Calendar{% endblock %}
+{% block extra_css %}
+.stats-row { display: flex; gap: 1.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+.stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0.75rem 1.25rem; min-width: 140px; }
+.stat-card .num { font-size: 1.5rem; font-weight: 700; color: var(--accent); }
+.stat-card .lbl { font-size: 0.8rem; color: var(--muted); }
+
+.cal-toolbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 1rem; }
+.cal-toolbar select, .cal-toolbar input { max-width: 220px; padding: 0.4rem 0.6rem; font-size: 0.85rem; }
+
+.section-hdr {
+  cursor: pointer; user-select: none; color: var(--muted); font-size: 0.95rem; font-weight: 600;
+  padding: 0.6rem 0; display: flex; align-items: center; gap: 0.5rem;
+}
+.section-hdr:hover { color: var(--text); }
+.section-hdr .arrow { transition: transform 0.15s; display: inline-block; }
+.section-hdr .arrow.open { transform: rotate(90deg); }
+
+.date-hdr { color: var(--accent); font-weight: 600; font-size: 0.9rem; padding: 0.5rem 0 0.25rem; border-bottom: 1px solid var(--border); margin-top: 0.75rem; }
+
+.email-row {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid rgba(42,42,48,0.5);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  font-size: 0.88rem;
+  transition: background 0.1s;
+}
+.email-row:hover { background: rgba(34,211,238,0.04); }
+.email-row.expanded { background: rgba(34,211,238,0.06); }
+
+.email-row .time-col { width: 56px; flex-shrink: 0; color: var(--muted); font-family: 'JetBrains Mono', monospace; }
+.email-row .status-col { width: 76px; flex-shrink: 0; }
+.email-row .lead-col { width: 180px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
+.email-row .subj-col { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.email-row .camp-col { width: 140px; flex-shrink: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.email-row .inbox-col { width: 160px; flex-shrink: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; }
+
+.badge-status {
+  display: inline-block; padding: 0.15rem 0.45rem; border-radius: 4px;
+  font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+}
+.badge-status.sent { background: rgba(52,211,153,0.15); color: var(--success); }
+.badge-status.scheduled { background: rgba(34,211,238,0.15); color: var(--accent); }
+.badge-status.failed { background: rgba(244,63,94,0.15); color: var(--danger); }
+
+/* Detail panel */
+.detail-panel {
+  display: none;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 0.25rem 0 0.5rem;
+  padding: 1rem 1.25rem;
+  font-size: 0.85rem;
+  line-height: 1.7;
+}
+.detail-panel.open { display: block; }
+.detail-panel .dp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.25rem 2rem; }
+.detail-panel .dp-label { color: var(--muted); font-weight: 500; }
+.detail-panel .dp-val { color: var(--text); word-break: break-all; }
+.detail-panel .dp-full { grid-column: 1 / -1; }
+.detail-panel .body-preview {
+  background: var(--surface); padding: 0.75rem; border-radius: 6px; margin-top: 0.25rem;
+  max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  font-family: 'JetBrains Mono', monospace; font-size: 0.82rem;
+}
+{% endblock %}
+
+{% block content %}
+<h1>Calendar</h1>
+<p style="color:var(--muted);margin-bottom:1rem;">All emails across every campaign — sent and scheduled.</p>
+
+<div class="stats-row" id="stats-row">
+  <div class="stat-card"><div class="num" id="stat-sent">—</div><div class="lbl">Total sent</div></div>
+  <div class="stat-card"><div class="num" id="stat-sched">—</div><div class="lbl">Scheduled</div></div>
+  <div class="stat-card"><div class="num" id="stat-camps">—</div><div class="lbl">Campaigns</div></div>
+</div>
+
+<!-- Filters -->
+<div class="cal-toolbar">
+  <select id="filter-campaign"><option value="">All campaigns</option></select>
+  <select id="filter-status">
+    <option value="">All statuses</option>
+    <option value="sent">Sent</option>
+    <option value="scheduled">Scheduled</option>
+  </select>
+  <input type="text" id="filter-search" placeholder="Search lead, subject…" style="max-width:240px;">
+  <button class="btn secondary" onclick="clearFilters()" style="padding:0.35rem 0.7rem;font-size:0.85rem;">Clear</button>
+</div>
+
+<!-- Calendar body -->
+<div class="card" id="calendar-body" style="padding:0.5rem 1rem;">
+  <p style="color:var(--muted);padding:1rem 0;">Loading…</p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return d.toLocaleDateString() + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+}
+const DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+let _sent = [];
+let _scheduled = [];
+let _pastExpanded = false;
+let _expandedId = null; // currently expanded row id
+
+async function safeFetch(url, fallback) {
+  try { const r = await fetch(url); if (!r.ok) return fallback; return await r.json(); } catch { return fallback; }
+}
+
+async function loadData() {
+  const [sent, scheduled, stats] = await Promise.all([
+    safeFetch('/api/calendar/sent', []),
+    safeFetch('/api/calendar/scheduled', []),
+    safeFetch('/api/calendar/stats', {}),
+  ]);
+  _sent = sent;
+  _scheduled = scheduled;
+
+  document.getElementById('stat-sent').textContent = stats.total_sent ?? 0;
+  document.getElementById('stat-sched').textContent = stats.total_scheduled ?? 0;
+  document.getElementById('stat-camps').textContent = stats.total_campaigns ?? 0;
+
+  // Populate campaign filter
+  const campSet = new Map();
+  [...sent, ...scheduled].forEach(e => { if (e.campaign_id) campSet.set(e.campaign_id, e.campaign_name); });
+  const sel = document.getElementById('filter-campaign');
+  const curVal = sel.value;
+  sel.innerHTML = '<option value="">All campaigns</option>';
+  [...campSet.entries()].sort((a,b) => a[1].localeCompare(b[1])).forEach(([id, name]) => {
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = name;
+    sel.appendChild(opt);
+  });
+  sel.value = curVal;
+
+  render();
+}
+
+function getFilters() {
+  return {
+    campaign: document.getElementById('filter-campaign').value,
+    status: document.getElementById('filter-status').value,
+    search: document.getElementById('filter-search').value.toLowerCase().trim(),
+  };
+}
+
+function matchesFilter(item, f) {
+  if (f.campaign && String(item.campaign_id) !== f.campaign) return false;
+  if (f.status && item.type !== f.status) return false;
+  if (f.search) {
+    const hay = [item.lead_email, item.lead_name, item.subject, item.campaign_name, item.inbox_email || ''].join(' ').toLowerCase();
+    if (!hay.includes(f.search)) return false;
+  }
+  return true;
+}
+
+function clearFilters() {
+  document.getElementById('filter-campaign').value = '';
+  document.getElementById('filter-status').value = '';
+  document.getElementById('filter-search').value = '';
+  render();
+}
+
+function togglePast() { _pastExpanded = !_pastExpanded; render(); }
+function toggleRow(uid) { _expandedId = _expandedId === uid ? null : uid; render(); }
+
+function buildRow(item, uid) {
+  const isSent = item.type === 'sent';
+  const time = isSent ? fmtTime(item.sent_at) : fmtTime(item.scheduled_at);
+  const statusCls = isSent ? 'sent' : 'scheduled';
+  const statusLabel = isSent ? 'Sent' : 'Scheduled';
+  const subject = item.subject || '(no subject)';
+  const inboxLabel = item.inbox_email || '—';
+  const isExpanded = _expandedId === uid;
+
+  let html = `<div class="email-row${isExpanded ? ' expanded' : ''}" onclick="toggleRow('${uid}')">
+    <div class="time-col">${time}</div>
+    <div class="status-col"><span class="badge-status ${statusCls}">${statusLabel}</span></div>
+    <div class="lead-col" title="${escapeHtml(item.lead_email)}">${escapeHtml(item.lead_email)}</div>
+    <div class="subj-col" title="${escapeHtml(subject)}">${escapeHtml(subject)}</div>
+    <div class="camp-col" title="${escapeHtml(item.campaign_name)}">${escapeHtml(item.campaign_name)}</div>
+    <div class="inbox-col" title="${escapeHtml(inboxLabel)}">${escapeHtml(inboxLabel)}</div>
+  </div>`;
+
+  // Detail panel
+  html += `<div class="detail-panel${isExpanded ? ' open' : ''}" id="dp-${uid}">`;
+  html += '<div class="dp-grid">';
+
+  // Status
+  html += `<div><span class="dp-label">Status</span><br><span class="badge-status ${statusCls}" style="font-size:0.8rem;">${statusLabel}</span></div>`;
+
+  // Time
+  if (isSent) {
+    html += `<div><span class="dp-label">Sent at</span><br><span class="dp-val">${fmtDateTime(item.sent_at)}</span></div>`;
+  } else {
+    html += `<div><span class="dp-label">Scheduled for</span><br><span class="dp-val">${fmtDateTime(item.scheduled_at)}</span></div>`;
+  }
+
+  // Lead
+  html += `<div><span class="dp-label">Lead</span><br><span class="dp-val mono">${escapeHtml(item.lead_email)}</span>${item.lead_name ? ' (' + escapeHtml(item.lead_name) + ')' : ''}<br><span class="badge ${item.lead_status}">${item.lead_status}</span></div>`;
+
+  // Campaign
+  html += `<div><span class="dp-label">Campaign</span><br><span class="dp-val"><a href="/campaigns/${item.campaign_id}">${escapeHtml(item.campaign_name)}</a></span></div>`;
+
+  // Sequence
+  html += `<div><span class="dp-label">Sequence step</span><br><span class="dp-val">${item.sequence_index + 1}</span></div>`;
+  html += `<div><span class="dp-label">Wait after previous</span><br><span class="dp-val">${item.sequence_wait_days ?? 0} day(s)</span></div>`;
+
+  // Subject
+  html += `<div class="dp-full"><span class="dp-label">Subject</span><br><span class="dp-val">${escapeHtml(item.subject || '(reply in thread)')}</span></div>`;
+
+  // Inbox / provider
+  if (!isSent) {
+    html += `<div><span class="dp-label">Inbox</span><br><span class="dp-val mono">${escapeHtml(item.inbox_email || '—')}</span>${item.inbox_display_name ? ' (' + escapeHtml(item.inbox_display_name) + ')' : ''}</div>`;
+    html += `<div><span class="dp-label">Send method</span><br><span class="dp-val">${escapeHtml((item.inbox_provider || 'resend').toUpperCase())}</span></div>`;
+    html += `<div><span class="dp-label">Inbox max/day</span><br><span class="dp-val">${item.inbox_max_per_day ?? '—'}</span></div>`;
+    html += `<div><span class="dp-label">Position in day</span><br><span class="dp-val">#${item.position_in_day ?? '—'}</span></div>`;
+  }
+
+  // Message ID (sent only)
+  if (isSent && item.message_id) {
+    html += `<div class="dp-full"><span class="dp-label">Message ID</span><br><span class="dp-val mono" style="font-size:0.78rem;">${escapeHtml(item.message_id)}</span></div>`;
+  }
+
+  // Campaign settings
+  const days = (item.campaign_sending_days || []).map(d => DAY_NAMES[d] || d).join(', ');
+  html += `<div><span class="dp-label">Sending window</span><br><span class="dp-val">${escapeHtml(item.campaign_hours_start)} – ${escapeHtml(item.campaign_hours_end)}</span></div>`;
+  html += `<div><span class="dp-label">Sending days</span><br><span class="dp-val">${escapeHtml(days)}</span></div>`;
+  html += `<div><span class="dp-label">Wait between emails</span><br><span class="dp-val">${item.campaign_wait_minutes ?? 5} min</span></div>`;
+  html += `<div><span class="dp-label">Stop on reply</span><br><span class="dp-val">${item.campaign_stop_on_reply ? 'Yes' : 'No'}</span></div>`;
+
+  // Body preview
+  if (item.sequence_body) {
+    const isHtml = item.sequence_body.trim().toLowerCase().startsWith('<');
+    html += `<div class="dp-full"><span class="dp-label">Email body</span>`;
+    if (isHtml) {
+      html += `<div class="body-preview">${item.sequence_body}</div>`;
+    } else {
+      html += `<div class="body-preview">${escapeHtml(item.sequence_body)}</div>`;
+    }
+    html += `</div>`;
+  }
+
+  html += '</div></div>'; // close dp-grid and detail-panel
+  return html;
+}
+
+function render() {
+  const f = getFilters();
+  const el = document.getElementById('calendar-body');
+  const today = new Date().toISOString().slice(0,10);
+
+  // Split sent into past items
+  const sentFiltered = _sent.filter(i => matchesFilter(i, f));
+  // Scheduled (upcoming)
+  const schedFiltered = _scheduled.filter(i => matchesFilter(i, f));
+
+  if (!sentFiltered.length && !schedFiltered.length) {
+    el.innerHTML = '<p style="color:var(--muted);padding:1rem 0;">No emails match your filters.</p>';
+    return;
+  }
+
+  let html = '';
+
+  // ─── Sent (past) section — collapsed by default ───
+  if (sentFiltered.length) {
+    const arrowCls = _pastExpanded ? 'arrow open' : 'arrow';
+    html += `<div class="section-hdr" onclick="togglePast()"><span class="${arrowCls}">&#9654;</span> Sent (${sentFiltered.length} email${sentFiltered.length !== 1 ? 's' : ''})</div>`;
+
+    if (_pastExpanded) {
+      // Group by date
+      const byDate = {};
+      sentFiltered.forEach(s => {
+        const d = s.sent_date || 'unknown';
+        if (!byDate[d]) byDate[d] = [];
+        byDate[d].push(s);
+      });
+      const dates = Object.keys(byDate).sort().reverse(); // newest first
+      dates.forEach(d => {
+        html += `<div class="date-hdr">${d}</div>`;
+        byDate[d].forEach(item => {
+          const uid = 'sent-' + item.log_id;
+          html += buildRow(item, uid);
+        });
+      });
+    }
+  }
+
+  // ─── Scheduled (upcoming) section — expanded ───
+  if (schedFiltered.length) {
+    html += `<div class="section-hdr" style="cursor:default;"><span class="arrow open">&#9654;</span> Scheduled (${schedFiltered.length} email${schedFiltered.length !== 1 ? 's' : ''})</div>`;
+
+    const byDate = {};
+    schedFiltered.forEach(s => {
+      const d = s.scheduled_date || 'unknown';
+      if (!byDate[d]) byDate[d] = [];
+      byDate[d].push(s);
+    });
+    const dates = Object.keys(byDate).sort(); // chronological
+    dates.forEach(d => {
+      const isToday = d === today;
+      html += `<div class="date-hdr">${d}${isToday ? ' <span style="color:var(--success);font-weight:400;font-size:0.8rem;margin-left:0.5rem;">today</span>' : ''}</div>`;
+      byDate[d].sort((a,b) => (a.scheduled_at || '').localeCompare(b.scheduled_at || '') || a.position_in_day - b.position_in_day).forEach(item => {
+        const uid = 'sched-' + item.slot_id;
+        html += buildRow(item, uid);
+      });
+    });
+  }
+
+  el.innerHTML = html;
+}
+
+// Wire up filter changes
+document.getElementById('filter-campaign').addEventListener('change', render);
+document.getElementById('filter-status').addEventListener('change', render);
+document.getElementById('filter-search').addEventListener('input', render);
+
+loadData();
+</script>
+{% endblock %}

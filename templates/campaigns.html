@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Campaigns{% endblock %}
+{% block content %}
+<h1>Campaigns</h1>
+<p style="color: var(--muted); margin-bottom: 1rem;">Create and manage email sequences and settings.</p>
+<div id="campaign-list"></div>
+<p style="margin-top: 1rem;"><a href="/campaigns/add" id="create-campaign-btn" class="btn">Create campaign</a></p>
+{% endblock %}
+{% block extra_js %}
+<script>
+(function() {
+  function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+  const listEl = document.getElementById('campaign-list');
+
+  async function load() {
+    const [campaignsRes, inboxesRes] = await Promise.all([
+      fetch('/api/campaigns'),
+      fetch('/api/inboxes'),
+    ]);
+    const campaigns = await campaignsRes.json();
+    const inboxes = await inboxesRes.json();
+    const inboxMap = Object.fromEntries(inboxes.map(i => [i.id, i.email]));
+
+    if (!campaigns.length) {
+      listEl.innerHTML = '<div class="card"><p style="margin:0;">No campaigns yet. Click <strong>Create campaign</strong> below to add one.</p></div>';
+      return;
+    }
+    listEl.innerHTML = '<table><thead><tr><th>Name</th><th>Inboxes</th><th>Sending</th><th></th></tr></thead><tbody></tbody></table>';
+    const tbody = listEl.querySelector('tbody');
+    campaigns.forEach(c => {
+      const tr = document.createElement('tr');
+      const ids = c.inbox_ids || [];
+      const inboxLabel = ids.length === 0 ? '—' : ids.length === 1 ? (inboxMap[ids[0]] || 'id ' + ids[0]) : ids.length + ' inboxes';
+      const days = (c.sending_days || []).length;
+      tr.innerHTML = `
+        <td><a href="/campaigns/${c.id}">${escapeHtml(c.name)}</a></td>
+        <td class="mono">${escapeHtml(inboxLabel)}</td>
+        <td>${days} days, ${c.sending_hours_start || '09:00'}–${c.sending_hours_end || '17:00'}</td>
+        <td style="display:flex;gap:0.4rem;">
+          <a href="/campaigns/${c.id}" class="btn secondary">View</a>
+          <button class="btn danger" onclick="deleteCampaign(${c.id}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">Delete</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  window.deleteCampaign = async function(id, name) {
+    if (!confirm('Delete campaign "' + name + '"? This will remove all sequences, enrolled leads, and queue slots. This cannot be undone.')) return;
+    const res = await fetch('/api/campaigns/' + id, { method: 'DELETE' });
+    if (res.ok) {
+      load();
+    } else {
+      const t = await res.text();
+      alert('Error deleting campaign: ' + t);
+    }
+  };
+
+  load().catch(function() {
+    listEl.innerHTML = '<div class="card"><p style="margin:0; color: var(--danger);">Failed to load campaigns.</p></div>';
+  });
+})();
+</script>
+{% endblock %}

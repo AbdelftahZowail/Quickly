@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Campaign Engine{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #18181c;
+      --border: #2a2a30;
+      --text: #e4e4e7;
+      --muted: #71717a;
+      --accent: #22d3ee;
+      --accent-dim: #0891b2;
+      --danger: #f43f5e;
+      --success: #34d399;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'DM Sans', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 1.5rem;
+    }
+    nav {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 0.75rem 1.5rem;
+      margin-bottom: 2rem;
+    }
+    nav a {
+      color: var(--muted);
+      text-decoration: none;
+      margin-right: 1.5rem;
+      font-weight: 500;
+    }
+    nav a:hover { color: var(--accent); }
+    h1 { font-size: 1.5rem; font-weight: 700; margin: 0 0 1rem 0; }
+    h2 { font-size: 1.15rem; font-weight: 600; margin: 1.5rem 0 0.75rem 0; color: var(--muted); }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 0.6rem 0.75rem; text-align: left; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; font-size: 0.85rem; }
+    a { color: var(--accent); }
+    a:hover { text-decoration: underline; }
+    .btn {
+      display: inline-block;
+      padding: 0.5rem 1rem;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      border-radius: 6px;
+      font-family: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      font-size: 0.9rem;
+    }
+    .btn:hover { background: var(--accent-dim); color: white; }
+    .btn.secondary {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn.secondary:hover { border-color: var(--accent); color: var(--accent); }
+    .btn.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+    .btn.danger:hover { background: rgba(244, 63, 94, 0.15); }
+    input, select, textarea {
+      font-family: inherit;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface);
+      color: var(--text);
+      width: 100%;
+      max-width: 400px;
+    }
+    label { display: block; margin-bottom: 0.25rem; color: var(--muted); font-size: 0.9rem; }
+    .form-group { margin-bottom: 1rem; }
+    .badge {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.8rem;
+      font-weight: 500;
+    }
+    .badge.active { background: rgba(52, 211, 153, 0.2); color: var(--success); }
+    .badge.unsubscribed { background: rgba(113, 113, 122, 0.3); color: var(--muted); }
+    .badge.bounced { background: rgba(244, 63, 94, 0.2); color: var(--danger); }
+    .badge.replied { background: rgba(34, 211, 238, 0.2); color: var(--accent); }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.25rem;
+      margin-bottom: 1rem;
+    }
+    .mono { font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; }
+    {% block extra_css %}{% endblock %}
+  </style>
+</head>
+<body>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/campaigns">Campaigns</a>
+    <a href="/inboxes">Inboxes</a>
+    <a href="/leads">Leads</a>
+    <a href="/leads/add">Add Lead</a>
+    <a href="/accounts">Accounts</a>
+    <a href="/permissions">Permissions</a>
+    <a href="/calendar">Calendar</a>
+    <a href="/approvals" id="nav-approvals" style="display:none;">Approvals</a>
+  </nav>
+  <div id="test-mode-banner" class="card" style="display: none; margin: 0 1.5rem 1rem; background: rgba(244, 63, 94, 0.1); border-color: var(--danger);"></div>
+  <div class="wrap">
+    {% block content %}{% endblock %}
+  </div>
+  <script>
+  (function() {
+    fetch('/api/test/status').then(function(r) { return r.json(); }).then(function(data) {
+      if (!data.test_mode) return;
+      // Show the Approvals nav link when test mode is on
+      var navLink = document.getElementById('nav-approvals');
+      if (navLink) navLink.style.display = '';
+      fetch('/api/test/pending').then(function(r) { return r.json(); }).then(function(pending) {
+        if (pending.length) {
+          var el = document.getElementById('test-mode-banner');
+          el.style.display = 'block';
+          el.innerHTML = '<strong>Test mode</strong>: ' + pending.length + ' email(s) pending approval. <a href="/approvals" style="color:var(--accent);font-weight:600;">Review &amp; approve</a>';
+        }
+      });
+    }).catch(function() {});
+  })();
+  </script>
+  {% block extra_js %}{% endblock %}
+</body>
+</html>
