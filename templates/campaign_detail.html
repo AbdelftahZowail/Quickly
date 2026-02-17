@@ -127,10 +127,7 @@ tr.lead-clickable:hover td { color: var(--accent); }
           <input type="text" id="set-hours-end" placeholder="17:00" style="max-width:100%;">
         </div>
       </div>
-      <div class="form-group">
-        <label>Wait between emails (minutes)</label>
-        <input type="number" id="set-wait" min="1" max="120" style="max-width:100%;">
-      </div>
+      <p style="margin: 0.5rem 0; font-size: 0.85rem; color: var(--muted);"><strong>Note:</strong> Wait time between emails is controlled by each inbox's settings.</p>
       <div class="form-group">
         <label style="display:flex;align-items:center;gap:0.5rem;cursor:pointer;">
           <input type="checkbox" id="set-stop-reply" style="width:auto;">
@@ -245,7 +242,6 @@ function openSettingsModal() {
   document.getElementById('set-name').value = _campaign.name || '';
   document.getElementById('set-hours-start').value = _campaign.sending_hours_start || '09:00';
   document.getElementById('set-hours-end').value = _campaign.sending_hours_end || '17:00';
-  document.getElementById('set-wait').value = _campaign.wait_minutes_between ?? 5;
   document.getElementById('set-stop-reply').checked = !!_campaign.stop_on_reply;
   document.getElementById('settings-message').innerHTML = '';
 
@@ -297,7 +293,6 @@ document.getElementById('settings-form').addEventListener('submit', async (e) =>
     sending_days: sendingDays.length ? sendingDays : [0, 1, 2, 3, 4],
     sending_hours_start: document.getElementById('set-hours-start').value.trim() || '09:00',
     sending_hours_end: document.getElementById('set-hours-end').value.trim() || '17:00',
-    wait_minutes_between: parseInt(document.getElementById('set-wait').value, 10) || 5,
     stop_on_reply: document.getElementById('set-stop-reply').checked,
   };
   if (!payload.name) {
@@ -348,7 +343,7 @@ function renderCampaign(campaign, inboxes) {
         <strong>Inboxes:</strong> ${escapeHtml(inboxList || 'None')}<br>
         <strong>Sending days:</strong> ${(campaign.sending_days || []).map(d => ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d]).join(', ')}<br>
         <strong>Hours:</strong> ${campaign.sending_hours_start}–${campaign.sending_hours_end}<br>
-        <strong>Wait between emails:</strong> ${campaign.wait_minutes_between} min &nbsp; <strong>Stop on reply:</strong> ${campaign.stop_on_reply ? 'Yes' : 'No'}
+        <strong>Stop on reply:</strong> ${campaign.stop_on_reply ? 'Yes' : 'No'}
       </div>
       <button class="btn secondary" onclick="openSettingsModal()" style="flex-shrink:0;">Edit settings</button>
     </div>

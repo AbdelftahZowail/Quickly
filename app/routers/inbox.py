@@ -25,6 +25,7 @@ async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
         email=data.email,
         display_name=data.display_name,
         max_emails_per_day=data.max_emails_per_day,
+        wait_minutes_between=data.wait_minutes_between,
         provider=data.provider,
     )
     db.add(inbox)
@@ -44,17 +45,39 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{inbox_id}", response_model=InboxResponse)
 async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depends(get_db)):
+    from app.queue_logic import recalculate_queue_after_sequence_change
+    
     result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+    
+    capacity_changed = False
     if data.display_name is not None:
         inbox.display_name = data.display_name
     if data.max_emails_per_day is not None:
         inbox.max_emails_per_day = data.max_emails_per_day
+        capacity_changed = True
+    if data.wait_minutes_between is not None:
+        inbox.wait_minutes_between = data.wait_minutes_between
+        capacity_changed = True
     if data.provider is not None:
         inbox.provider = data.provider
     await db.flush()
+    
+    # If capacity or timing changed, recalculate all campaigns using this inbox
+    if capacity_changed:
+        from app.models import CampaignInbox
+        campaign_result = await db.execute(
+            select(CampaignInbox.campaign_id)
+            .where(CampaignInbox.inbox_id == inbox_id)
+            .distinct()
+        )
+        campaign_ids = [cid for (cid,) in campaign_result.all()]
+        log.info("Inbox %s capacity changed; recalculating %d campaigns", inbox_id, len(campaign_ids))
+        for cid in campaign_ids:
+            await recalculate_queue_after_sequence_change(db, cid)
+    
     await db.refresh(inbox)
     return inbox
 

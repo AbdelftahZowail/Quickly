@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
 )
+from app.queue_logic import recalculate_queue_after_sequence_change
 
 log = logging.getLogger("campaign_engine.calendar")
 
@@ -121,4 +122,44 @@ async def global_stats(db: AsyncSession = Depends(get_db)):
         "total_sent": sent_count.scalar() or 0,
         "total_scheduled": scheduled_count.scalar() or 0,
         "total_campaigns": campaign_count.scalar() or 0,
+    }
+
+
+@router.post("/recalculate-all")
+async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
+    """Recalculate queue slots for all campaigns while preserving inbox assignments."""
+    log.info("recalculate_all_campaigns: starting global recalculation")
+    
+    # Count existing slots before recalculation
+    slot_count_before = await db.execute(select(func.count(QueueSlot.id)))
+    initial_slots = slot_count_before.scalar() or 0
+    log.info("recalculate_all_campaigns: starting with %d existing queue slots", initial_slots)
+    
+    # Get all campaigns
+    result = await db.execute(select(Campaign))
+    campaigns = result.scalars().all()
+    
+    if not campaigns:
+        log.warning("recalculate_all_campaigns: no campaigns found")
+        return {"ok": True, "campaigns_processed": 0, "total_slots": 0, "initial_slots": initial_slots}
+    
+    campaigns_processed = 0
+    for campaign in campaigns:
+        log.info("recalculate_all_campaigns: processing campaign_id=%s name=%s", campaign.id, campaign.name)
+        # Each campaign handles its own slot deletion while preserving inbox assignments
+        await recalculate_queue_after_sequence_change(db, campaign.id)
+        campaigns_processed += 1
+    
+    # Get updated slot count
+    slot_count = await db.execute(select(func.count(QueueSlot.id)))
+    total_slots = slot_count.scalar() or 0
+    
+    log.info("recalculate_all_campaigns: completed - processed %d campaigns, %d -> %d slots", 
+             campaigns_processed, initial_slots, total_slots)
+    
+    return {
+        "ok": True, 
+        "campaigns_processed": campaigns_processed,
+        "initial_slots": initial_slots,
+        "total_slots": total_slots
     }

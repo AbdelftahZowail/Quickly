@@ -27,6 +27,10 @@
       <label>Max emails per day</label>
       <input type="number" name="max_emails_per_day" value="50" min="1" max="1000">
     </div>
+    <div class="form-group">
+      <label>Wait between emails (minutes)</label>
+      <input type="number" name="wait_minutes_between" value="5" min="1" max="120">
+    </div>
     <button type="submit" class="btn" id="add-inbox-btn">Add inbox</button>
     <div id="oauth-warning" style="display:none; margin-top: 0.75rem; padding: 0.75rem; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: 4px; color: var(--text);">
       ⚠️ You have to enter your credentials in the <a href="/settings" style="color: var(--accent); text-decoration: underline;">settings</a>.
@@ -63,6 +67,10 @@
       <div class="form-group">
         <label>Max emails per day</label>
         <input type="number" id="edit-max-per-day" name="max_emails_per_day" min="1" max="1000">
+      </div>
+      <div class="form-group">
+        <label>Wait between emails (minutes)</label>
+        <input type="number" id="edit-wait-minutes" name="wait_minutes_between" min="1" max="120">
       </div>
       <div style="display:flex; gap:0.5rem; margin-top:1rem;">
         <button type="submit" class="btn">Save</button>
@@ -143,7 +151,7 @@ async function loadInboxes() {
       listEl.innerHTML = '<p class="card">No inboxes yet. Add one above to use in campaigns.</p>';
       return;
     }
-    listEl.innerHTML = '<table><thead><tr><th>Email</th><th>Display name</th><th>Provider</th><th>Max/day</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>';
+    listEl.innerHTML = '<table><thead><tr><th>Email</th><th>Display name</th><th>Provider</th><th>Max/day</th><th>Wait (min)</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>';
     const tbody = listEl.querySelector('tbody');
     inboxes.forEach(i => {
       const tr = document.createElement('tr');
@@ -152,6 +160,7 @@ async function loadInboxes() {
         <td>${escapeHtml(i.display_name || '—')}</td>
         <td><span class="badge">${escapeHtml(i.provider || 'resend')}</span></td>
         <td>${i.max_emails_per_day}</td>
+        <td>${i.wait_minutes_between || 5}</td>
         <td>${new Date(i.created_at).toLocaleDateString()}</td>
         <td>
           <button class="btn secondary" onclick='editInbox(${JSON.stringify(i)})'>Edit</button>
@@ -191,6 +200,7 @@ document.getElementById('add-inbox-form').addEventListener('submit', async (e) =
     display_name: form.display_name.value.trim(),
     provider: provider,
     max_emails_per_day: parseInt(form.max_emails_per_day.value, 10) || 50,
+    wait_minutes_between: parseInt(form.wait_minutes_between.value, 10) || 5,
   };
   try {
     const res = await fetch('/api/inboxes', {
@@ -202,6 +212,7 @@ document.getElementById('add-inbox-form').addEventListener('submit', async (e) =
       msgEl.innerHTML = '<span style="color: var(--success)">Inbox added.</span>';
       form.reset();
       form.max_emails_per_day.value = 50;
+      form.wait_minutes_between.value = 5;
       form.provider.value = 'resend';
       updateFormForProvider();
       loadInboxes();
@@ -220,6 +231,7 @@ function editInbox(inbox) {
   document.getElementById('edit-display-name').value = inbox.display_name || '';
   document.getElementById('edit-provider').value = inbox.provider || 'resend';
   document.getElementById('edit-max-per-day').value = inbox.max_emails_per_day;
+  document.getElementById('edit-wait-minutes').value = inbox.wait_minutes_between || 5;
   document.getElementById('edit-message').innerHTML = '';
   document.getElementById('edit-modal').style.display = 'flex';
 }
@@ -237,6 +249,7 @@ document.getElementById('edit-inbox-form').addEventListener('submit', async (e) 
     display_name: document.getElementById('edit-display-name').value.trim(),
     provider: document.getElementById('edit-provider').value,
     max_emails_per_day: parseInt(document.getElementById('edit-max-per-day').value, 10),
+    wait_minutes_between: parseInt(document.getElementById('edit-wait-minutes').value, 10) || 5,
   };
   msgEl.innerHTML = '';
   try {

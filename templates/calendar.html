@@ -116,6 +116,7 @@
   </select>
   <input type="text" id="filter-search" placeholder="Search lead, subject…" style="max-width:240px;">
   <button class="btn secondary" onclick="clearFilters()" style="padding:0.35rem 0.7rem;font-size:0.85rem;">Clear</button>
+  <button class="btn" id="recalc-all-btn" onclick="recalculateAllCampaigns()" style="padding:0.35rem 0.7rem;font-size:0.85rem;">⚡ Recalculate All Campaigns</button>
 </div>
 
 <!-- Calendar body -->
@@ -223,6 +224,41 @@ function clearFilters() {
   render();
 }
 
+async function recalculateAllCampaigns() {
+  const btn = document.getElementById('recalc-all-btn');
+  if (btn.disabled) return;
+  
+  if (!confirm('Recalculate queue slots for ALL campaigns? This will recompute all scheduled emails while preserving already-sent sequences.')) {
+    return;
+  }
+  
+  try {
+    btn.disabled = true;
+    btn.textContent = '⚡ Recalculating...';
+    
+    const res = await fetch('/api/calendar/recalculate-all', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      btn.textContent = `✓ Done! (${data.campaigns_processed} campaigns, cleared ${data.cleared_slots}, created ${data.total_slots} slots)`;
+      
+      // Reload all data after recalculation
+      await loadData();
+    } else {
+      const text = await res.text();
+      alert('Error recalculating: ' + text);
+      btn.textContent = '⚡ Recalculate All Campaigns';
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+    btn.textContent = '⚡ Recalculate All Campaigns';
+  } finally {
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = '⚡ Recalculate All Campaigns';
+    }, 2000);
+  }
+}
+
 function togglePast() { _pastExpanded = !_pastExpanded; render(); }
 function toggleRow(uid) { _expandedId = _expandedId === uid ? null : uid; render(); }
 
@@ -288,7 +324,6 @@ function buildRow(item, uid) {
   const days = (item.campaign_sending_days || []).map(d => DAY_NAMES[d] || d).join(', ');
   html += `<div><span class="dp-label">Sending window</span><br><span class="dp-val">${escapeHtml(item.campaign_hours_start)} – ${escapeHtml(item.campaign_hours_end)}</span></div>`;
   html += `<div><span class="dp-label">Sending days</span><br><span class="dp-val">${escapeHtml(days)}</span></div>`;
-  html += `<div><span class="dp-label">Wait between emails</span><br><span class="dp-val">${item.campaign_wait_minutes ?? 5} min</span></div>`;
   html += `<div><span class="dp-label">Stop on reply</span><br><span class="dp-val">${item.campaign_stop_on_reply ? 'Yes' : 'No'}</span></div>`;
 
   // Body preview

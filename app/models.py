@@ -41,7 +41,7 @@ class Campaign(Base):
     sending_days = Column(JSON, default=[0, 1, 2, 3, 4])  # Mon-Fri default
     sending_hours_start = Column(String(5), default="09:00")  # 9am
     sending_hours_end = Column(String(5), default="17:00")   # 5pm
-    wait_minutes_between = Column(Integer, default=5)
+    wait_minutes_between = Column(Integer, default=5)  # Deprecated: wait time now controlled by Inbox.wait_minutes_between
     stop_on_reply = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     campaign_inboxes = relationship(

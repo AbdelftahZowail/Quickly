@@ -125,12 +125,27 @@ async def update_campaign(
         await db.flush()
         for pos, inbox_id in enumerate(data.inbox_ids):
             db.add(CampaignInbox(campaign_id=campaign_id, inbox_id=inbox_id, position=pos))
+        await db.flush()
+        # Recalculate queue since inbox assignments changed
+        log.info("Campaign %s inbox list changed; triggering queue recalculation", campaign_id)
+        await recalculate_queue_after_sequence_change(db, campaign_id)
+    
+    schedule_changed = False
     if data.sending_days is not None:
         campaign.sending_days = data.sending_days
+        schedule_changed = True
     if data.sending_hours_start is not None:
         campaign.sending_hours_start = data.sending_hours_start
+        schedule_changed = True
     if data.sending_hours_end is not None:
         campaign.sending_hours_end = data.sending_hours_end
+        schedule_changed = True
+    
+    if schedule_changed:
+        await db.flush()
+        log.info("Campaign %s sending schedule changed; triggering queue recalculation", campaign_id)
+        await recalculate_queue_after_sequence_change(db, campaign_id)
+    
     if data.wait_minutes_between is not None:
         campaign.wait_minutes_between = data.wait_minutes_between
     if data.stop_on_reply is not None:
