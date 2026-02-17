@@ -28,6 +28,9 @@
       <input type="number" name="max_emails_per_day" value="50" min="1" max="1000">
     </div>
     <button type="submit" class="btn" id="add-inbox-btn">Add inbox</button>
+    <div id="oauth-warning" style="display:none; margin-top: 0.75rem; padding: 0.75rem; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: 4px; color: var(--text);">
+      ⚠️ You have to enter your credentials in the <a href="/settings" style="color: var(--accent); text-decoration: underline;">settings</a>.
+    </div>
   </form>
   <div id="form-message" style="margin-top: 0.75rem;"></div>
 </div>
@@ -75,20 +78,61 @@
 <script>
 function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
+// OAuth configuration status
+let oauthConfigured = false;
+
 // Toggle form fields based on provider selection
 const addProviderSelect = document.getElementById('add-provider');
 const addInboxBtn = document.getElementById('add-inbox-btn');
 const emailGroup = document.getElementById('email-group');
 const emailInput = document.querySelector('#add-inbox-form input[name="email"]');
+const oauthWarning = document.getElementById('oauth-warning');
 
 function updateFormForProvider() {
   const isGmail = addProviderSelect.value === 'gmail';
   emailGroup.style.display = isGmail ? 'none' : '';
   emailInput.required = !isGmail;
-  addInboxBtn.textContent = isGmail ? 'Connect with Google' : 'Add inbox';
+  
+  if (isGmail) {
+    addInboxBtn.textContent = 'Connect with Google';
+    if (!oauthConfigured) {
+      addInboxBtn.disabled = true;
+      addInboxBtn.style.opacity = '0.5';
+      addInboxBtn.style.cursor = 'not-allowed';
+      oauthWarning.style.display = 'block';
+    } else {
+      addInboxBtn.disabled = false;
+      addInboxBtn.style.opacity = '1';
+      addInboxBtn.style.cursor = 'pointer';
+      oauthWarning.style.display = 'none';
+    }
+  } else {
+    addInboxBtn.textContent = 'Add inbox';
+    addInboxBtn.disabled = false;
+    addInboxBtn.style.opacity = '1';
+    addInboxBtn.style.cursor = 'pointer';
+    oauthWarning.style.display = 'none';
+  }
 }
 addProviderSelect.addEventListener('change', updateFormForProvider);
-updateFormForProvider();
+
+// Check OAuth status on page load
+async function checkOAuthStatus() {
+  try {
+    const res = await fetch('/api/gmail/status');
+    const data = await res.json();
+    oauthConfigured = data.configured;
+    const uriEl = document.getElementById('redirect-uri-display');
+    if (uriEl) {
+      uriEl.textContent = data.redirect_uri || 'http://localhost:8000/oauth/google/callback';
+    }
+    updateFormForProvider();
+  } catch (e) {
+    console.error('Failed to check Gmail OAuth status:', e);
+  }
+}
+
+checkOAuthStatus();
 
 async function loadInboxes() {
   const listEl = document.getElementById('inbox-list');

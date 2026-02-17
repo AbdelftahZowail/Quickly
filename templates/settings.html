@@ -114,11 +114,101 @@
     <button type="submit" class="btn" id="save-btn">Save Settings</button>
     <button type="button" class="btn secondary" onclick="loadSettings()">Reload</button>
   </div>
+
+  <!-- ─── Setup instructions (only visible when OAuth not configured) ─── -->
+  <div id="setup-instructions" class="card" style="margin-top:2rem; margin-bottom:2rem; display:none;">
+    <h2 style="margin-top:0;">Setup Instructions — Google Cloud Console</h2>
+    <p style="color:var(--muted); margin-bottom:1rem;">Follow these steps to get your <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code>.</p>
+
+    <div style="line-height:1.8;">
+      <h3 style="color:var(--accent); margin-top:1.5rem;">Step 1 — Create a Google Cloud project</h3>
+      <ol>
+        <li>Go to <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a></li>
+        <li>Click the project dropdown at the top → <strong>New Project</strong></li>
+        <li>Name it (e.g. "Campaign Engine") and click <strong>Create</strong></li>
+      </ol>
+
+      <h3 style="color:var(--accent); margin-top:1.5rem;">Step 2 — Enable the Gmail API</h3>
+      <ol>
+        <li>In your new project, go to <a href="https://console.cloud.google.com/apis/library/gmail.googleapis.com" target="_blank">APIs &amp; Services → Library</a></li>
+        <li>Search for <strong>"Gmail API"</strong></li>
+        <li>Click it and press <strong>Enable</strong></li>
+      </ol>
+
+      <h3 style="color:var(--accent); margin-top:1.5rem;">Step 3 — Configure OAuth consent screen</h3>
+      <ol>
+        <li>Go to <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank">APIs &amp; Services → OAuth consent screen</a></li>
+        <li>Choose <strong>External</strong> (or Internal if using Google Workspace)</li>
+        <li>Fill in the required fields (App name, User support email, Developer email)</li>
+        <li>On the <strong>Scopes</strong> page, click <strong>Add or Remove Scopes</strong> and add:
+          <ul>
+            <li><code>https://www.googleapis.com/auth/gmail.send</code></li>
+            <li><code>https://www.googleapis.com/auth/userinfo.email</code></li>
+          </ul>
+        </li>
+        <li>On the <strong>Test users</strong> page, add the Gmail addresses you want to connect</li>
+        <li>Click <strong>Save and Continue</strong> through all steps</li>
+      </ol>
+
+      <h3 style="color:var(--accent); margin-top:1.5rem;">Step 4 — Create OAuth credentials</h3>
+      <ol>
+        <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank">APIs &amp; Services → Credentials</a></li>
+        <li>Click <strong>+ Create Credentials → OAuth client ID</strong></li>
+        <li>Application type: <strong>Web application</strong></li>
+        <li>Name: anything (e.g. "Campaign Engine")</li>
+        <li>Under <strong>Authorized redirect URIs</strong>, add:
+          <br><code id="redirect-uri-display" class="mono" style="color:var(--accent); display:inline-block; margin:0.5rem 0; padding:0.3rem 0.6rem; background:var(--bg); border-radius:4px;"></code>
+        </li>
+        <li>Click <strong>Create</strong></li>
+        <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong></li>
+      </ol>
+
+      <h3 style="color:var(--accent); margin-top:1.5rem;">Step 5 — Save your credentials</h3>
+      <p>Go to the <a href="/accounts" style="color: var(--accent); text-decoration: underline;">Accounts page</a> to save your Client ID and Client Secret, then return here to connect your Gmail inbox.</p>
+    </div>
+
+    <div style="margin-top:1.5rem; padding:1rem; background:rgba(34,211,238,0.08); border-radius:6px; border:1px solid rgba(34,211,238,0.2);">
+      <strong style="color:var(--accent);">Note:</strong>
+      <span style="color:var(--muted);">
+        While your app is in "Testing" mode in Google Cloud, only the test users you added can connect.
+        To allow any Google account, submit for verification (Google will review your app).
+        For personal / internal use, "Testing" mode is fine.
+      </span>
+    </div>
+  </div>
+
+
 </form>
 
 {% endblock %}
 {% block extra_js %}
 <script>
+  
+// OAuth configuration status
+let oauthConfigured = false;
+const setupInstructions = document.getElementById('setup-instructions');
+async function checkOAuthStatus() {
+  try {
+    const res = await fetch('/api/gmail/status');
+    const data = await res.json();
+    oauthConfigured = data.configured;
+    const uriEl = document.getElementById('redirect-uri-display');
+    if (uriEl) {
+      uriEl.textContent = data.redirect_uri || 'http://localhost:8000/oauth/google/callback';
+    }
+    updateSetupInstructionsVisibility();
+  } catch (e) {
+    console.error('Failed to check Gmail OAuth status:', e);
+  }
+}
+checkOAuthStatus();
+
+function updateSetupInstructionsVisibility() {
+  const provider = document.getElementById('email_provider').value;
+  const shouldShow = provider === 'gmail' && !oauthConfigured;
+  setupInstructions.style.display = shouldShow ? 'block' : 'none';
+}
+
 function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 function showMessage(msg, isError) {
@@ -136,6 +226,7 @@ function toggleProviderSettings() {
   document.getElementById('resend-settings').style.display = provider === 'resend' ? '' : 'none';
   document.getElementById('smtp-settings').style.display = provider === 'smtp' ? '' : 'none';
   document.getElementById('gmail-settings').style.display = provider === 'gmail' ? '' : 'none';
+  updateSetupInstructionsVisibility();
 }
 
 async function loadSettings() {
