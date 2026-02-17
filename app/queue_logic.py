@@ -73,12 +73,13 @@ async def _next_available_send_time_today(
 
     day_start = datetime.combine(day, time(0, 0))
     day_end = datetime.combine(day + timedelta(days=1), time(0, 0))
+    # Use WITH_FOR_UPDATE to prevent race conditions when multiple requests schedule simultaneously
     result = await session.execute(
         select(QueueSlot.scheduled_date).where(
             QueueSlot.inbox_id == inbox_id,
             QueueSlot.scheduled_date >= day_start,
             QueueSlot.scheduled_date < day_end,
-        )
+        ).with_for_update()
     )
     existing_minutes = set()
     for (dt,) in result.all():
@@ -113,7 +114,7 @@ def next_business_date(from_date: date, sending_days: List[int], delta_days: int
 
 
 async def count_slots_on_date(session: AsyncSession, inbox_id: int, day: date) -> int:
-    """Count queue slots for this inbox on the given date."""
+    """Count queue slots for this inbox on the given date. Uses FOR UPDATE to prevent race conditions."""
     day_start = datetime.combine(day, datetime.min.time())
     day_end = datetime.combine(day + timedelta(days=1), datetime.min.time())
     q = (
@@ -123,9 +124,38 @@ async def count_slots_on_date(session: AsyncSession, inbox_id: int, day: date) -
             QueueSlot.scheduled_date >= day_start,
             QueueSlot.scheduled_date < day_end,
         )
+        .with_for_update()
     )
     result = await session.execute(q)
     return result.scalar() or 0
+
+
+async def _get_preferred_inbox_for_lead(
+    session: AsyncSession,
+    lead_id: int,
+    campaign_id: int,
+    available_inbox_ids: List[int],
+) -> Optional[int]:
+    """
+    Check if this lead was already contacted with an inbox in this campaign.
+    If yes and that inbox is still available, return it (inbox persistence).
+    Otherwise return None to use round-robin.
+    """
+    result = await session.execute(
+        select(EmailLog.inbox_id)
+        .where(
+            EmailLog.lead_id == lead_id,
+            EmailLog.campaign_id == campaign_id,
+            EmailLog.inbox_id.isnot(None),
+        )
+        .order_by(EmailLog.sent_at.desc())
+        .limit(1)
+    )
+    inbox_id = result.scalar_one_or_none()
+    if inbox_id and inbox_id in available_inbox_ids:
+        log.info("Inbox persistence: lead %s -> inbox %s", lead_id, inbox_id)
+        return inbox_id
+    return None
 
 
 async def next_available_slot_position(
@@ -158,14 +188,16 @@ async def reserve_slots_for_lead(
     session: AsyncSession,
     campaign_lead_id: int,
     campaign: Campaign,
-    inboxes: List[Tuple[int, int]],  # (inbox_id, max_per_day) in order
+    inboxes: List[Tuple[int, int, int]],  # (inbox_id, max_per_day, wait_minutes_between)
     sequences: List[Sequence],
+    lead_id: int,  # Add lead_id for inbox persistence
     start_date: Optional[date] = None,
     last_sent_sequence_index: int = -1,
 ) -> None:
     """
     Reserve queue slots for one campaign_lead.
     Each slot is assigned to an inbox that has capacity that day.
+    Implements inbox persistence: once a lead is contacted with an inbox, always use that inbox.
     """
     sending_days = campaign.sending_days or [0, 1, 2, 3, 4]
     if not inboxes:
@@ -184,6 +216,17 @@ async def reserve_slots_for_lead(
         log.info("reserve_slots_for_lead: nothing to schedule (all already sent) cl=%s", campaign_lead_id)
         return
 
+    # Check for inbox persistence: if this lead was already contacted, prefer that inbox
+    available_inbox_ids = [inbox[0] for inbox in inboxes]
+    preferred_inbox_id = await _get_preferred_inbox_for_lead(
+        session, lead_id, campaign.id, available_inbox_ids
+    )
+    
+    # If we have a preferred inbox, filter to use only that one
+    if preferred_inbox_id:
+        inboxes = [inbox for inbox in inboxes if inbox[0] == preferred_inbox_id]
+        log.info("Using inbox persistence: lead %s locked to inbox %s", lead_id, preferred_inbox_id)
+
     today = date.today()
     if start_date is None:
         start_date = today
@@ -195,33 +238,48 @@ async def reserve_slots_for_lead(
 
     log.info(
         "reserve_slots_for_lead: cl=%s campaign=%s inboxes=%s sequences=%d start=%s last_sent=%d",
-        campaign_lead_id, campaign.id, inboxes, len(to_schedule), start_date, last_sent_sequence_index,
+        campaign_lead_id, campaign.id, [i[0] for i in inboxes], len(to_schedule), start_date, last_sent_sequence_index,
     )
 
-    # Time-awareness: if scheduling for today, skip slots whose send time has already passed
     sending_start = campaign.sending_hours_start or "09:00"
     sending_end = campaign.sending_hours_end or "17:00"
-    wait_min = campaign.wait_minutes_between or 5
+    end_time = _parse_time(sending_end)
     now = datetime.now()
     today = date.today()
 
     for idx, seq in to_schedule:
-        if idx > 0 and scheduled_dates:
-            prev_send_date = scheduled_dates[-1]
+        if idx > 0:
+            if scheduled_dates:
+                prev_send_date = scheduled_dates[-1]
+            elif last_sent_sequence_index >= 0 and start_date is not None:
+                # Recalculation: reference the date the last email was actually sent
+                prev_send_date = start_date
+            else:
+                prev_send_date = current_date
             wait_days = seq.wait_days_after_previous
             current_date = next_business_date(prev_send_date, sending_days, wait_days)
+            # Never schedule in the past
+            if current_date < today:
+                current_date = next_business_date(today, sending_days, 0)
 
         safety = 0
         while safety < 365:
             safety += 1
-            picked = await _pick_inbox_with_capacity(session, inboxes, current_date, round_robin)
+            picked = await _pick_inbox_with_capacity(
+                session, 
+                [(i[0], i[1]) for i in inboxes],  # Just (id, max_per_day) for capacity check
+                current_date, 
+                round_robin
+            )
             if picked is not None:
                 inbox_id, max_per_day = picked
+                # Get wait_minutes for this specific inbox
+                wait_min = next(i[2] for i in inboxes if i[0] == inbox_id)
                 pos = await next_available_slot_position(session, inbox_id, current_date)
 
-                # --- Time-awareness: use next available time slot today if default is in the past ---
                 scheduled_dt: datetime
                 if current_date == today:
+                    # Today: check if estimated time is in the past
                     est_time = _estimated_send_time(sending_start, wait_min, pos)
                     if est_time <= now.time():
                         next_dt = await _next_available_send_time_today(
@@ -246,8 +304,18 @@ async def reserve_slots_for_lead(
                     else:
                         scheduled_dt = datetime.combine(current_date, est_time)
                 else:
-                    # Future day: use position-derived time for correct send order
+                    # Future day: check if estimated time exceeds sending window
                     est_t = _estimated_send_time(sending_start, wait_min, pos)
+                    if est_t > end_time:
+                        # Overflow to next business day
+                        log.info(
+                            "  -> seq=%d pos=%d would send at %s (past %s); moving to next day",
+                            idx, pos, est_t.strftime("%H:%M"), end_time.strftime("%H:%M"),
+                        )
+                        current_date += timedelta(days=1)
+                        while current_date.weekday() not in sending_days:
+                            current_date += timedelta(days=1)
+                        continue
                     scheduled_dt = datetime.combine(current_date, est_t)
 
                 slot = QueueSlot(
@@ -266,7 +334,9 @@ async def reserve_slots_for_lead(
                     _estimated_send_time(sending_start, wait_min, pos).strftime("%H:%M"),
                 )
                 scheduled_dates.append(current_date)
-                round_robin = (inboxes.index((inbox_id, max_per_day)) + 1) % len(inboxes)
+                # Update round-robin index
+                inbox_tuple = next(i for i in inboxes if i[0] == inbox_id)
+                round_robin = (inboxes.index(inbox_tuple) + 1) % len(inboxes)
                 break
             current_date += timedelta(days=1)
             while current_date.weekday() not in sending_days:
@@ -280,6 +350,15 @@ async def reserve_slots_for_new_lead(
 ) -> None:
     """When a new lead is added to a campaign, reserve all sequence slots across campaign inboxes."""
     log.info("reserve_slots_for_new_lead: cl=%s campaign=%s", campaign_lead_id, campaign_id)
+
+    # Get campaign_lead to extract lead_id
+    cl_result = await session.execute(
+        select(CampaignLead).where(CampaignLead.id == campaign_lead_id)
+    )
+    cl = cl_result.scalar_one_or_none()
+    if not cl:
+        log.error("reserve_slots_for_new_lead: campaign_lead %s not found", campaign_lead_id)
+        return
 
     result = await session.execute(
         select(Campaign).where(Campaign.id == campaign_id)
@@ -296,7 +375,7 @@ async def reserve_slots_for_new_lead(
         .order_by(CampaignInbox.position, CampaignInbox.inbox_id)
     )
     rows = result.all()
-    inboxes = [(row[1].id, row[1].max_emails_per_day) for row in rows]
+    inboxes = [(row[1].id, row[1].max_emails_per_day, row[1].wait_minutes_between) for row in rows]
     if not inboxes:
         log.warning("reserve_slots_for_new_lead: no inboxes for campaign %s", campaign_id)
         return
@@ -312,6 +391,7 @@ async def reserve_slots_for_new_lead(
     log.info("reserve_slots_for_new_lead: found %d inboxes, %d sequences", len(inboxes), len(sequences))
     await reserve_slots_for_lead(
         session, campaign_lead_id, campaign, inboxes, sequences,
+        lead_id=cl.lead_id,
         start_date=start_date or date.today(),
         last_sent_sequence_index=-1,
     )
@@ -336,7 +416,7 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         .order_by(CampaignInbox.position, CampaignInbox.inbox_id)
     )
     rows = result.all()
-    inboxes = [(row[1].id, row[1].max_emails_per_day) for row in rows]
+    inboxes = [(row[1].id, row[1].max_emails_per_day, row[1].wait_minutes_between) for row in rows]
     if not inboxes:
         log.warning("recalculate_queue: no inboxes for campaign %s", campaign_id)
         return
@@ -387,10 +467,11 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
             )
             row = sent_date_result.scalar_one_or_none()
             if row is not None:
-                start_date = max(row.date(), date.today())
+                start_date = row.date()  # Pass the actual sent date so wait_days are computed correctly
 
         await reserve_slots_for_lead(
             session, cl.id, campaign, inboxes, sequences,
+            lead_id=cl.lead_id,
             start_date=start_date,
             last_sent_sequence_index=last_sent,
         )

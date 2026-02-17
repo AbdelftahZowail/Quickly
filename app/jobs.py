@@ -202,6 +202,7 @@ async def run_send_job():
                     email_log_entry = EmailLog(
                         lead_id=lead.id,
                         campaign_id=campaign.id,
+                        inbox_id=inbox.id,  # Track which inbox sent this for inbox persistence
                         sequence_index=slot.sequence_index,
                         subject=subject,
                         message_id=result.message_id,

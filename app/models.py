@@ -12,6 +12,7 @@ class Inbox(Base):
     email = Column(String(255), unique=True, nullable=False, index=True)
     display_name = Column(String(255), default="")
     max_emails_per_day = Column(Integer, default=50, nullable=False)
+    wait_minutes_between = Column(Integer, default=5, nullable=False)  # Minutes between emails from this inbox
     provider = Column(String(32), default="resend")  # resend | smtp | gmail
     created_at = Column(DateTime, default=datetime.utcnow)
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
@@ -91,6 +92,7 @@ class CampaignLead(Base):
 
 class QueueSlot(Base):
     __tablename__ = "queue_slot"
+    __table_args__ = (UniqueConstraint("campaign_lead_id", "sequence_index", name="uq_campaign_lead_sequence"),)
     id = Column(Integer, primary_key=True, index=True)
     campaign_lead_id = Column(Integer, ForeignKey("campaign_lead.id"), nullable=False)
     inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False)  # which inbox sends this slot
@@ -106,6 +108,7 @@ class EmailLog(Base):
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=True)  # Track which inbox sent this email
     sequence_index = Column(Integer, nullable=False)
     sent_at = Column(DateTime, default=datetime.utcnow)
     subject = Column(String(512), default="")
@@ -113,6 +116,7 @@ class EmailLog(Base):
     thread_id = Column(String(512), default=None)   # Gmail threadId for thread continuity
     lead = relationship("Lead", back_populates="email_logs")
     campaign = relationship("Campaign", back_populates="email_logs")
+    inbox = relationship("Inbox")
 
 
 class LeadReply(Base):

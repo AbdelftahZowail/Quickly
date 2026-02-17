@@ -84,6 +84,73 @@ def _migrate_thread_id(conn):
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN thread_id VARCHAR(512) DEFAULT NULL"))
 
 
+def _migrate_inbox_wait_minutes(conn):
+    """Add wait_minutes_between column to inbox table if missing."""
+    cur = conn.execute(text("PRAGMA table_info(inbox)"))
+    columns = [row[1] for row in cur.fetchall()]
+    if "wait_minutes_between" not in columns:
+        conn.execute(text("ALTER TABLE inbox ADD COLUMN wait_minutes_between INTEGER DEFAULT 5 NOT NULL"))
+
+
+def _migrate_email_log_inbox_id(conn):
+    """Add inbox_id column to email_log table if missing."""
+    cur = conn.execute(text("PRAGMA table_info(email_log)"))
+    columns = [row[1] for row in cur.fetchall()]
+    if "inbox_id" not in columns:
+        conn.execute(text("ALTER TABLE email_log ADD COLUMN inbox_id INTEGER"))
+        # Add foreign key constraint is done by SQLAlchemy on next create_all
+
+
+def _migrate_queue_slot_unique_constraint(conn):
+    """Add unique constraint on (campaign_lead_id, sequence_index) to queue_slot."""
+    # Check if constraint already exists by checking indexes
+    cur = conn.execute(text("PRAGMA index_list(queue_slot)"))
+    indexes = [row[1] for row in cur.fetchall()]
+    if "uq_campaign_lead_sequence" in indexes:
+        return  # Already migrated
+    
+    # SQLite doesn't support adding constraints to existing tables
+    # Must recreate table with the constraint
+    cur = conn.execute(text("PRAGMA table_info(queue_slot)"))
+    columns = cur.fetchall()
+    
+    # Check if table exists and has data
+    cur = conn.execute(text("SELECT COUNT(*) FROM queue_slot"))
+    count = cur.fetchone()[0]
+    
+    if count == 0:
+        # No data, safe to recreate
+        conn.execute(text("DROP TABLE IF EXISTS queue_slot"))
+        # Let SQLAlchemy recreate it with the constraint
+        from app.models import QueueSlot
+        QueueSlot.__table__.create(conn, checkfirst=True)
+    else:
+        # Has data - preserve it with a migration
+        conn.execute(text("""
+            CREATE TABLE queue_slot_new (
+                id INTEGER NOT NULL PRIMARY KEY,
+                campaign_lead_id INTEGER NOT NULL,
+                inbox_id INTEGER NOT NULL,
+                sequence_index INTEGER NOT NULL,
+                scheduled_date DATETIME NOT NULL,
+                position_in_day INTEGER NOT NULL,
+                FOREIGN KEY(campaign_lead_id) REFERENCES campaign_lead(id),
+                FOREIGN KEY(inbox_id) REFERENCES inbox(id),
+                CONSTRAINT uq_campaign_lead_sequence UNIQUE (campaign_lead_id, sequence_index)
+            )
+        """))
+        # Copy data, removing duplicates if any exist (keep first occurrence)
+        conn.execute(text("""
+            INSERT OR IGNORE INTO queue_slot_new 
+            (id, campaign_lead_id, inbox_id, sequence_index, scheduled_date, position_in_day)
+            SELECT id, campaign_lead_id, inbox_id, sequence_index, scheduled_date, position_in_day
+            FROM queue_slot
+            ORDER BY id
+        """))
+        conn.execute(text("DROP TABLE queue_slot"))
+        conn.execute(text("ALTER TABLE queue_slot_new RENAME TO queue_slot"))
+
+
 async def init_db():
     from app import models  # noqa: F401 - so Base.metadata has all tables
     from app.settings_manager import initialize_settings
@@ -93,6 +160,9 @@ async def init_db():
         await conn.run_sync(_migrate_campaign_inbox)
         await conn.run_sync(_migrate_inbox_provider)
         await conn.run_sync(_migrate_thread_id)
+        await conn.run_sync(_migrate_inbox_wait_minutes)
+        await conn.run_sync(_migrate_email_log_inbox_id)
+        await conn.run_sync(_migrate_queue_slot_unique_constraint)
     
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:
