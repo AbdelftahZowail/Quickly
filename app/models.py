@@ -125,24 +125,6 @@ class LeadReply(Base):
     campaign = relationship("Campaign", back_populates="replies")
 
 
-class PendingSend(Base):
-    """Test mode: email waiting for manual approval before sending."""
-    __tablename__ = "pending_send"
-    id = Column(Integer, primary_key=True, index=True)
-    lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
-    campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
-    sequence_index = Column(Integer, nullable=False)
-    to_email = Column(String(255), nullable=False)
-    subject = Column(String(512), nullable=False)
-    body = Column(Text, nullable=False)
-    is_html = Column(Boolean, default=False)
-    from_email = Column(String(255), nullable=False)
-    from_name = Column(String(255), default="")
-    reply_to_msg_id = Column(String(512), default=None)
-    thread_id = Column(String(512), default=None)  # Gmail threadId for thread continuity
-    created_at = Column(DateTime, default=datetime.utcnow)
-
-
 class AppSetting(Base):
     """Key-value store for application settings (e.g. OAuth credentials).
 

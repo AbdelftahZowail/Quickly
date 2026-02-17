@@ -48,14 +48,11 @@ Settings are stored in the database and changes take effect immediately (no rest
 
 ## Test Mode
 
-Enable test mode from the Settings page to preview emails before sending:
+Enable test mode from the Settings page to safely test email sending without sending to real recipients:
 
-1. **Enable**: `POST /api/test-mode` with `{"enabled": true}`
-2. **View Pending**: `GET /api/test-mode/pending` - Lists emails waiting for approval
-3. **Approve One**: `POST /api/test-mode/pending/{id}/approve` - Send specific email
-4. **Approve All**: `POST /api/test-mode/pending/approve-all` - Send all pending emails
-5. **Delete One**: `DELETE /api/test-mode/pending/{id}` - Cancel specific email
-6. **Delete All**: `DELETE /api/test-mode/pending/all` - Clear all pending emails
+- For **Resend/SMTP**: All emails are redirected to `delivered+{tag}@resend.dev` (tag based on original recipient)
+- For **Gmail**: Emails are simulated (not actually sent, but logged as if they were)
+- Check status: `GET /api/test/status`
 
 The web UI shows a banner when test mode is enabled.
 
@@ -125,12 +122,7 @@ No authentication required on any endpoint.
 - `DELETE /api/gmail/accounts/{id}` - Disconnect Gmail account
 
 ### Test Mode
-- `GET /api/test-mode/status` - Check if test mode is enabled
-- `GET /api/test-mode/pending` - List pending emails awaiting approval
-- `POST /api/test-mode/pending/{id}/approve` - Approve and send specific email
-- `POST /api/test-mode/pending/approve-all` - Approve and send all pending emails
-- `DELETE /api/test-mode/pending/{id}` - Delete specific pending email
-- `DELETE /api/test-mode/pending/all` - Delete all pending emails
+- `GET /api/test/status` - Check if test mode is enabled
 
 ## Workflow Example
 

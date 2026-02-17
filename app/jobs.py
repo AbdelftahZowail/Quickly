@@ -15,7 +15,6 @@ from app.models import (
     Inbox,
     EmailLog,
     LeadReply,
-    PendingSend,
     GmailAccount,
 )
 from app.sender import send_email, render_body, get_lead_data, SendResult
