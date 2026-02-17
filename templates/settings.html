@@ -1,0 +1,246 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+{% block content %}
+<h1>Application Settings</h1>
+<p style="color: var(--muted); margin-bottom: 1.5rem;">Manage all application configuration from the database. Changes take effect immediately.</p>
+
+<div id="settings-message" style="margin-bottom: 1rem;"></div>
+
+<form id="settings-form">
+  <!-- General Settings -->
+  <div class="card">
+    <h2 style="margin-top: 0;">General</h2>
+    
+    <div class="form-group">
+      <label>Base URL *</label>
+      <input type="url" id="base_url" name="base_url" placeholder="http://localhost:8000" required>
+      <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+        Used for OAuth redirects and email links
+      </small>
+    </div>
+    
+    <div class="form-group">
+      <label>Queue Check Interval (minutes) *</label>
+      <input type="number" id="queue_check_interval_minutes" name="queue_check_interval_minutes" min="1" max="60" value="1" required>
+      <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+        How often the background job checks for emails to send
+      </small>
+    </div>
+    
+    <div class="form-group">
+      <label style="display: flex; align-items: center; gap: 0.5rem;">
+        <input type="checkbox" id="test_mode" name="test_mode" style="width: auto; max-width: none;">
+        <span>Test Mode</span>
+      </label>
+      <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+        Queue emails for manual approval instead of sending immediately
+      </small>
+    </div>
+  </div>
+
+  <!-- Email Provider Settings -->
+  <div class="card">
+    <h2 style="margin-top: 0;">Email Provider</h2>
+    
+    <div class="form-group">
+      <label>Provider *</label>
+      <select id="email_provider" name="email_provider" required>
+        <option value="resend">Resend API</option>
+        <option value="smtp">SMTP</option>
+        <option value="gmail">Gmail OAuth</option>
+      </select>
+    </div>
+    
+    <!-- Resend Settings -->
+    <div id="resend-settings" class="provider-settings">
+      <div class="form-group">
+        <label>Resend API Key</label>
+        <input type="text" id="resend_api_key" name="resend_api_key" placeholder="re_...">
+        <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+          Get your API key from <a href="https://resend.com/api-keys" target="_blank" rel="noopener">resend.com/api-keys</a>
+        </small>
+      </div>
+    </div>
+    
+    <!-- SMTP Settings -->
+    <div id="smtp-settings" class="provider-settings" style="display: none;">
+      <div class="form-group">
+        <label>SMTP Host *</label>
+        <input type="text" id="smtp_host" name="smtp_host" placeholder="smtp.gmail.com">
+      </div>
+      
+      <div class="form-group">
+        <label>SMTP Port *</label>
+        <input type="number" id="smtp_port" name="smtp_port" min="1" max="65535" value="587">
+      </div>
+      
+      <div class="form-group">
+        <label>SMTP Username</label>
+        <input type="text" id="smtp_user" name="smtp_user" placeholder="user@example.com">
+      </div>
+      
+      <div class="form-group">
+        <label>SMTP Password</label>
+        <input type="password" id="smtp_password" name="smtp_password" placeholder="Password">
+      </div>
+      
+      <div class="form-group">
+        <label style="display: flex; align-items: center; gap: 0.5rem;">
+          <input type="checkbox" id="smtp_use_tls" name="smtp_use_tls" style="width: auto; max-width: none;">
+          <span>Use TLS</span>
+        </label>
+      </div>
+    </div>
+    
+    <!-- Gmail OAuth Settings -->
+    <div id="gmail-settings" class="provider-settings" style="display: none;">
+      <div class="form-group">
+        <label>Google Client ID</label>
+        <input type="text" id="google_client_id" name="google_client_id" placeholder="...apps.googleusercontent.com">
+        <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+          From Google Cloud Console OAuth 2.0 credentials
+        </small>
+      </div>
+      
+      <div class="form-group">
+        <label>Google Client Secret</label>
+        <input type="password" id="google_client_secret" name="google_client_secret" placeholder="GOCSPX-...">
+      </div>
+    </div>
+  </div>
+
+  <!-- Save Button -->
+  <div style="display: flex; gap: 0.75rem; margin-top: 1.5rem;">
+    <button type="submit" class="btn" id="save-btn">Save Settings</button>
+    <button type="button" class="btn secondary" onclick="loadSettings()">Reload</button>
+  </div>
+</form>
+
+{% endblock %}
+{% block extra_js %}
+<script>
+function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function showMessage(msg, isError) {
+  const el = document.getElementById('settings-message');
+  el.className = 'card';
+  el.style.background = isError ? 'rgba(244, 63, 94, 0.1)' : 'rgba(52, 211, 153, 0.1)';
+  el.style.borderColor = isError ? 'var(--danger)' : 'var(--success)';
+  el.style.color = isError ? 'var(--danger)' : 'var(--success)';
+  el.textContent = msg;
+  setTimeout(() => { el.textContent = ''; el.style.background = ''; }, 5000);
+}
+
+function toggleProviderSettings() {
+  const provider = document.getElementById('email_provider').value;
+  document.getElementById('resend-settings').style.display = provider === 'resend' ? '' : 'none';
+  document.getElementById('smtp-settings').style.display = provider === 'smtp' ? '' : 'none';
+  document.getElementById('gmail-settings').style.display = provider === 'gmail' ? '' : 'none';
+}
+
+async function loadSettings() {
+  try {
+    const res = await fetch('/api/settings/');
+    if (!res.ok) throw new Error('Failed to load settings');
+    const data = await res.json();
+    
+    // General settings
+    document.getElementById('base_url').value = data.base_url || '';
+    document.getElementById('queue_check_interval_minutes').value = data.queue_check_interval_minutes || 1;
+    document.getElementById('test_mode').checked = data.test_mode || false;
+    
+    // Email provider
+    document.getElementById('email_provider').value = data.email_provider || 'resend';
+    toggleProviderSettings();
+    
+    // Resend
+    document.getElementById('resend_api_key').value = data.resend_api_key || '';
+    if (data.resend_api_key_configured && data.resend_api_key.includes('***')) {
+      document.getElementById('resend_api_key').placeholder = 'Already configured (hidden)';
+    }
+    
+    // SMTP
+    document.getElementById('smtp_host').value = data.smtp_host || 'localhost';
+    document.getElementById('smtp_port').value = data.smtp_port || 1025;
+    document.getElementById('smtp_user').value = data.smtp_user || '';
+    document.getElementById('smtp_password').value = data.smtp_password || '';
+    if (data.smtp_password_configured && data.smtp_password.includes('***')) {
+      document.getElementById('smtp_password').placeholder = 'Already configured (hidden)';
+    }
+    document.getElementById('smtp_use_tls').checked = data.smtp_use_tls || false;
+    
+    // Gmail OAuth
+    document.getElementById('google_client_id').value = data.google_client_id || '';
+    document.getElementById('google_client_secret').value = data.google_client_secret || '';
+    if (data.google_client_id_configured && data.google_client_id.includes('***')) {
+      document.getElementById('google_client_id').placeholder = 'Already configured (hidden)';
+    }
+    if (data.google_client_secret_configured && data.google_client_secret.includes('***')) {
+      document.getElementById('google_client_secret').placeholder = 'Already configured (hidden)';
+    }
+    
+  } catch (err) {
+    showMessage('Failed to load settings: ' + err.message, true);
+  }
+}
+
+async function saveSettings(e) {
+  e.preventDefault();
+  const btn = document.getElementById('save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  
+  try {
+    const formData = new FormData(e.target);
+    const data = {
+      base_url: formData.get('base_url'),
+      email_provider: formData.get('email_provider'),
+      resend_api_key: formData.get('resend_api_key') || '',
+      smtp_host: formData.get('smtp_host') || 'localhost',
+      smtp_port: parseInt(formData.get('smtp_port')) || 1025,
+      smtp_user: formData.get('smtp_user') || '',
+      smtp_password: formData.get('smtp_password') || '',
+      smtp_use_tls: formData.get('smtp_use_tls') === 'on',
+      google_client_id: formData.get('google_client_id') || '',
+      google_client_secret: formData.get('google_client_secret') || '',
+      queue_check_interval_minutes: parseInt(formData.get('queue_check_interval_minutes')) || 1,
+      test_mode: formData.get('test_mode') === 'on',
+    };
+    
+    // Don't send masked values back - reload original if unchanged
+    const currentSettings = await fetch('/api/settings/').then(r => r.json());
+    if (data.resend_api_key.includes('***')) data.resend_api_key = currentSettings.resend_api_key || '';
+    if (data.smtp_password.includes('***')) data.smtp_password = currentSettings.smtp_password || '';
+    if (data.google_client_id.includes('***')) data.google_client_id = currentSettings.google_client_id || '';
+    if (data.google_client_secret.includes('***')) data.google_client_secret = currentSettings.google_client_secret || '';
+    
+    const res = await fetch('/api/settings/', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || 'Failed to save settings');
+    }
+    
+    showMessage('Settings saved successfully!', false);
+    await loadSettings(); // Reload to show masked values
+    
+  } catch (err) {
+    showMessage('Error saving settings: ' + err.message, true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Save Settings';
+  }
+}
+
+// Event listeners
+document.getElementById('email_provider').addEventListener('change', toggleProviderSettings);
+document.getElementById('settings-form').addEventListener('submit', saveSettings);
+
+// Load settings on page load
+loadSettings();
+</script>
+{% endblock %}

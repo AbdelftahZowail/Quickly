@@ -33,6 +33,13 @@ class InboxCreate(BaseModel):
     email: str
     display_name: str = ""
     max_emails_per_day: int = 50
+    provider: str = "resend"  # resend | smtp | gmail
+
+
+class InboxUpdate(BaseModel):
+    display_name: Optional[str] = None
+    max_emails_per_day: Optional[int] = None
+    provider: Optional[str] = None
 
 
 class InboxResponse(BaseModel):
@@ -40,6 +47,7 @@ class InboxResponse(BaseModel):
     email: str
     display_name: str
     max_emails_per_day: int
+    provider: str
     created_at: datetime
 
     class Config:
@@ -79,6 +87,7 @@ class CampaignCreate(BaseModel):
     sending_hours_end: str = "17:00"
     wait_minutes_between: int = 5
     stop_on_reply: bool = True
+    paused: bool = False
 
 
 class CampaignUpdate(BaseModel):
@@ -89,6 +98,7 @@ class CampaignUpdate(BaseModel):
     sending_hours_end: Optional[str] = None
     wait_minutes_between: Optional[int] = None
     stop_on_reply: Optional[bool] = None
+    paused: Optional[bool] = None
 
 
 class CampaignResponse(BaseModel):
@@ -100,6 +110,7 @@ class CampaignResponse(BaseModel):
     sending_hours_end: str
     wait_minutes_between: int
     stop_on_reply: bool
+    paused: bool
     created_at: datetime
 
     class Config:

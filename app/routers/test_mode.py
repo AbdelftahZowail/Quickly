@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 
-from app.config import settings
+from app.settings_manager import settings
 from app.database import get_db
 from app.models import PendingSend, EmailLog, Campaign
 from app.sender import send_email
@@ -57,7 +57,7 @@ async def approve_one(pending_id: int, db: AsyncSession = Depends(get_db)):
     pending = result.scalar_one_or_none()
     if not pending:
         raise HTTPException(404, "Pending email not found")
-    message_id = send_email(
+    result = send_email(
         to_email=pending.to_email,
         subject=pending.subject,
         body=pending.body,
@@ -65,20 +65,22 @@ async def approve_one(pending_id: int, db: AsyncSession = Depends(get_db)):
         from_name=pending.from_name or "",
         reply_to_msg_id=pending.reply_to_msg_id,
         is_html=pending.is_html,
+        thread_id=getattr(pending, 'thread_id', None),
     )
-    if not message_id:
+    if not result:
         raise HTTPException(500, "Failed to send email. Check Resend API key and logs.")
     db.add(EmailLog(
         lead_id=pending.lead_id,
         campaign_id=pending.campaign_id,
         sequence_index=pending.sequence_index,
         subject=pending.subject,
-        message_id=message_id,
+        message_id=result.message_id,
+        thread_id=result.thread_id,
     ))
     await db.delete(pending)
     await db.flush()
-    log.info("approve_one: sent pending %s to %s (message_id=%s)", pending_id, pending.to_email, message_id)
-    return {"ok": True, "message_id": message_id}
+    log.info("approve_one: sent pending %s to %s (message_id=%s)", pending_id, pending.to_email, result.message_id)
+    return {"ok": True, "message_id": result.message_id}
 
 
 @router.post("/pending/approve-all")
@@ -89,7 +91,7 @@ async def approve_all(db: AsyncSession = Depends(get_db)):
     sent = 0
     failed = 0
     for pending in pending_list:
-        message_id = send_email(
+        result = send_email(
             to_email=pending.to_email,
             subject=pending.subject,
             body=pending.body,
@@ -97,14 +99,16 @@ async def approve_all(db: AsyncSession = Depends(get_db)):
             from_name=pending.from_name or "",
             reply_to_msg_id=pending.reply_to_msg_id,
             is_html=pending.is_html,
+            thread_id=getattr(pending, 'thread_id', None),
         )
-        if message_id:
+        if result:
             db.add(EmailLog(
                 lead_id=pending.lead_id,
                 campaign_id=pending.campaign_id,
                 sequence_index=pending.sequence_index,
                 subject=pending.subject,
-                message_id=message_id,
+                message_id=result.message_id,
+                thread_id=result.thread_id,
             ))
             await db.delete(pending)
             sent += 1

@@ -115,11 +115,8 @@
     <a href="/campaigns">Campaigns</a>
     <a href="/inboxes">Inboxes</a>
     <a href="/leads">Leads</a>
-    <a href="/leads/add">Add Lead</a>
-    <a href="/accounts">Accounts</a>
-    <a href="/permissions">Permissions</a>
     <a href="/calendar">Calendar</a>
-    <a href="/approvals" id="nav-approvals" style="display:none;">Approvals</a>
+    <a href="/settings">Settings</a>
   </nav>
   <div id="test-mode-banner" class="card" style="display: none; margin: 0 1.5rem 1rem; background: rgba(244, 63, 94, 0.1); border-color: var(--danger);"></div>
   <div class="wrap">
@@ -129,16 +126,6 @@
   (function() {
     fetch('/api/test/status').then(function(r) { return r.json(); }).then(function(data) {
       if (!data.test_mode) return;
-      // Show the Approvals nav link when test mode is on
-      var navLink = document.getElementById('nav-approvals');
-      if (navLink) navLink.style.display = '';
-      fetch('/api/test/pending').then(function(r) { return r.json(); }).then(function(pending) {
-        if (pending.length) {
-          var el = document.getElementById('test-mode-banner');
-          el.style.display = 'block';
-          el.innerHTML = '<strong>Test mode</strong>: ' + pending.length + ' email(s) pending approval. <a href="/approvals" style="color:var(--accent);font-weight:600;">Review &amp; approve</a>';
-        }
-      });
     }).catch(function() {});
   })();
   </script>

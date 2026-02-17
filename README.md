@@ -17,13 +17,12 @@ cd "Campaign Engine 2"
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 pip install -r requirements.txt
-# Optional: copy .env.example to .env and set SMTP_* and others
 uvicorn app.main:app --reload
 ```
 
-Open http://127.0.0.1:8000 for the web UI.
+Open http://127.0.0.1:8000 for the web UI. Configure all settings from the **Settings** page in the navigation menu.
 
-**When do emails send?** The send job runs only while the server is running (`uvicorn app.main:app`). By default it runs every 1 minute (set `QUEUE_CHECK_INTERVAL_MINUTES` in `.env`). To confirm it’s running: check the server console for log lines like `Send job running at ...` and `Send job finished: N email(s) sent`, or call **GET /api/status** to see `scheduler_running`, `last_send_job_run`, and `next_send_job_run`.
+**When do emails send?** The send job runs only while the server is running (`uvicorn app.main:app`). By default it runs every 1 minute (configurable in Settings). To confirm it's running: check the server console for log lines like `Send job running at ...` and `Send job finished: N email(s) sent`, or call **GET /api/status** to see `scheduler_running`, `last_send_job_run`, and `next_send_job_run`.
 
 ## API (no auth)
 
@@ -32,14 +31,20 @@ Open http://127.0.0.1:8000 for the web UI.
 - **Status**: `GET /api/status` — scheduler running, last/next send job run, interval.
 - **Campaigns**: `GET/POST /api/campaigns`, `GET/PATCH /api/campaigns/{id}`, `GET/POST /api/campaigns/{id}/sequences`, `PATCH /api/campaigns/{id}/sequences/{seq_id}`, `GET /api/campaigns/{id}/leads`, `GET /api/campaigns/{id}/queue`, `POST /api/campaigns/{id}/leads/{lead_id}`
 
-Use the **Inboxes** page to add sending addresses, then create a campaign and select one or more inboxes. Add sequences (position 0, 1, 2… with subject/body/wait_days_after_previous), then add leads and assign to campaigns; slots are reserved automatically across the campaign’s inboxes. If you had an existing database from before multi-inbox support, delete `campaign.db` so tables are recreated with the new schema.
+Use the **Inboxes** page to add sending addresses, then create a campaign and select one or more inboxes. Add sequences (position 0, 1, 2… with subject/body/wait_days_after_previous), then add leads and assign to campaigns; slots are reserved automatically across the campaign's inboxes.
 
-## Config
+## Configuration
 
-Copy `.env.example` to `.env` and set:
+**All settings are now managed from the web UI:** Navigate to the **Settings** page (http://127.0.0.1:8000/settings) to configure:
 
-- **Email (Resend, default):** `EMAIL_PROVIDER=resend`, `RESEND_API_KEY=re_xxx` — get a key at [resend.com/api-keys](https://resend.com/api-keys). Sending uses the Resend API; threading (In-Reply-To/References) is supported.
-- **Email (SMTP):** `EMAIL_PROVIDER=smtp`, then `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_USE_TLS`.
-- **Other:** `DATABASE_URL`, `QUEUE_CHECK_INTERVAL_MINUTES`, `TEST_MODE`.
+- **General Settings:** Base URL, queue check interval, test mode
+- **Email Provider:** Choose between Resend, SMTP, or Gmail OAuth
+  - **Resend:** Enter your API key from [resend.com/api-keys](https://resend.com/api-keys)
+  - **SMTP:** Configure host, port, username, password, TLS
+  - **Gmail OAuth:** Enter Google Client ID and Secret from Google Cloud Console
 
-**Test mode** (`TEST_MODE=true`): The send job does not send emails; it moves due emails into a pending-approval queue. The frontend shows the queue in the browser console and a banner. Approve from the **backend Python console**: `python -m app.approval --list` to list pending, `python -m app.approval` to send all, `python -m app.approval <id>` to send one by id.
+Settings are stored in the database and changes take effect immediately (no restart required).
+
+**Legacy `.env` file:** No longer used. The old environment variable approach has been replaced with database storage for easier management. See [SETTINGS_MIGRATION.md](SETTINGS_MIGRATION.md) for migration details.
+
+**Test mode**: Enable from the Settings page. The send job will not send emails; it moves due emails into a pending-approval queue. The frontend shows the queue and a banner. Approve from the **backend Python console**: `python -m app.approval --list` to list pending, `python -m app.approval` to send all, `python -m app.approval <id>` to send one by id.

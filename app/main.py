@@ -17,10 +17,11 @@ from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.database import init_db
-from app.config import settings
+from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
 from app.routers import calendar as calendar_router
+from app.routers import settings as settings_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 
 
@@ -50,6 +51,7 @@ app.include_router(campaigns.router)
 app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
 app.include_router(calendar_router.router)
+app.include_router(settings_router.router)
 
 # Web UI
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -85,24 +87,9 @@ async def leads_page(request: Request):
     return templates.TemplateResponse("leads.html", {"request": request})
 
 
-@app.get("/leads/add", response_class=HTMLResponse)
-async def add_lead_page(request: Request):
-    return templates.TemplateResponse("add_lead.html", {"request": request})
-
-
 @app.get("/inboxes", response_class=HTMLResponse)
 async def inboxes_page(request: Request):
     return templates.TemplateResponse("inboxes.html", {"request": request})
-
-
-@app.get("/accounts", response_class=HTMLResponse)
-async def accounts_page(request: Request):
-    return templates.TemplateResponse("accounts.html", {"request": request})
-
-
-@app.get("/permissions", response_class=HTMLResponse)
-async def permissions_page(request: Request):
-    return templates.TemplateResponse("permissions.html", {"request": request})
 
 
 @app.get("/calendar", response_class=HTMLResponse)
@@ -110,9 +97,10 @@ async def calendar_page(request: Request):
     return templates.TemplateResponse("calendar.html", {"request": request})
 
 
-@app.get("/approvals", response_class=HTMLResponse)
-async def approvals_page(request: Request):
-    return templates.TemplateResponse("approvals.html", {"request": request})
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(request: Request):
+    return templates.TemplateResponse("settings.html", {"request": request})
 
 
 @app.get("/api/status")
@@ -127,4 +115,5 @@ async def api_status(request: Request):
         "last_send_job_run": last_send_job_run.isoformat() if last_send_job_run else None,
         "last_send_job_sent_count": last_send_job_sent_count,
         "next_send_job_run": next_run,
+        "test_mode": settings.test_mode,
     }

@@ -1,10 +1,10 @@
-"""Background job: send due emails from the queue (or enqueue for approval in test mode)."""
+"""Background job: send due emails from the queue."""
 import logging
 from datetime import datetime, date, time
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.settings_manager import settings
 from app.database import AsyncSessionLocal
 from app.models import (
     QueueSlot,
@@ -18,8 +18,9 @@ from app.models import (
     PendingSend,
     GmailAccount,
 )
-from app.sender import send_email, render_body, get_lead_data
+from app.sender import send_email, render_body, get_lead_data, SendResult
 from app.routers.gmail_oauth import refresh_access_token
+from app.app_settings import get_google_oauth_credentials
 
 log = logging.getLogger(__name__)
 
@@ -29,10 +30,19 @@ last_send_job_sent_count: int = 0
 
 
 def _parse_time(s: str) -> time:
-    parts = s.strip().split(":")
-    if len(parts) != 2:
+    try:
+        parts = s.strip().split(":")
+        if len(parts) != 2:
+            return time(9, 0)
+        h = int(parts[0])
+        m = int(parts[1])
+        if h == 24 and m == 0:
+            return time(23, 59)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return time(9, 0)
+        return time(h, m)
+    except Exception:
         return time(9, 0)
-    return time(int(parts[0]), int(parts[1]))
 
 
 def _in_sending_window(now: datetime, campaign: Campaign) -> bool:
@@ -59,6 +69,9 @@ async def run_send_job():
         inboxes = result.scalars().all()
 
         total_sent = 0
+        # Pre-fetch Google OAuth credentials once for all Gmail inboxes
+        g_client_id, g_client_secret = await get_google_oauth_credentials(session)
+
         for inbox in inboxes:
             # For Gmail inboxes, pre-fetch and refresh the access token
             gmail_token = ""
@@ -71,7 +84,7 @@ async def run_send_job():
                 if ga:
                     # Refresh token if expired (or within 5 min of expiry)
                     if ga.token_expiry and ga.token_expiry <= datetime.utcnow():
-                        refreshed = refresh_access_token(ga)
+                        refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
                         if refreshed:
                             await session.flush()
                         else:
@@ -107,6 +120,8 @@ async def run_send_job():
             for slot, cl, campaign, lead, sequence in rows:
                 if sent_this_inbox >= max_per_day:
                     break
+                if getattr(campaign, 'paused', False):
+                    continue  # Skip paused campaigns
                 if not _in_sending_window(now, campaign):
                     break
 
@@ -123,59 +138,75 @@ async def run_send_job():
                         continue
 
                 reply_to_msg_id = None
+                prev_thread_id = None
+                references_chain = None
                 if (sequence.subject or "").strip() == "":
-                    prev_log = await session.execute(
+                    # Fetch ALL prior emails in this lead+campaign thread for proper References chain
+                    all_logs_result = await session.execute(
                         select(EmailLog).where(
                             EmailLog.lead_id == lead.id,
                             EmailLog.campaign_id == campaign.id,
-                        ).order_by(EmailLog.sequence_index.desc()).limit(1)
+                            EmailLog.message_id.isnot(None),
+                            EmailLog.message_id != "",
+                        ).order_by(EmailLog.sent_at.asc())
                     )
-                    prev = prev_log.scalar_one_or_none()
-                    if prev and prev.message_id:
-                        reply_to_msg_id = prev.message_id
+                    all_logs = all_logs_result.scalars().all()
 
-                subject = (sequence.subject or "").strip() or "(no subject)"
+                    if all_logs:
+                        # In-Reply-To = most recent message (direct parent)
+                        reply_to_msg_id = all_logs[-1].message_id
+                        # References = ALL message IDs in order (space-separated)
+                        references_chain = " ".join(
+                            (mid if mid.startswith("<") else f"<{mid}>")
+                            for log_entry in all_logs
+                            if (mid := log_entry.message_id)
+                        )
+                        # Gmail threadId from most recent
+                        prev_thread_id = all_logs[-1].thread_id
+                        # Subject: Re: <original subject> from the FIRST email that had a real subject
+                        first_with_subject = next(
+                            (e for e in all_logs if e.subject and e.subject.strip() and e.subject != "(no subject)"),
+                            None,
+                        )
+                        if first_with_subject:
+                            orig_subj = first_with_subject.subject
+                            if orig_subj.lower().startswith("re: "):
+                                subject = orig_subj
+                            else:
+                                subject = f"Re: {orig_subj}"
+                        else:
+                            subject = "(no subject)"
+                    else:
+                        subject = "(no subject)"
+                else:
+                    subject = sequence.subject.strip()
+
                 body = render_body(sequence.body, get_lead_data(lead))
                 from_addr = inbox.email
                 from_name = inbox.display_name or ""
                 is_html = (sequence.body or "").strip().lower().startswith("<")
 
-                # if settings.test_mode:
-                #     # Enqueue for manual approval; do not send
-                #     pending = PendingSend(
-                #         lead_id=lead.id,
-                #         campaign_id=campaign.id,
-                #         sequence_index=slot.sequence_index,
-                #         to_email=lead.email,
-                #         subject=subject,
-                #         body=body,
-                #         is_html=is_html,
-                #         from_email=from_addr,
-                #         from_name=from_name or "",
-                #         reply_to_msg_id=reply_to_msg_id,
-                #     )
-                #     session.add(pending)
-                #     await session.delete(slot)
-                #     sent_this_inbox += 1
-                # else:
-                message_id = send_email(
+                result = send_email(
                     to_email=lead.email,
                     subject=subject,
                     body=body,
                     from_email=from_addr,
                     from_name=from_name,
                     reply_to_msg_id=reply_to_msg_id,
+                    references=references_chain,
                     is_html=is_html,
                     provider=inbox_provider,
                     gmail_access_token=gmail_token,
+                    thread_id=prev_thread_id,
                 )
-                if message_id:
+                if result:
                     email_log_entry = EmailLog(
                         lead_id=lead.id,
                         campaign_id=campaign.id,
                         sequence_index=slot.sequence_index,
                         subject=subject,
-                        message_id=message_id,
+                        message_id=result.message_id,
+                        thread_id=result.thread_id,
                     )
                     session.add(email_log_entry)
                     await session.delete(slot)

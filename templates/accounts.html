@@ -19,7 +19,7 @@
 <div class="card" style="max-width: 560px; margin-bottom: 2rem;" id="connect-section">
   <h2 style="margin-top:0;">Connect Gmail account</h2>
   <div id="oauth-not-configured" style="display:none;">
-    <p style="color:var(--danger);">Google OAuth is not configured yet. Follow the setup instructions below, then restart the server.</p>
+    <p style="color:var(--danger);">Google OAuth is not configured yet. Follow the setup instructions below to get started.</p>
   </div>
   <form id="connect-form" style="display:none;">
     <div class="form-group">
@@ -86,14 +86,23 @@
       <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong></li>
     </ol>
 
-    <h3 style="color:var(--accent); margin-top:1.5rem;">Step 5 — Add to your .env file</h3>
-    <pre style="background:var(--bg); padding:1rem; border-radius:6px; overflow-x:auto; color:var(--text); margin:0.5rem 0;"><code>GOOGLE_CLIENT_ID=your-client-id-here.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=GOCSPX-your-secret-here</code></pre>
+    <h3 style="color:var(--accent); margin-top:1.5rem;">Step 5 — Save your credentials</h3>
+    <form id="oauth-creds-form" style="display:flex; flex-direction:column; gap:0.75rem; max-width:500px;">
+      <label style="color:var(--text);">Client ID
+        <input type="text" name="client_id" placeholder="your-client-id.apps.googleusercontent.com" required
+               style="width:100%; margin-top:0.25rem; padding:0.5rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+      </label>
+      <label style="color:var(--text);">Client Secret
+        <input type="text" name="client_secret" placeholder="GOCSPX-your-secret" required
+               style="width:100%; margin-top:0.25rem; padding:0.5rem; background:var(--bg); color:var(--text); border:1px solid var(--border); border-radius:4px;">
+      </label>
+      <button type="submit" class="btn">Save credentials</button>
+      <p id="creds-msg" style="display:none; margin:0;"></p>
+    </form>
 
-    <h3 style="color:var(--accent); margin-top:1.5rem;">Step 6 — Restart &amp; connect</h3>
+    <h3 style="color:var(--accent); margin-top:1.5rem;">Step 6 — Connect</h3>
     <ol>
-      <li>Restart the server (<code>uvicorn app.main:app --reload</code>)</li>
-      <li>Come back to this page and click <strong>"Connect with Google"</strong></li>
+      <li>After saving, click <strong>"Connect with Google"</strong> above</li>
       <li>Sign in with the Gmail/Workspace account you want to send from</li>
       <li>Grant the requested permissions — done! The account will appear as an inbox automatically.</li>
     </ol>
@@ -201,6 +210,43 @@ async function disconnect(id, email) {
   } catch (e) {
     alert('Request failed.');
   }
+}
+
+// Save OAuth credentials form
+const credsForm = document.getElementById('oauth-creds-form');
+if (credsForm) {
+  credsForm.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    const msg = document.getElementById('creds-msg');
+    msg.style.display = 'none';
+    const body = {
+      client_id: this.client_id.value.trim(),
+      client_secret: this.client_secret.value.trim(),
+    };
+    try {
+      const res = await fetch('/api/settings/google-oauth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        msg.style.display = 'block';
+        msg.style.color = 'var(--success)';
+        msg.textContent = '\u2713 ' + (data.message || 'Saved!');
+        // Re-check status so connect form shows up immediately
+        setTimeout(() => init(), 500);
+      } else {
+        msg.style.display = 'block';
+        msg.style.color = 'var(--danger)';
+        msg.textContent = data.detail || 'Error saving credentials.';
+      }
+    } catch (err) {
+      msg.style.display = 'block';
+      msg.style.color = 'var(--danger)';
+      msg.textContent = 'Request failed.';
+    }
+  });
 }
 
 init();

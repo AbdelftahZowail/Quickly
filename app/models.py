@@ -35,6 +35,7 @@ class Campaign(Base):
     __tablename__ = "campaign"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
+    paused = Column(Boolean, default=False)  # If True, skip sending from this campaign
     # sending_days: 0=Mon .. 6=Sun, stored as JSON array e.g. [0,1,2,3,4]
     sending_days = Column(JSON, default=[0, 1, 2, 3, 4])  # Mon-Fri default
     sending_hours_start = Column(String(5), default="09:00")  # 9am
@@ -108,7 +109,8 @@ class EmailLog(Base):
     sequence_index = Column(Integer, nullable=False)
     sent_at = Column(DateTime, default=datetime.utcnow)
     subject = Column(String(512), default="")
-    message_id = Column(String(512), default=None)  # for In-Reply-To threading
+    message_id = Column(String(512), default=None)  # RFC 822 Message-ID for In-Reply-To threading
+    thread_id = Column(String(512), default=None)   # Gmail threadId for thread continuity
     lead = relationship("Lead", back_populates="email_logs")
     campaign = relationship("Campaign", back_populates="email_logs")
 
@@ -137,7 +139,20 @@ class PendingSend(Base):
     from_email = Column(String(255), nullable=False)
     from_name = Column(String(255), default="")
     reply_to_msg_id = Column(String(512), default=None)
+    thread_id = Column(String(512), default=None)  # Gmail threadId for thread continuity
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AppSetting(Base):
+    """Key-value store for application settings (e.g. OAuth credentials).
+
+    Keeps sensitive config in the database instead of .env so the
+    frontend never needs direct filesystem access.
+    """
+    __tablename__ = "app_setting"
+    key = Column(String(255), primary_key=True, nullable=False)
+    value = Column(Text, nullable=False, default="")
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class GmailAccount(Base):

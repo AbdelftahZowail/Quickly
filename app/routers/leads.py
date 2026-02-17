@@ -62,6 +62,7 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
         lead.custom_data = data.custom_data
     if data.status is not None:
         lead.status = data.status
+    await db.flush()
     await db.refresh(lead)
     return lead
 

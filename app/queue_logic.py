@@ -12,10 +12,19 @@ log = logging.getLogger("campaign_engine.queue")
 
 def _parse_time(s: str) -> time:
     """Parse 'HH:MM' string to a time object."""
-    parts = s.strip().split(":")
-    if len(parts) != 2:
+    try:
+        parts = s.strip().split(":")
+        if len(parts) != 2:
+            return time(9, 0)
+        h = int(parts[0])
+        m = int(parts[1])
+        if h == 24 and m == 0:
+            return time(23, 59)
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            return time(9, 0)
+        return time(h, m)
+    except Exception:
         return time(9, 0)
-    return time(int(parts[0]), int(parts[1]))
 
 
 def _estimated_send_time(sending_hours_start: str, wait_minutes: int, position_in_day: int) -> time:
@@ -175,9 +184,12 @@ async def reserve_slots_for_lead(
         log.info("reserve_slots_for_lead: nothing to schedule (all already sent) cl=%s", campaign_lead_id)
         return
 
+    today = date.today()
     if start_date is None:
-        start_date = date.today()
+        start_date = today
     current_date = next_business_date(start_date, sending_days, 0)
+    if current_date < today:
+        current_date = next_business_date(today, sending_days, 0)
     scheduled_dates: List[date] = []
     round_robin = 0
 
@@ -375,7 +387,7 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
             )
             row = sent_date_result.scalar_one_or_none()
             if row is not None:
-                start_date = row.date()
+                start_date = max(row.date(), date.today())
 
         await reserve_slots_for_lead(
             session, cl.id, campaign, inboxes, sequences,

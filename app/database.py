@@ -2,7 +2,9 @@
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
-from app.config import settings
+
+# Import settings from the new settings manager (not config.py)
+from app.settings_manager import settings
 
 engine = create_async_engine(
     settings.database_url,
@@ -73,9 +75,25 @@ def _migrate_inbox_provider(conn):
         conn.execute(text("ALTER TABLE inbox ADD COLUMN provider VARCHAR(32) DEFAULT 'resend'"))
 
 
+def _migrate_thread_id(conn):
+    """Add thread_id column to email_log and pending_send tables if missing."""
+    for table in ("email_log", "pending_send"):
+        cur = conn.execute(text(f"PRAGMA table_info({table})"))
+        columns = [row[1] for row in cur.fetchall()]
+        if "thread_id" not in columns:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN thread_id VARCHAR(512) DEFAULT NULL"))
+
+
 async def init_db():
     from app import models  # noqa: F401 - so Base.metadata has all tables
+    from app.settings_manager import initialize_settings
+    
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_campaign_inbox)
         await conn.run_sync(_migrate_inbox_provider)
+        await conn.run_sync(_migrate_thread_id)
+    
+    # Load settings from database into memory
+    async with AsyncSessionLocal() as session:
+        await initialize_settings(session)

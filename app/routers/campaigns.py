@@ -32,6 +32,7 @@ def _campaign_to_response(campaign: Campaign, inbox_ids: list[int]) -> CampaignR
         sending_hours_end=campaign.sending_hours_end or "17:00",
         wait_minutes_between=campaign.wait_minutes_between,
         stop_on_reply=campaign.stop_on_reply,
+        paused=campaign.paused if hasattr(campaign, 'paused') else False,
         created_at=campaign.created_at,
     )
 
@@ -74,6 +75,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         sending_hours_end=data.sending_hours_end,
         wait_minutes_between=data.wait_minutes_between,
         stop_on_reply=data.stop_on_reply,
+        paused=data.paused,
     )
     db.add(campaign)
     await db.flush()
@@ -133,9 +135,63 @@ async def update_campaign(
         campaign.wait_minutes_between = data.wait_minutes_between
     if data.stop_on_reply is not None:
         campaign.stop_on_reply = data.stop_on_reply
+    if data.paused is not None:
+        campaign.paused = data.paused
     await db.flush()
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
+
+
+@router.post("/{campaign_id}/duplicate", response_model=CampaignResponse)
+async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Create a copy of a campaign with all its sequences, but no enrolled leads."""
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    original = result.scalar_one_or_none()
+    if not original:
+        raise HTTPException(404, "Campaign not found")
+    
+    # Get inbox associations
+    inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
+    inbox_ids = inbox_map.get(campaign_id, [])
+    
+    # Get sequences
+    seq_result = await db.execute(
+        select(Sequence).where(Sequence.campaign_id == campaign_id).order_by(Sequence.position)
+    )
+    sequences = seq_result.scalars().all()
+    
+    # Create new campaign
+    new_campaign = Campaign(
+        name=f"{original.name} (Copy)",
+        sending_days=original.sending_days,
+        sending_hours_start=original.sending_hours_start,
+        sending_hours_end=original.sending_hours_end,
+        wait_minutes_between=original.wait_minutes_between,
+        stop_on_reply=original.stop_on_reply,
+    )
+    db.add(new_campaign)
+    await db.flush()
+    
+    # Copy inbox associations
+    for pos, inbox_id in enumerate(inbox_ids):
+        db.add(CampaignInbox(campaign_id=new_campaign.id, inbox_id=inbox_id, position=pos))
+    
+    # Copy sequences
+    for seq in sequences:
+        new_seq = Sequence(
+            campaign_id=new_campaign.id,
+            position=seq.position,
+            subject=seq.subject,
+            body=seq.body,
+            wait_days_after_previous=seq.wait_days_after_previous,
+        )
+        db.add(new_seq)
+    
+    await db.flush()
+    await db.refresh(new_campaign)
+    log.info("duplicate_campaign: original=%s new=%s sequences=%d", campaign_id, new_campaign.id, len(sequences))
+    
+    return _campaign_to_response(new_campaign, inbox_ids)
 
 
 # ---- Sequences ----

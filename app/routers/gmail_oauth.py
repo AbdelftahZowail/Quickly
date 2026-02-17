@@ -11,7 +11,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
+from app.settings_manager import settings
 from app.database import get_db
 from app.models import Inbox, GmailAccount
 
@@ -28,9 +28,11 @@ USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
 
 
 @router.get("/api/gmail/status")
-async def gmail_oauth_status():
+async def gmail_oauth_status(db: AsyncSession = Depends(get_db)):
     """Check if Google OAuth credentials are configured."""
-    configured = bool(settings.google_client_id and settings.google_client_secret)
+    from app.app_settings import get_google_oauth_credentials
+    client_id, client_secret = await get_google_oauth_credentials(db)
+    configured = bool(client_id and client_secret)
     return {
         "configured": configured,
         "redirect_uri": settings.google_redirect_uri,
@@ -178,16 +180,22 @@ async def check_gmail_permissions(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/oauth/google/authorize")
-async def google_authorize(display_name: str = "", max_per_day: int = 50):
+async def google_authorize(
+    display_name: str = "",
+    max_per_day: int = 50,
+    db: AsyncSession = Depends(get_db),
+):
     """Redirect user to Google consent screen."""
-    if not settings.google_client_id or not settings.google_client_secret:
-        raise HTTPException(400, "Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env")
+    from app.app_settings import get_google_oauth_credentials
+    client_id, client_secret = await get_google_oauth_credentials(db)
+    if not client_id or not client_secret:
+        raise HTTPException(400, "Google OAuth not configured. Save your credentials in Settings first.")
 
     # Store display_name and max_per_day in state so we can use it in callback
     state_data = json.dumps({"display_name": display_name, "max_per_day": max_per_day})
 
     params = {
-        "client_id": settings.google_client_id,
+        "client_id": client_id,
         "redirect_uri": settings.google_redirect_uri,
         "response_type": "code",
         "scope": f"{GMAIL_SCOPE} {USERINFO_EMAIL_SCOPE}",
@@ -221,8 +229,12 @@ async def google_callback(
     display_name = state_data.get("display_name", "")
     max_per_day = state_data.get("max_per_day", 50)
 
+    # Fetch OAuth credentials from DB
+    from app.app_settings import get_google_oauth_credentials
+    client_id, client_secret = await get_google_oauth_credentials(db)
+
     # Exchange code for tokens
-    token_data = _exchange_code(code)
+    token_data = _exchange_code(code, client_id, client_secret, settings.google_redirect_uri)
     if not token_data:
         raise HTTPException(502, "Failed to exchange authorization code for tokens")
 
@@ -294,8 +306,8 @@ async def google_callback(
     await db.flush()
     log.info("Gmail OAuth connected: %s (inbox_id=%s)", email, inbox.id)
 
-    # Redirect to the accounts page with success
-    return RedirectResponse("/accounts?connected=" + urllib.parse.quote(email), status_code=303)
+    # Redirect to the inboxes page with success
+    return RedirectResponse("/inboxes?connected=" + urllib.parse.quote(email), status_code=303)
 
 
 @router.delete("/api/gmail/accounts/{account_id}")
@@ -324,13 +336,13 @@ async def disconnect_gmail(account_id: int, db: AsyncSession = Depends(get_db)):
 
 # ---- Helper functions ----
 
-def _exchange_code(code: str) -> dict | None:
+def _exchange_code(code: str, client_id: str, client_secret: str, redirect_uri: str) -> dict | None:
     """Exchange authorization code for access/refresh tokens."""
     data = urllib.parse.urlencode({
         "code": code,
-        "client_id": settings.google_client_id,
-        "client_secret": settings.google_client_secret,
-        "redirect_uri": settings.google_redirect_uri,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri,
         "grant_type": "authorization_code",
     }).encode()
 
@@ -363,11 +375,22 @@ def _get_user_email(access_token: str) -> str | None:
         return None
 
 
-def refresh_access_token(gmail_account: GmailAccount) -> str | None:
-    """Refresh the access token using the refresh token. Updates the model in-place."""
+def refresh_access_token(
+    gmail_account: GmailAccount,
+    client_id: str = "",
+    client_secret: str = "",
+) -> str | None:
+    """Refresh the access token using the refresh token. Updates the model in-place.
+
+    *client_id* / *client_secret* should be passed explicitly.  When
+    omitted the function falls back to ``settings`` (.env) for backward
+    compatibility.
+    """
+    _cid = client_id or settings.google_client_id
+    _csec = client_secret or settings.google_client_secret
     data = urllib.parse.urlencode({
-        "client_id": settings.google_client_id,
-        "client_secret": settings.google_client_secret,
+        "client_id": _cid,
+        "client_secret": _csec,
         "refresh_token": gmail_account.refresh_token,
         "grant_type": "refresh_token",
     }).encode()

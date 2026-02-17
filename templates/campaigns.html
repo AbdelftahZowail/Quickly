@@ -33,12 +33,17 @@
       const ids = c.inbox_ids || [];
       const inboxLabel = ids.length === 0 ? '—' : ids.length === 1 ? (inboxMap[ids[0]] || 'id ' + ids[0]) : ids.length + ' inboxes';
       const days = (c.sending_days || []).length;
+      const pauseLabel = c.paused ? 'Resume' : 'Pause';
+      const pauseClass = c.paused ? 'btn' : 'btn secondary';
+      const nameDisplay = c.paused ? `<span style="color:var(--muted);">${escapeHtml(c.name)} <span class="badge" style="background:rgba(244,63,94,0.2);color:var(--danger);">PAUSED</span></span>` : `<a href="/campaigns/${c.id}">${escapeHtml(c.name)}</a>`;
       tr.innerHTML = `
-        <td><a href="/campaigns/${c.id}">${escapeHtml(c.name)}</a></td>
+        <td>${nameDisplay}</td>
         <td class="mono">${escapeHtml(inboxLabel)}</td>
         <td>${days} days, ${c.sending_hours_start || '09:00'}–${c.sending_hours_end || '17:00'}</td>
         <td style="display:flex;gap:0.4rem;">
           <a href="/campaigns/${c.id}" class="btn secondary">View</a>
+          <button class="${pauseClass}" onclick="togglePause(${c.id}, ${c.paused}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">${pauseLabel}</button>
+          <button class="btn secondary" onclick="duplicateCampaign(${c.id}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">Duplicate</button>
           <button class="btn danger" onclick="deleteCampaign(${c.id}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">Delete</button>
         </td>
       `;
@@ -54,6 +59,35 @@
     } else {
       const t = await res.text();
       alert('Error deleting campaign: ' + t);
+    }
+  };
+
+  window.duplicateCampaign = async function(id, name) {
+    if (!confirm('Duplicate campaign "' + name + '"? This will create a copy with all sequences but no enrolled leads.')) return;
+    const res = await fetch('/api/campaigns/' + id + '/duplicate', { method: 'POST' });
+    if (res.ok) {
+      const newCampaign = await res.json();
+      alert('Campaign duplicated: ' + newCampaign.name);
+      load();
+    } else {
+      const t = await res.text();
+      alert('Error duplicating campaign: ' + t);
+    }
+  };
+
+  window.togglePause = async function(id, currentlyPaused, name) {
+    const action = currentlyPaused ? 'resume' : 'pause';
+    if (!confirm((currentlyPaused ? 'Resume' : 'Pause') + ' campaign "' + name + '"?')) return;
+    const res = await fetch('/api/campaigns/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paused: !currentlyPaused }),
+    });
+    if (res.ok) {
+      load();
+    } else {
+      const t = await res.text();
+      alert('Error ' + action + 'ing campaign: ' + t);
     }
   };
 

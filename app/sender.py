@@ -10,6 +10,7 @@ import urllib.request
 import urllib.error
 import urllib.parse
 import resend
+from dataclasses import dataclass
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import make_msgid
@@ -17,15 +18,26 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from app.config import settings
+from app.settings_manager import settings
 
 log = logging.getLogger("campaign_engine.sender")
+
+
+@dataclass
+class SendResult:
+    """Returned by send_email with IDs needed for threading."""
+    message_id: str            # RFC 822 Message-ID (e.g. <xxx@domain>)
+    thread_id: Optional[str] = None  # Gmail threadId (only for Gmail provider)
+
+    def __bool__(self):
+        return bool(self.message_id)
 
 # ---- Resend API file logger ----
 # Every Resend API call (request + response) is appended to logs/resend_api.log
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 _RESEND_LOG_PATH = _LOG_DIR / "resend_api.log"
+_GMAIL_LOG_PATH = _LOG_DIR / "gmail_api.log"
 
 
 def _log_resend_call(
@@ -61,6 +73,40 @@ def _test_mode_redirect(to_email: str) -> str:
     return redirected
 
 
+def _log_gmail_call(
+    to_email: str,
+    from_email: str,
+    subject: str,
+    raw_mime: str,
+    api_payload: dict,
+    thread_id: Optional[str] = None,
+    status: str = "SENDING",
+    response: str = "",
+    error: Optional[str] = None,
+) -> None:
+    """Append full raw email data for every Gmail API call to logs/gmail_api.log."""
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "to": to_email,
+        "from": from_email,
+        "subject": subject,
+        "thread_id": thread_id,
+        "status": status,
+        "raw_mime": raw_mime,
+        "api_payload_keys": list(api_payload.keys()),
+        "has_threadId": "threadId" in api_payload,
+    }
+    if response:
+        entry["response"] = response
+    if error:
+        entry["error"] = error
+    try:
+        with open(_GMAIL_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, indent=2) + "\n---\n")
+    except OSError:
+        log.warning("Could not write to gmail log file at %s", _GMAIL_LOG_PATH)
+
+
 def render_body(body: str, lead_data: Dict[str, Any]) -> str:
     """Replace {{field}} with lead_data[field]. Supports {{name}}, {{email}}, {{company}}, etc."""
     def repl(match: re.Match) -> str:
@@ -84,10 +130,12 @@ def _send_via_resend(
     from_email: str,
     from_name: str = "",
     reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
     is_html: bool = False,
-) -> Optional[str]:
+) -> Optional[SendResult]:
     """
-    Send one email via Resend Python SDK. Returns Resend email id for threading.
+    Send one email via Resend Python SDK. Returns SendResult with a proper
+    RFC 822 Message-ID for threading.
     """
     if not settings.resend_api_key:
         log.error("Resend API key not set — cannot send email")
@@ -106,22 +154,25 @@ def _send_via_resend(
     else:
         params["text"] = body
 
+    # Generate a proper RFC 822 Message-ID so follow-ups can reference it
+    custom_message_id = make_msgid()
+    headers: Dict[str, str] = {"Message-ID": custom_message_id}
+
     if reply_to_msg_id:
         header_val = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
-        params["headers"] = {
-            "In-Reply-To": header_val,
-            "References": header_val,
-        }
+        headers["In-Reply-To"] = header_val
+        headers["References"] = references or header_val
+
+    params["headers"] = headers
 
     # Log payload for debugging
     log_payload = {"from": from_str, "to": [to_email], "subject": subject}
 
     try:
         email = resend.Emails.send(params)
-        email_id = email.get("id") if isinstance(email, dict) else getattr(email, "id", None)
         _log_resend_call(log_payload, status="200 OK", response_body=str(email))
-        log.info("Resend SDK: sent to=%s id=%s", to_email, email_id)
-        return email_id
+        log.info("Resend SDK: sent to=%s message_id=%s", to_email, custom_message_id)
+        return SendResult(message_id=custom_message_id)
     except Exception as e:
         tb = traceback.format_exc()
         _log_resend_call(log_payload, status="ERROR", response_body="", error=f"{e}\n{tb}")
@@ -136,9 +187,10 @@ def _send_via_smtp(
     from_email: str,
     from_name: str = "",
     reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
     is_html: bool = False,
-) -> Optional[str]:
-    """Send one email via SMTP. Returns message_id for threading."""
+) -> Optional[SendResult]:
+    """Send one email via SMTP. Returns SendResult with message_id for threading."""
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
@@ -148,8 +200,9 @@ def _send_via_smtp(
     message_id = make_msgid()
     msg["Message-ID"] = message_id
     if reply_to_msg_id:
-        msg["In-Reply-To"] = reply_to_msg_id
-        msg["References"] = reply_to_msg_id
+        ref = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
+        msg["In-Reply-To"] = ref
+        msg["References"] = references or ref
 
     part = MIMEText(body, "html" if is_html else "plain", "utf-8")
     msg.attach(part)
@@ -161,9 +214,37 @@ def _send_via_smtp(
             if settings.smtp_user and settings.smtp_password:
                 server.login(settings.smtp_user, settings.smtp_password)
             server.sendmail(from_email, [to_email], msg.as_string())
-        return message_id
+        return SendResult(message_id=message_id)
     except Exception:
         return None
+
+
+def _fetch_gmail_message_id(gmail_id: str, access_token: str) -> Optional[str]:
+    """
+    Fetch the real Message-ID header that Gmail assigned to a sent message.
+    Gmail replaces locally-generated Message-IDs with its own (e.g. <CABcD...@mail.gmail.com>).
+    We need the real one so In-Reply-To / References work for threading.
+    """
+    url = (
+        f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{gmail_id}"
+        f"?format=metadata&metadataHeaders=Message-Id"
+    )
+    req = urllib.request.Request(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode())
+            for header in data.get("payload", {}).get("headers", []):
+                if header.get("name", "").lower() == "message-id":
+                    real_id = header["value"]
+                    log.info("Gmail: fetched real Message-ID=%s for gmail_id=%s", real_id, gmail_id)
+                    return real_id
+    except Exception as e:
+        log.warning("Gmail: failed to fetch real Message-ID for %s: %s", gmail_id, e)
+    return None
 
 
 def _send_via_gmail(
@@ -173,12 +254,14 @@ def _send_via_gmail(
     from_email: str,
     from_name: str = "",
     reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
     is_html: bool = False,
     access_token: str = "",
-) -> Optional[str]:
+    thread_id: Optional[str] = None,
+) -> Optional[SendResult]:
     """
     Send one email via Gmail API using an OAuth access token.
-    Returns the Message-ID header for threading.
+    Returns SendResult with Message-ID header and Gmail threadId for threading.
     """
     if not access_token:
         log.error("Gmail send: no access token for %s", from_email)
@@ -194,13 +277,19 @@ def _send_via_gmail(
     if reply_to_msg_id:
         ref = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
         msg["In-Reply-To"] = ref
-        msg["References"] = ref
+        msg["References"] = references or ref
 
     part = MIMEText(body, "html" if is_html else "plain", "utf-8")
     msg.attach(part)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
-    payload = json.dumps({"raw": raw}).encode("utf-8")
+    payload_dict: Dict[str, Any] = {"raw": raw}
+    if thread_id:
+        payload_dict["threadId"] = thread_id
+    payload = json.dumps(payload_dict).encode("utf-8")
+
+    # Log full raw email for debugging
+    _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id)
 
     req = urllib.request.Request(
         "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
@@ -214,17 +303,34 @@ def _send_via_gmail(
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             resp_data = json.loads(resp.read().decode())
-            log.info("Gmail API: sent to=%s gmail_id=%s", to_email, resp_data.get("id"))
-            return message_id
+            gmail_thread_id = resp_data.get("threadId")
+            gmail_msg_id = resp_data.get("id")
+
+            # Fetch the REAL Message-ID that Gmail assigned (not our local one)
+            # Gmail replaces Message-ID on send, so we must read it back.
+            real_message_id = message_id  # fallback to local one
+            if gmail_msg_id:
+                real_message_id = _fetch_gmail_message_id(gmail_msg_id, access_token) or message_id
+
+            _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id,
+                            status="200 OK",
+                            response=json.dumps({**resp_data, "real_message_id": real_message_id}))
+            log.info("Gmail API: sent to=%s gmail_id=%s threadId=%s real_message_id=%s",
+                     to_email, gmail_msg_id, gmail_thread_id, real_message_id)
+            return SendResult(message_id=real_message_id, thread_id=gmail_thread_id)
     except urllib.error.HTTPError as e:
         err_body = ""
         try:
             err_body = e.read().decode()
         except Exception:
             pass
+        _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id,
+                        status=f"ERROR {e.code}", error=f"{e.reason}: {err_body}")
         log.error("Gmail API error %s %s: %s", e.code, e.reason, err_body)
         return None
     except Exception as e:
+        _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id,
+                        status="ERROR", error=str(e))
         log.error("Gmail API error: %s\n%s", e, traceback.format_exc())
         return None
 
@@ -236,10 +342,12 @@ def send_email(
     from_email: str,
     from_name: str = "",
     reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
     is_html: bool = False,
     provider: str = "",
     gmail_access_token: str = "",
-) -> Optional[str]:
+    thread_id: Optional[str] = None,
+) -> Optional[SendResult]:
     """
     Send one email. Route based on provider:
       - "gmail"  → Gmail API with OAuth token
@@ -247,8 +355,11 @@ def send_email(
       - "smtp"   → SMTP
     Falls back to the global EMAIL_PROVIDER setting if provider is empty.
 
+    Returns a SendResult with message_id (RFC 822) and thread_id (Gmail only),
+    or None on failure.
+
     In test mode (TEST_MODE=true):
-      - Gmail provider: skips sending entirely, returns a fake message_id (everything
+      - Gmail provider: skips sending entirely, returns a fake SendResult (everything
         still gets logged to DB / email_log as if it was delivered).
       - Resend/SMTP: redirects recipient to delivered+{tag}@resend.dev.
     """
@@ -262,7 +373,15 @@ def send_email(
             "TEST MODE (gmail): simulated send to=%s subject=%r from=%s — no email actually sent",
             to_email, subject, from_email,
         )
-        return fake_id
+        _log_gmail_call(
+            to_email, from_email, subject,
+            raw_mime="(test mode — no MIME built)",
+            api_payload={},
+            thread_id=thread_id,
+            status="TEST_MODE",
+            response=f"fake_message_id={fake_id}",
+        )
+        return SendResult(message_id=fake_id, thread_id=thread_id or "fake-thread")
 
     if settings.test_mode:
         to_email = _test_mode_redirect(to_email)
@@ -275,8 +394,10 @@ def send_email(
             from_email=from_email,
             from_name=from_name,
             reply_to_msg_id=reply_to_msg_id,
+            references=references,
             is_html=is_html,
             access_token=gmail_access_token,
+            thread_id=thread_id,
         )
     if effective == "resend" and settings.resend_api_key:
         return _send_via_resend(
@@ -286,6 +407,7 @@ def send_email(
             from_email=from_email,
             from_name=from_name,
             reply_to_msg_id=reply_to_msg_id,
+            references=references,
             is_html=is_html,
         )
     return _send_via_smtp(
@@ -295,5 +417,6 @@ def send_email(
         from_email=from_email,
         from_name=from_name,
         reply_to_msg_id=reply_to_msg_id,
+        references=references,
         is_html=is_html,
     )

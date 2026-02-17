@@ -74,6 +74,32 @@
 <h1>Calendar</h1>
 <p style="color:var(--muted);margin-bottom:1rem;">All emails across every campaign — sent and scheduled.</p>
 
+<!-- Server Info Banner -->
+<div class="card" style="margin-bottom:1rem; padding:0.75rem 1rem; display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+  <div style="display:flex; gap:1.5rem; align-items:center; flex-wrap:wrap;">
+    <div>
+      <span style="color:var(--muted); font-size:0.8rem;">Test Mode:</span>
+      <span id="test-mode-indicator" style="font-weight:600;"></span>
+    </div>
+    <div>
+      <span style="color:var(--muted); font-size:0.8rem;">Scheduler:</span>
+      <span id="scheduler-status" style="font-weight:600;"></span>
+    </div>
+    <div>
+      <span style="color:var(--muted); font-size:0.8rem;">Last Job:</span>
+      <span id="last-job-time" style="font-weight:600;">—</span>
+    </div>
+    <div>
+      <span style="color:var(--muted); font-size:0.8rem;">Last Run Sent:</span>
+      <span id="last-job-count" style="font-weight:600;">—</span>
+    </div>
+  </div>
+  <div>
+    <span style="color:var(--muted); font-size:0.75rem;">Auto-refresh: 30s</span>
+    <button class="btn secondary" onclick="loadData()" style="padding:0.3rem 0.6rem; font-size:0.8rem; margin-left:0.5rem;">↻ Refresh Now</button>
+  </div>
+</div>
+
 <div class="stats-row" id="stats-row">
   <div class="stat-card"><div class="num" id="stat-sent">—</div><div class="lbl">Total sent</div></div>
   <div class="stat-card"><div class="num" id="stat-sched">—</div><div class="lbl">Scheduled</div></div>
@@ -123,10 +149,11 @@ async function safeFetch(url, fallback) {
 }
 
 async function loadData() {
-  const [sent, scheduled, stats] = await Promise.all([
+  const [sent, scheduled, stats, serverStatus] = await Promise.all([
     safeFetch('/api/calendar/sent', []),
     safeFetch('/api/calendar/scheduled', []),
     safeFetch('/api/calendar/stats', {}),
+    safeFetch('/api/status', {}),
   ]);
   _sent = sent;
   _scheduled = scheduled;
@@ -134,6 +161,25 @@ async function loadData() {
   document.getElementById('stat-sent').textContent = stats.total_sent ?? 0;
   document.getElementById('stat-sched').textContent = stats.total_scheduled ?? 0;
   document.getElementById('stat-camps').textContent = stats.total_campaigns ?? 0;
+  
+  // Update server info
+  const testModeEl = document.getElementById('test-mode-indicator');
+  const isTestMode = serverStatus.test_mode || false;
+  testModeEl.textContent = isTestMode ? 'ON' : 'OFF';
+  testModeEl.style.color = isTestMode ? 'var(--danger)' : 'var(--success)';
+  
+  const schedulerEl = document.getElementById('scheduler-status');
+  const schedulerRunning = serverStatus.scheduler_running || false;
+  schedulerEl.textContent = schedulerRunning ? 'Running' : 'Stopped';
+  schedulerEl.style.color = schedulerRunning ? 'var(--success)' : 'var(--danger)';
+  
+  if (serverStatus.last_send_job_run) {
+    const lastRun = new Date(serverStatus.last_send_job_run);
+    const now = new Date();
+    const diffMins = Math.floor((now - lastRun) / 60000);
+    document.getElementById('last-job-time').textContent = diffMins < 1 ? 'Just now' : diffMins + 'm ago';
+  }
+  document.getElementById('last-job-count').textContent = serverStatus.last_send_job_sent_count ?? 0;
 
   // Populate campaign filter
   const campSet = new Map();
@@ -331,6 +377,10 @@ document.getElementById('filter-campaign').addEventListener('change', render);
 document.getElementById('filter-status').addEventListener('change', render);
 document.getElementById('filter-search').addEventListener('input', render);
 
+// Initial load
 loadData();
+
+// Auto-refresh every 30 seconds
+setInterval(loadData, 30000);
 </script>
 {% endblock %}

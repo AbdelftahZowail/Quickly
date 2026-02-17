@@ -6,7 +6,7 @@ from sqlalchemy import select, exists
 
 from app.database import get_db
 from app.models import Inbox, CampaignInbox, QueueSlot
-from app.schemas import InboxCreate, InboxResponse
+from app.schemas import InboxCreate, InboxUpdate, InboxResponse
 
 log = logging.getLogger("campaign_engine.routes")
 
@@ -25,6 +25,7 @@ async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
         email=data.email,
         display_name=data.display_name,
         max_emails_per_day=data.max_emails_per_day,
+        provider=data.provider,
     )
     db.add(inbox)
     await db.flush()
@@ -38,6 +39,23 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+    return inbox
+
+
+@router.patch("/{inbox_id}", response_model=InboxResponse)
+async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = result.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
+    if data.display_name is not None:
+        inbox.display_name = data.display_name
+    if data.max_emails_per_day is not None:
+        inbox.max_emails_per_day = data.max_emails_per_day
+    if data.provider is not None:
+        inbox.provider = data.provider
+    await db.flush()
+    await db.refresh(inbox)
     return inbox
 
 
