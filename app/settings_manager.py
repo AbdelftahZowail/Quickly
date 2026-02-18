@@ -42,6 +42,9 @@ class Settings:
         
         # Test mode
         self.test_mode: bool = False
+
+        # Time travel offset (integer days). 0 means real now.
+        self.time_offset_days: int = 0
     
     @property
     def google_redirect_uri(self) -> str:
@@ -75,6 +78,11 @@ class Settings:
             self.queue_check_interval_minutes = int(data["queue_check_interval_minutes"])
         if "test_mode" in data:
             self.test_mode = str(data["test_mode"]).lower() in ("true", "1", "yes")
+        if "time_offset_days" in data:
+            try:
+                self.time_offset_days = int(data["time_offset_days"])
+            except Exception:
+                self.time_offset_days = 0
 
 
 # Global settings instance
@@ -150,6 +158,7 @@ async def initialize_settings(db: AsyncSession):
             "google_client_secret": settings.google_client_secret,
             "queue_check_interval_minutes": str(settings.queue_check_interval_minutes),
             "test_mode": str(settings.test_mode),
+            "time_offset_days": str(settings.time_offset_days),
         }
         await save_all_settings_to_db(db, default_data)
         await db.commit()

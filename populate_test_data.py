@@ -4,18 +4,19 @@ from datetime import date, timedelta
 from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal
 from app.models import Lead, Campaign, CampaignInbox, CampaignLead, Inbox, Sequence, QueueSlot, EmailLog, LeadReply
-from app.queue_logic import reserve_slots_for_new_lead
+from app.queue_logic import recalculate_queue
+from app import time as time_provider
 
 # ========== CONFIGURATION ==========
 # Adjust these values to control the test data generation
-NUM_LEADS = 100                  # How many test leads to create
-NUM_CAMPAIGNS = 3               # How many test campaigns to create
+NUM_LEADS = 300                  # How many test leads to create
+NUM_CAMPAIGNS = 5               # How many test campaigns to create
 NUM_SEQUENCES_PER_CAMPAIGN = 3  # How many email sequences per campaign
-WAIT_DAYS_BETWEEN_SEQUENCES = 1 # Days to wait between follow-up sequences
+# WAIT_DAYS_BETWEEN_SEQUENCES = [1]  # Days to wait between follow-up sequences (cycles in order)
+WAIT_DAYS_BETWEEN_SEQUENCES = [2, 3, 1, 3, 3, 5, 3, 3, 1, 1]  # Days to wait between follow-up sequences (cycles in order)
 # ===================================
 
 TEST_PREFIX = "[TEST]"
-
 async def main():
     session = AsyncSessionLocal()
     try:
@@ -27,20 +28,21 @@ async def main():
         inboxes = result.scalars().all()
         
         created_inbox_ids = []
-        if not inboxes:
-            print("No inboxes found. Creating a dummy test inbox...")
-            dummy_inbox = Inbox(
-                email="test_inbox@example.com",
-                display_name="Test Inbox",
-                provider="resend",
-                max_emails_per_day=100,
-                wait_minutes_between=1
-            )
-            session.add(dummy_inbox)
-            await session.commit()
-            await session.refresh(dummy_inbox)
-            inboxes = [dummy_inbox]
-            created_inbox_ids.append(dummy_inbox.id)
+        if len(inboxes) < 7: # If we have less than 5 inboxes, create dummies until its 5 for testing
+            for i in range(len(inboxes) + 1, 8):
+                print("No inboxes found. Creating a dummy test inbox...")
+                dummy_inbox = Inbox(
+                    email=f"test_inbox_{i}@example.com",
+                    display_name=f"Test Inbox {i}",
+                    provider="resend",
+                    max_emails_per_day=10,
+                    wait_minutes_between=10
+                )
+                session.add(dummy_inbox)
+                await session.commit()
+                await session.refresh(dummy_inbox)
+                inboxes = [dummy_inbox]
+                created_inbox_ids.append(dummy_inbox.id)
         else:
             print(f"Found {len(inboxes)} existing inboxes. Will use them for test campaigns.")
 
@@ -49,10 +51,11 @@ async def main():
         print(f"Creating {NUM_CAMPAIGNS} test campaigns...")
         
         # Calculate Sending Days (All days EXCEPT today)
-        today_weekday = date.today().weekday()
+        today_weekday = time_provider.today().weekday()
         sending_days = [d for d in range(7) if d != today_weekday]
         print(f"Configuring campaigns to send on days expected to exclude today ({today_weekday}): {sending_days}")
 
+        n_cycle = 0  # Initialize cycle counter for sequences
         for i in range(1, NUM_CAMPAIGNS + 1):
             camp_name = f"{TEST_PREFIX} Campaign {i}"
             # Check if exists
@@ -81,7 +84,8 @@ async def main():
             
             # Create Sequences
             for seq_idx in range(NUM_SEQUENCES_PER_CAMPAIGN):
-                wait_days = 0 if seq_idx == 0 else WAIT_DAYS_BETWEEN_SEQUENCES
+                wait_days = 0 if seq_idx == 0 else WAIT_DAYS_BETWEEN_SEQUENCES[n_cycle]
+                n_cycle = (n_cycle + 1) % len(WAIT_DAYS_BETWEEN_SEQUENCES)  # Cycle through wait days
                 subject = f"Test Subject {i}" if seq_idx == 0 else None  # First email has subject, follow-ups are replies
                 seq = Sequence(
                     campaign_id=camp.id,
@@ -155,7 +159,7 @@ async def main():
             await session.refresh(cl)
 
             # Schedule logic - Let it calculate based on sending_days (which excludes today)
-            await reserve_slots_for_new_lead(session, cl.id, camp.id)
+            await recalculate_queue(session, camp.id)
             # print(f"Assigned Lead {lead_id} to Campaign {camp.id} - sending days exclude today")
 
         print("Done! Test data populated.")

@@ -61,6 +61,7 @@ async def get_all_settings(db: AsyncSession = Depends(get_db)):
         "google_client_secret_configured": bool(settings.google_client_secret),
         "queue_check_interval_minutes": settings.queue_check_interval_minutes,
         "test_mode": test_mode_value,
+        "time_offset_days": settings.time_offset_days,
     }
 
 
@@ -146,6 +147,32 @@ async def save_google_oauth(
         log.error("save_google_oauth: failed to save credentials: %s", e)
         raise HTTPException(500, f"Failed to save credentials: {str(e)}")
 
+
+# Time offset helpers ---------------------------------------------------------
+@router.get('/time-offset')
+async def get_time_offset():
+    """Return the current persisted time offset (days)."""
+    return {"time_offset_days": settings.time_offset_days}
+
+
+from pydantic import BaseModel as _BaseModel
+
+class _TimeOffset(_BaseModel):
+    time_offset_days: int
+
+
+@router.post('/time-offset')
+async def set_time_offset(payload: _TimeOffset, db: AsyncSession = Depends(get_db)):
+    """Set the persisted time offset (in days) and reload settings in this process."""
+    try:
+        from app.settings_manager import update_setting
+
+        await update_setting(db, 'time_offset_days', str(int(payload.time_offset_days)))
+        await db.commit()
+        return {"ok": True, "time_offset_days": payload.time_offset_days}
+    except Exception as e:
+        log.error('set_time_offset failed: %s', e)
+        raise HTTPException(500, f"Failed to set time offset: {e}")
 
 def _mask_secret(value: str) -> str:
     """Mask a secret value for display, showing only first few characters."""

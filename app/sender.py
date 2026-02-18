@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from app.settings_manager import settings
+from app import time as time_provider
 
 log = logging.getLogger("campaign_engine.sender")
 
@@ -48,7 +49,7 @@ def _log_resend_call(
 ) -> None:
     """Append a structured log entry for a Resend API call to the log file."""
     entry = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
         "to": payload.get("to"),
         "from": payload.get("from"),
         "subject": payload.get("subject"),
@@ -86,7 +87,7 @@ def _log_gmail_call(
 ) -> None:
     """Append full raw email data for every Gmail API call to logs/gmail_api.log."""
     entry = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
         "to": to_email,
         "from": from_email,
         "subject": subject,
@@ -195,7 +196,7 @@ def _send_via_smtp(
     msg["Subject"] = subject
     msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
     msg["To"] = to_email
-    msg["Date"] = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
+    msg["Date"] = time_provider.utcnow().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
     message_id = make_msgid()
     msg["Message-ID"] = message_id

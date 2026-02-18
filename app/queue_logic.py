@@ -1,6 +1,7 @@
 """Queue slot reservation and recalculation logic."""
 import logging
 from datetime import datetime, date, time, timedelta
+from app import time as time_provider
 from typing import List, Optional, Tuple
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,7 @@ async def _next_available_send_time_today(
     sending_end: str,
     wait_minutes: int,
     now: datetime,
+    cache: Optional[dict] = None,
 ) -> Optional[datetime]:
     """
     Next available send time today that is >= now and within the sending window.
@@ -71,19 +73,27 @@ async def _next_available_send_time_today(
         else 0
     )
 
-    day_start = datetime.combine(day, time(0, 0))
-    day_end = datetime.combine(day + timedelta(days=1), time(0, 0))
-    # Use WITH_FOR_UPDATE to prevent race conditions when multiple requests schedule simultaneously
-    result = await session.execute(
-        select(QueueSlot.scheduled_date).where(
-            QueueSlot.inbox_id == inbox_id,
-            QueueSlot.scheduled_date >= day_start,
-            QueueSlot.scheduled_date < day_end,
-        ).with_for_update()
-    )
-    existing_minutes = set()
-    for (dt,) in result.all():
-        existing_minutes.add((dt.hour * 60 + dt.minute))
+    # Use cache if available (pre-seeded with scheduled minutes per inbox+day)
+    time_key = ("times", inbox_id, day)
+    if cache is not None and time_key in cache:
+        existing_minutes = cache[time_key].copy()
+    elif cache is not None and ("_preseeded",) in cache:
+        existing_minutes = set()
+    else:
+        day_start = datetime.combine(day, time(0, 0))
+        day_end = datetime.combine(day + timedelta(days=1), time(0, 0))
+        result = await session.execute(
+            select(QueueSlot.scheduled_date).where(
+                QueueSlot.inbox_id == inbox_id,
+                QueueSlot.scheduled_date >= day_start,
+                QueueSlot.scheduled_date < day_end,
+            )
+        )
+        existing_minutes = set()
+        for (dt,) in result.all():
+            existing_minutes.add((dt.hour * 60 + dt.minute))
+        if cache is not None:
+            cache[time_key] = existing_minutes.copy()
 
     # First candidate: next slot on the grid that is >= max(now, start)
     base = max(now_min, start_min)
@@ -113,8 +123,23 @@ def next_business_date(from_date: date, sending_days: List[int], delta_days: int
     return d
 
 
-async def count_slots_on_date(session: AsyncSession, inbox_id: int, day: date) -> int:
-    """Count queue slots for this inbox on the given date. Uses FOR UPDATE to prevent race conditions."""
+async def count_slots_on_date(
+    session: AsyncSession, 
+    inbox_id: int, 
+    day: date,
+    cache: Optional[dict] = None,
+) -> int:
+    """Count queue slots for this inbox on the given date. 
+    Uses cache if provided to avoid redundant queries.
+    """
+    if cache is not None:
+        key = (inbox_id, day)
+        if key in cache:
+            return cache[key]
+        # If cache is pre-seeded, any missing key means 0 slots on this date
+        if ("_preseeded",) in cache:
+            return 0
+    
     day_start = datetime.combine(day, datetime.min.time())
     day_end = datetime.combine(day + timedelta(days=1), datetime.min.time())
     q = (
@@ -124,10 +149,14 @@ async def count_slots_on_date(session: AsyncSession, inbox_id: int, day: date) -
             QueueSlot.scheduled_date >= day_start,
             QueueSlot.scheduled_date < day_end,
         )
-        .with_for_update()
     )
     result = await session.execute(q)
-    return result.scalar() or 0
+    count = result.scalar() or 0
+    
+    if cache is not None:
+        cache[key] = count
+    
+    return count
 
 
 
@@ -138,6 +167,7 @@ async def _get_preferred_inbox_for_lead(
     lead_id: int,
     campaign_id: int,
     available_inbox_ids: List[int],
+    campaign_lead_id: Optional[int] = None,
 ) -> Optional[int]:
     """
     Check if this lead was already contacted with an inbox in this campaign.
@@ -162,15 +192,17 @@ async def _get_preferred_inbox_for_lead(
         return inbox_id
     
     # If no sent emails, check existing QueueSlot records
-    # Get campaign_lead_id for this lead in this campaign
-    cl_result = await session.execute(
-        select(CampaignLead.id)
-        .where(
-            CampaignLead.lead_id == lead_id,
-            CampaignLead.campaign_id == campaign_id,
+    # Get campaign_lead_id if not provided
+    if campaign_lead_id is None:
+        cl_result = await session.execute(
+            select(CampaignLead.id)
+            .where(
+                CampaignLead.lead_id == lead_id,
+                CampaignLead.campaign_id == campaign_id,
+            )
         )
-    )
-    campaign_lead_id = cl_result.scalar_one_or_none()
+        campaign_lead_id = cl_result.scalar_one_or_none()
+    
     if campaign_lead_id:
         slot_result = await session.execute(
             select(QueueSlot.inbox_id)
@@ -187,10 +219,10 @@ async def _get_preferred_inbox_for_lead(
 
 
 async def next_available_slot_position(
-    session: AsyncSession, inbox_id: int, day: date
+    session: AsyncSession, inbox_id: int, day: date, cache: Optional[dict] = None
 ) -> int:
     """Next position_in_day (1-based) for this inbox on this day."""
-    count = await count_slots_on_date(session, inbox_id, day)
+    count = await count_slots_on_date(session, inbox_id, day, cache)
     return count + 1
 
 
@@ -201,6 +233,7 @@ async def _check_all_sequences_fit(
     inboxes: List[Tuple[int, int, int]],  # (inbox_id, max_per_day, wait_minutes)
     sending_days: List[int],
     last_sent_sequence_index: int,
+    cache: Optional[dict] = None,
 ) -> bool:
     """
     Lookahead check: if we schedule first sequence on start_date, 
@@ -217,7 +250,8 @@ async def _check_all_sequences_fit(
     if not to_schedule:
         return True
     
-    # Simulate where each sequence would land
+    # Simulate where each sequence would land and account for simulated inserts
+    simulated_loads = {}
     simulated_dates = []
     for idx, seq in to_schedule:
         is_follow_up = (idx > 0)
@@ -233,12 +267,15 @@ async def _check_all_sequences_fit(
         
         simulated_dates.append(current_date)
         
-        # Check if ANY inbox has capacity on this date
+        # Check if ANY inbox has capacity on this date (including simulated loads)
         has_capacity = False
         for inbox_id, max_per_day, _ in inboxes:
-            count = await count_slots_on_date(session, inbox_id, current_date)
-            if count < max_per_day:
+            count = await count_slots_on_date(session, inbox_id, current_date, cache)
+            simulated_key = (inbox_id, current_date)
+            simulated_count = simulated_loads.get(simulated_key, 0)
+            if (count + simulated_count) < max_per_day:
                 has_capacity = True
+                simulated_loads[simulated_key] = simulated_count + 1
                 break
         
         if not has_capacity:
@@ -253,6 +290,7 @@ async def _pick_inbox_with_capacity(
     inboxes: List[Tuple[int, int]],  # (inbox_id, max_per_day)
     day: date,
     round_robin_index: int,
+    cache: Optional[dict] = None,
 ) -> Optional[Tuple[int, int]]:
     """Return (inbox_id, max_per_day) for an inbox that has capacity on day, or None."""
     if not inboxes:
@@ -260,7 +298,7 @@ async def _pick_inbox_with_capacity(
     for i in range(len(inboxes)):
         idx = (round_robin_index + i) % len(inboxes)
         inbox_id, max_per_day = inboxes[idx]
-        count = await count_slots_on_date(session, inbox_id, day)
+        count = await count_slots_on_date(session, inbox_id, day, cache)
         if count < max_per_day:
             return (inbox_id, max_per_day)
     return None
@@ -276,6 +314,7 @@ async def reserve_slots_for_lead(
     start_date: Optional[date] = None,
     last_sent_sequence_index: int = -1,
     forced_inbox_id: Optional[int] = None,  # Force specific inbox (for recalculation)
+    cache: Optional[dict] = None,  # Slot count cache for performance
 ) -> None:
     """
     Reserve queue slots for one campaign_lead.
@@ -307,15 +346,17 @@ async def reserve_slots_for_lead(
     if preferred_inbox_id is None:
         # Check if this lead was already contacted
         preferred_inbox_id = await _get_preferred_inbox_for_lead(
-            session, lead_id, campaign.id, available_inbox_ids
+            session, lead_id, campaign.id, available_inbox_ids, campaign_lead_id
         )
     
-    # If we have a preferred inbox, filter to use only that one
-    if preferred_inbox_id:
-        inboxes = [inbox for inbox in inboxes if inbox[0] == preferred_inbox_id]
-        log.info("Using inbox persistence: lead %s locked to inbox %s", lead_id, preferred_inbox_id)
+    # Lock the lead to a single inbox for all scheduled sequence slots.
+    # If we already have a persisted/forced inbox, enforce it immediately.
+    locked_inbox_id = preferred_inbox_id
+    if locked_inbox_id:
+        inboxes = [inbox for inbox in inboxes if inbox[0] == locked_inbox_id]
+        log.info("Using inbox persistence: lead %s locked to inbox %s", lead_id, locked_inbox_id)
 
-    today = date.today()
+    today = time_provider.today()
     if start_date is None:
         start_date = today
     current_date = next_business_date(start_date, sending_days, 0)
@@ -332,22 +373,39 @@ async def reserve_slots_for_lead(
     sending_start = campaign.sending_hours_start or "09:00"
     sending_end = campaign.sending_hours_end or "17:00"
     end_time = _parse_time(sending_end)
-    now = datetime.now()
-    today = date.today()
+    now = time_provider.now()
+    today = time_provider.today()
 
     # LOOKAHEAD OPTIMIZATION for new leads:
-    # Find optimal start date where all follow-ups fit without exceeding capacity
+    # Find a start date (and inbox, if needed) where all follow-ups fit without exceeding capacity.
     if last_sent_sequence_index == -1 and len(to_schedule) > 1:
         lookahead_attempts = 0
         max_lookahead_attempts = 30  # Try up to 30 days ahead
         original_start = current_date
         
         while lookahead_attempts < max_lookahead_attempts:
-            if await _check_all_sequences_fit(
-                session, current_date, sequences, inboxes, 
-                sending_days, last_sent_sequence_index
-            ):
-                # Found a start date where all sequences fit!
+            fit_found = False
+            if locked_inbox_id is not None:
+                fit_found = await _check_all_sequences_fit(
+                    session, current_date, sequences, inboxes,
+                    sending_days, last_sent_sequence_index, cache
+                )
+            else:
+                for candidate in inboxes:
+                    if await _check_all_sequences_fit(
+                        session, current_date, sequences, [candidate],
+                        sending_days, last_sent_sequence_index, cache
+                    ):
+                        locked_inbox_id = candidate[0]
+                        inboxes = [candidate]
+                        fit_found = True
+                        log.info(
+                            "  -> Lookahead optimization: selected inbox %s for lead %s",
+                            locked_inbox_id, lead_id
+                        )
+                        break
+
+            if fit_found:
                 if current_date != original_start:
                     log.info(
                         "  -> Lookahead optimization: moved start from %s to %s (all sequences will fit)",
@@ -366,6 +424,7 @@ async def reserve_slots_for_lead(
             )
             current_date = original_start  # Reset to original if we exhausted attempts
 
+    abort_remaining = False
     for idx, seq in to_schedule:
         is_follow_up = (idx > 0)
         
@@ -394,28 +453,37 @@ async def reserve_slots_for_lead(
         target_date = current_date  # Remember the target date for follow-ups
         while safety < 365:
             safety += 1
+            candidate_inboxes = inboxes
+            if locked_inbox_id is not None:
+                candidate_inboxes = [i for i in inboxes if i[0] == locked_inbox_id]
+
             picked = await _pick_inbox_with_capacity(
                 session, 
-                [(i[0], i[1]) for i in inboxes],  # Just (id, max_per_day) for capacity check
+                [(i[0], i[1]) for i in candidate_inboxes],  # Just (id, max_per_day) for capacity check
                 current_date, 
-                round_robin
+                round_robin,
+                cache
             )
             
-            # For follow-ups, if no inbox has capacity, force schedule anyway on an inbox
+            # Follow-ups must not exceed inbox daily capacity.
+            # If target date is full, leave this and remaining follow-ups unscheduled.
             if picked is None and is_follow_up:
                 log.warning(
-                    "  -> seq=%d: all inboxes at capacity on target date %s; forcing schedule on round-robin inbox",
+                    "  -> seq=%d: no capacity on required follow-up date %s; leaving remaining sequence slots unscheduled",
                     idx, current_date
                 )
-                # Pick inbox by round-robin, ignore capacity
-                inbox_id, max_per_day = inboxes[round_robin % len(inboxes)][:2]
-                picked = (inbox_id, max_per_day)
+                abort_remaining = True
+                break
             
             if picked is not None:
                 inbox_id, max_per_day = picked
+                if locked_inbox_id is None:
+                    # First successful assignment defines the lead's inbox for all future slots.
+                    locked_inbox_id = inbox_id
+                    log.info("Locked lead %s to inbox %s", lead_id, locked_inbox_id)
                 # Get wait_minutes for this specific inbox
                 wait_min = next(i[2] for i in inboxes if i[0] == inbox_id)
-                pos = await next_available_slot_position(session, inbox_id, current_date)
+                pos = await next_available_slot_position(session, inbox_id, current_date, cache)
 
                 scheduled_dt: datetime
                 if current_date == today:
@@ -425,6 +493,7 @@ async def reserve_slots_for_lead(
                         next_dt = await _next_available_send_time_today(
                             session, inbox_id, today,
                             sending_start, sending_end, wait_min, now,
+                            cache,
                         )
                         if next_dt is not None:
                             scheduled_dt = next_dt
@@ -486,8 +555,17 @@ async def reserve_slots_for_lead(
                     position_in_day=pos,
                 )
                 session.add(slot)
-                # CRITICAL: flush so the next iteration's capacity queries see this slot
-                await session.flush()
+                # Update caches immediately (count + scheduled times)
+                if cache is not None:
+                    cache_key = (inbox_id, current_date)
+                    cache[cache_key] = cache.get(cache_key, pos - 1) + 1
+                    time_key = ("times", inbox_id, current_date)
+                    if time_key not in cache:
+                        cache[time_key] = set()
+                    cache[time_key].add(scheduled_dt.hour * 60 + scheduled_dt.minute)
+                else:
+                    # Without cache, must flush for subsequent queries to see this slot
+                    await session.flush()
                 log.info(
                     "  -> slot created: seq=%d date=%s inbox=%d pos=%d est_time=%s",
                     idx, current_date, inbox_id, pos,
@@ -505,9 +583,11 @@ async def reserve_slots_for_lead(
                 while current_date.weekday() not in sending_days:
                     current_date += timedelta(days=1)
             else:
-                # For follow-ups, we should never reach here due to the force-schedule above
-                log.error("  -> seq=%d: unexpected state - could not schedule follow-up on target date %s", idx, target_date)
+                log.warning("  -> seq=%d: could not schedule follow-up on target date %s", idx, target_date)
                 break
+
+        if abort_remaining:
+            break
 
     log.info("reserve_slots_for_lead: done, created %d slots", len(scheduled_dates))
 
@@ -572,12 +652,18 @@ async def reserve_slots_for_new_lead(
         return
 
     log.info("reserve_slots_for_new_lead: found %d inboxes, %d sequences", len(inboxes), len(sequences))
+    
+    # Create a cache for this single lead reservation
+    slot_cache: dict = {}
+    
     await reserve_slots_for_lead(
         session, campaign_lead_id, campaign, inboxes, sequences,
         lead_id=cl.lead_id,
-        start_date=start_date or date.today(),
+        start_date=start_date or time_provider.today(),
         last_sent_sequence_index=-1,
+        cache=slot_cache,
     )
+    await session.flush()
 
 
 async def recalculate_queue_after_sequence_change(session: AsyncSession, campaign_id: int) -> None:
@@ -594,28 +680,75 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         log.warning("recalculate_queue: no inboxes for campaign %s", campaign_id)
         return
 
-    # Fetch all leads and group by priority: partially-sent leads first, then new leads
+    # Fetch all leads
     result = await session.execute(
         select(CampaignLead).where(CampaignLead.campaign_id == campaign_id)
     )
-    campaign_leads = result.scalars().all()
+    campaign_leads = list(result.scalars().all())
+    
+    if not campaign_leads:
+        log.info("recalculate_queue: no leads in campaign %s", campaign_id)
+        return
+    
+    # ============================================================================
+    # BULK QUERY OPTIMIZATION: Fetch all lead metadata upfront (eliminates N+1)
+    # ============================================================================
+    
+    lead_ids = [cl.lead_id for cl in campaign_leads]
+    cl_id_by_lead_id = {cl.lead_id: cl.id for cl in campaign_leads}
+    
+    # Query 1: Get max sequence_index and corresponding sent_at per lead
+    email_log_query = await session.execute(
+        select(
+            EmailLog.lead_id,
+            func.max(EmailLog.sequence_index).label('max_seq'),
+            func.max(EmailLog.sent_at).label('last_sent_at')
+        )
+        .where(
+            EmailLog.lead_id.in_(lead_ids),
+            EmailLog.campaign_id == campaign_id,
+        )
+        .group_by(EmailLog.lead_id)
+    )
+    # Build lookup dicts
+    last_sent_by_lead = {}  # lead_id -> max_sequence_index
+    last_sent_date_by_lead = {}  # lead_id -> sent_at.date()
+    for row in email_log_query.all():
+        last_sent_by_lead[row.lead_id] = row.max_seq if row.max_seq is not None else -1
+        if row.last_sent_at:
+            last_sent_date_by_lead[row.lead_id] = row.last_sent_at.date()
+    
+    # Query 2: Get preferred inbox from EmailLog (most recent sent email per lead)
+    preferred_inbox_query = await session.execute(
+        select(EmailLog.lead_id, EmailLog.inbox_id)
+        .where(
+            EmailLog.lead_id.in_(lead_ids),
+            EmailLog.campaign_id == campaign_id,
+            EmailLog.inbox_id.isnot(None),
+        )
+        .distinct(EmailLog.lead_id)
+        .order_by(EmailLog.lead_id, EmailLog.sent_at.desc())
+    )
+    preferred_inbox_from_log = {row.lead_id: row.inbox_id for row in preferred_inbox_query.all()}
+    
+    # Query 3: Get preferred inbox from QueueSlot (for leads without sent emails)
+    cl_ids = [cl.id for cl in campaign_leads]
+    preferred_inbox_from_slot_query = await session.execute(
+        select(QueueSlot.campaign_lead_id, QueueSlot.inbox_id)
+        .where(QueueSlot.campaign_lead_id.in_(cl_ids))
+        .distinct(QueueSlot.campaign_lead_id)
+        .order_by(QueueSlot.campaign_lead_id, QueueSlot.sequence_index.asc())
+    )
+    preferred_inbox_from_slot = {row.campaign_lead_id: row.inbox_id for row in preferred_inbox_from_slot_query.all()}
+    
+    # ============================================================================
+    # END BULK QUERIES
+    # ============================================================================
     
     # Sort leads: those with sent emails first (to prioritize follow-ups), then new leads
     # This ensures follow-ups get their target dates before new leads fill capacity
-    partially_sent_leads = []
-    new_leads = []
-    
-    for cl in campaign_leads:
-        sent_check = await session.execute(
-            select(func.max(EmailLog.sequence_index)).where(
-                EmailLog.lead_id == cl.lead_id,
-                EmailLog.campaign_id == campaign_id,
-            )
-        )
-        if sent_check.scalar() is not None:
-            partially_sent_leads.append(cl)
-        else:
-            new_leads.append(cl)
+    partially_sent_leads = [cl for cl in campaign_leads if cl.lead_id in last_sent_by_lead]
+    new_leads = [cl for cl in campaign_leads if cl.lead_id not in last_sent_by_lead]
     
     # Process in priority order: partially-sent first, then new
     ordered_leads = partially_sent_leads + new_leads
@@ -624,57 +757,113 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         len(ordered_leads), len(partially_sent_leads), len(new_leads), len(sequences), len(inboxes)
     )
 
-    for cl in ordered_leads:
-        sent_result = await session.execute(
-            select(func.max(EmailLog.sequence_index)).where(
-                EmailLog.lead_id == cl.lead_id,
-                EmailLog.campaign_id == campaign_id,
-            )
-        )
-        last_sent = sent_result.scalar()
-        if last_sent is None:
-            last_sent = -1
+    available_inbox_ids = [inbox[0] for inbox in inboxes]
+    inbox_ids = [i[0] for i in inboxes]
 
-        # CRITICAL: Check for inbox persistence BEFORE deleting slots
-        # This preserves inbox assignment even if no emails were sent yet
-        available_inbox_ids = [inbox[0] for inbox in inboxes]
-        preferred_inbox_before_delete = await _get_preferred_inbox_for_lead(
-            session, cl.lead_id, campaign_id, available_inbox_ids
-        )
+    # ========================================================================
+    # PHASE 1: BULK DELETE old queue slots (single flush instead of N flushes)
+    # ========================================================================
+    total_deleted = 0
 
-        # Delete all pending queue slots for this lead
+    # New leads: delete ALL their queue slots in one query
+    new_lead_cl_ids = [cl.id for cl in new_leads]
+    if new_lead_cl_ids:
+        del_result = await session.execute(
+            delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(new_lead_cl_ids))
+        )
+        total_deleted += del_result.rowcount
+
+    # Partially-sent leads: group by last_sent value for batch deletes
+    by_last_sent: dict = {}
+    for cl in partially_sent_leads:
+        ls = last_sent_by_lead[cl.lead_id]
+        by_last_sent.setdefault(ls, []).append(cl.id)
+
+    for last_sent_val, cl_ids_batch in by_last_sent.items():
         del_result = await session.execute(
             delete(QueueSlot).where(
-                QueueSlot.campaign_lead_id == cl.id,
-                QueueSlot.sequence_index > last_sent,
+                QueueSlot.campaign_lead_id.in_(cl_ids_batch),
+                QueueSlot.sequence_index > last_sent_val,
             )
         )
-        await session.flush()
-        log.info("  lead %s: last_sent=%d, deleted %d old slots, preserved_inbox=%s", 
-                 cl.lead_id, last_sent, del_result.rowcount, preferred_inbox_before_delete)
+        total_deleted += del_result.rowcount
 
-        if not sequences:
-            continue
+    await session.flush()  # Single flush for all deletes
+    log.info("recalculate_queue: bulk-deleted %d old slots across %d leads", total_deleted, len(ordered_leads))
 
-        start_date = date.today()
-        if last_sent >= 0:
-            sent_date_result = await session.execute(
-                select(EmailLog.sent_at).where(
-                    EmailLog.lead_id == cl.lead_id,
-                    EmailLog.campaign_id == campaign_id,
-                    EmailLog.sequence_index == last_sent,
-                ).order_by(EmailLog.sent_at.desc()).limit(1)
+    # ========================================================================
+    # PHASE 2: PRE-SEED CACHES (count + time from one query, zero DB hits during reservation)
+    # ========================================================================
+    slot_cache: dict = {}
+
+    if inbox_ids:
+        preseed_result = await session.execute(
+            select(QueueSlot.inbox_id, QueueSlot.scheduled_date)
+            .where(
+                QueueSlot.inbox_id.in_(inbox_ids),
+                QueueSlot.scheduled_date >= datetime.combine(time_provider.today(), time(0, 0)),
             )
-            row = sent_date_result.scalar_one_or_none()
-            if row is not None:
-                start_date = row.date()  # Pass the actual sent date so wait_days are computed correctly
+        )
+        for row in preseed_result.all():
+            dt = row.scheduled_date
+            day = dt.date() if isinstance(dt, datetime) else dt
+            # Count cache
+            count_key = (row.inbox_id, day)
+            slot_cache[count_key] = slot_cache.get(count_key, 0) + 1
+            # Time cache
+            time_key = ("times", row.inbox_id, day)
+            if time_key not in slot_cache:
+                slot_cache[time_key] = set()
+            slot_cache[time_key].add(dt.hour * 60 + dt.minute)
+
+    slot_cache[("_preseeded",)] = True  # Signal that cache is complete
+    log.info(
+        "recalculate_queue: pre-seeded cache with %d date entries",
+        sum(1 for k in slot_cache if isinstance(k, tuple) and len(k) == 2 and isinstance(k[0], int)),
+    )
+
+    # ========================================================================
+    # PHASE 3: RESERVE new slots for all leads (cache-only, zero DB queries)
+    # ========================================================================
+    if not sequences:
+        log.info("recalculate_queue: no sequences, nothing to reserve")
+        log.info("recalculate_queue: done for campaign %s", campaign_id)
+        return
+
+    for cl in ordered_leads:
+        last_sent = last_sent_by_lead.get(cl.lead_id, -1)
+
+        # Determine preferred inbox from pre-fetched data
+        preferred_inbox = None
+        if cl.lead_id in preferred_inbox_from_log:
+            ibx = preferred_inbox_from_log[cl.lead_id]
+            if ibx in available_inbox_ids:
+                preferred_inbox = ibx
+        elif cl.id in preferred_inbox_from_slot:
+            ibx = preferred_inbox_from_slot[cl.id]
+            if ibx in available_inbox_ids:
+                preferred_inbox = ibx
+
+        start_date = last_sent_date_by_lead.get(cl.lead_id, time_provider.today())
 
         await reserve_slots_for_lead(
             session, cl.id, campaign, inboxes, sequences,
             lead_id=cl.lead_id,
             start_date=start_date,
             last_sent_sequence_index=last_sent,
-            forced_inbox_id=preferred_inbox_before_delete,  # Preserve inbox from before deletion
+            forced_inbox_id=preferred_inbox,
+            cache=slot_cache,
         )
 
+    await session.flush()  # Single flush for all new slots
     log.info("recalculate_queue: done for campaign %s", campaign_id)
+
+
+# Backwards-compatible public API ------------------------------------------------
+async def recalculate_queue(session: AsyncSession, campaign_id: int) -> None:
+    """Compatibility wrapper kept for older callers (e.g. scripts).
+
+    Forwards to `recalculate_queue_after_sequence_change` which contains the
+    current implementation.
+    """
+    await recalculate_queue_after_sequence_change(session, campaign_id)

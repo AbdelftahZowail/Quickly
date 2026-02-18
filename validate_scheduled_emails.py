@@ -171,6 +171,9 @@ class EmailScheduleValidator:
         # Check inbox daily limits across all campaigns
         await self._check_inbox_daily_limits()
         
+        # Check inbox send rate (wait_minutes_between)
+        await self._check_inbox_send_rate()
+        
         # Calculate queue efficiency
         await self._calculate_queue_efficiency()
         
@@ -208,6 +211,9 @@ class EmailScheduleValidator:
         ).options(selectinload(CampaignLead.lead))
         campaign_leads = (await self.session.execute(leads_query)).scalars().all()
         
+        inbox_consistency_violations = []
+        schedule_violation_count = 0
+
         for campaign_lead in campaign_leads:
             # Load lead info
             lead = campaign_lead.lead
@@ -227,9 +233,27 @@ class EmailScheduleValidator:
             self.result.total_slots_checked += len(slots)
             
             # Run validation checks for this lead
-            await self._check_sending_schedule(campaign, sequences, lead, slots)
-            await self._check_inbox_consistency(campaign, lead, slots)
+            schedule_violation_count += await self._check_sending_schedule(campaign, sequences, lead, slots)
+            violation = await self._check_inbox_consistency(campaign, lead, slots)
+            if violation:
+                inbox_consistency_violations.append(violation)
             # Add more checks here as needed
+
+        if schedule_violation_count:
+            self.result.add_error(
+                'Schedule Validation',
+                f"{schedule_violation_count} slot(s)",
+                campaign.name,
+                f"{schedule_violation_count} slot(s) have incorrect spacing between sequences."
+            )
+
+        if inbox_consistency_violations:
+            self.result.add_error(
+                'Inbox Consistency',
+                f"{len(inbox_consistency_violations)} lead(s)",
+                campaign.name,
+                f"{len(inbox_consistency_violations)} lead(s) are being contacted from multiple inboxes."
+            )
     
     async def _check_sending_schedule(
         self, 
@@ -237,10 +261,10 @@ class EmailScheduleValidator:
         sequences: List[Sequence],
         lead,
         slots: List[QueueSlot]
-    ):
+    ) -> int:
         """
         Check that emails follow the exact sending schedule defined in the campaign.
-        Validates wait_days_after_previous for each sequence.
+        Returns the number of violations found.
         """
         sending_days = campaign.sending_days or [0, 1, 2, 3, 4]
         
@@ -278,22 +302,18 @@ class EmailScheduleValidator:
         # Sort by sequence index
         timeline.sort(key=lambda x: x['sequence_index'])
         
+        violations = 0
+
         # Validate each email against the previous one
         for i in range(1, len(timeline)):
             prev = timeline[i - 1]
             curr = timeline[i]
             
-            prev_seq_idx = prev['sequence_index']
             curr_seq_idx = curr['sequence_index']
             
             # Find the corresponding sequence definition
             if curr_seq_idx >= len(sequences):
-                self.result.add_error(
-                    'Schedule Validation',
-                    lead.email,
-                    campaign.name,
-                    f"Sequence index {curr_seq_idx} not found in campaign sequences (max: {len(sequences)-1})"
-                )
+                violations += 1
                 continue
             
             sequence = sequences[curr_seq_idx]
@@ -307,18 +327,14 @@ class EmailScheduleValidator:
             )
             
             if actual_business_days != expected_wait_days:
-                self.result.add_error(
-                    'Schedule Validation',
-                    lead.email,
-                    campaign.name,
-                    f"Email #{curr_seq_idx + 1} scheduled {actual_business_days} business day(s) after "
-                    f"email #{prev_seq_idx + 1}, but campaign requires {expected_wait_days} business day(s). "
-                    f"Previous: {prev['date']} ({prev['type']}), Current: {curr['date']} ({curr['type']})"
-                )
+                violations += 1
+        
+        return violations
     
     async def _check_inbox_consistency(self, campaign: Campaign, lead, slots: List[QueueSlot]):
         """
         Check that all emails to this lead use the same inbox.
+        Returns the lead email if a violation is found, otherwise None.
         """
         # Get all inbox IDs used for this lead (including sent emails)
         inbox_ids = set()
@@ -340,17 +356,9 @@ class EmailScheduleValidator:
             inbox_ids.add(slot.inbox_id)
         
         if len(inbox_ids) > 1:
-            # Get inbox emails for readable error message
-            inbox_query = select(Inbox.email).where(Inbox.id.in_(inbox_ids))
-            inbox_emails = (await self.session.execute(inbox_query)).scalars().all()
-            
-            self.result.add_error(
-                'Inbox Consistency',
-                lead.email,
-                campaign.name,
-                f"Lead is being contacted from {len(inbox_ids)} different inboxes: {', '.join(inbox_emails)}. "
-                f"All emails to a lead should come from the same inbox."
-            )
+            return lead.email
+        
+        return None
     
     async def _check_inbox_daily_limits(self):
         """
@@ -376,27 +384,75 @@ class EmailScheduleValidator:
                 slots_by_date[slot_date].append(slot)
             
             # Check each date against the limit
+            violating_days = 0
+            max_overrun = 0
             for slot_date, day_slots in slots_by_date.items():
                 count = len(day_slots)
                 if count > inbox.max_emails_per_day:
-                    # Get campaign names for this date to provide context
-                    campaign_lead_ids = [slot.campaign_lead_id for slot in day_slots]
-                    cl_query = (
-                        select(CampaignLead)
-                        .where(CampaignLead.id.in_(campaign_lead_ids))
-                        .options(selectinload(CampaignLead.campaign))
-                    )
-                    campaign_leads = (await self.session.execute(cl_query)).scalars().all()
-                    campaign_names = list(set(cl.campaign.name for cl in campaign_leads))
-                    
-                    self.result.add_error(
-                        'Inbox Daily Limit',
-                        inbox.email,
-                        ', '.join(campaign_names) if campaign_names else 'Multiple campaigns',
-                        f"Inbox has {count} emails scheduled on {slot_date}, but limit is "
-                        f"{inbox.max_emails_per_day} emails per day. Exceeds limit by {count - inbox.max_emails_per_day}."
-                    )
+                    violating_days += 1
+                    overrun = count - inbox.max_emails_per_day
+                    if overrun > max_overrun:
+                        max_overrun = overrun
+
+            if violating_days:
+                self.result.add_error(
+                    'Inbox Daily Limit',
+                    inbox.email,
+                    'Multiple campaigns',
+                    f"{violating_days} day(s) exceed the {inbox.max_emails_per_day} emails/day limit. "
+                    f"Worst overrun: +{max_overrun} email(s)."
+                )
     
+    async def _check_inbox_send_rate(self):
+        """
+        Check that no inbox sends emails faster than its wait_minutes_between setting.
+        Every pair of consecutive scheduled emails from the same inbox (ordered by
+        scheduled_date) must be at least wait_minutes_between minutes apart.
+        """
+        inboxes_query = select(Inbox)
+        inboxes = (await self.session.execute(inboxes_query)).scalars().all()
+
+        for inbox in inboxes:
+            min_gap = inbox.wait_minutes_between
+            if min_gap <= 0:
+                continue  # No rate limit configured
+
+            # Fetch all scheduled slots for this inbox ordered by time
+            slots_query = (
+                select(QueueSlot)
+                .where(QueueSlot.inbox_id == inbox.id)
+                .order_by(QueueSlot.scheduled_date)
+            )
+            slots = (await self.session.execute(slots_query)).scalars().all()
+
+            if len(slots) < 2:
+                continue
+
+            violations = []
+            min_gap_found = None
+
+            for i in range(1, len(slots)):
+                prev = slots[i - 1]
+                curr = slots[i]
+
+                gap_minutes = (
+                    curr.scheduled_date - prev.scheduled_date
+                ).total_seconds() / 60
+
+                if gap_minutes < min_gap:
+                    violations.append(gap_minutes)
+                    if min_gap_found is None or gap_minutes < min_gap_found:
+                        min_gap_found = gap_minutes
+
+            if violations:
+                self.result.add_error(
+                    'Inbox Send Rate',
+                    inbox.email,
+                    'Multiple campaigns',
+                    f"{len(violations)} pair(s) of slots violate the {min_gap}-minute send rate. "
+                    f"Smallest gap found: {min_gap_found:.1f} minute(s)."
+                )
+
     async def _calculate_queue_efficiency(self):
         """
         Calculate how efficiently the queue is using available inbox capacity.

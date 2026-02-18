@@ -2,6 +2,7 @@
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
+from app.time import utcnow as _utcnow
 
 from app.database import Base
 
@@ -14,7 +15,7 @@ class Inbox(Base):
     max_emails_per_day = Column(Integer, default=50, nullable=False)
     wait_minutes_between = Column(Integer, default=5, nullable=False)  # Minutes between emails from this inbox
     provider = Column(String(32), default="resend")  # resend | smtp | gmail
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
 
@@ -26,7 +27,7 @@ class Lead(Base):
     name = Column(String(255), default="")
     custom_data = Column(JSON, default=dict)  # e.g. {"company": "...", "title": "..."}
     status = Column(String(32), default="active")  # active, unsubscribed, bounced, replied
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
     campaign_leads = relationship("CampaignLead", back_populates="lead", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="lead")
     replies = relationship("LeadReply", back_populates="lead")
@@ -43,7 +44,7 @@ class Campaign(Base):
     sending_hours_end = Column(String(5), default="17:00")   # 5pm
     wait_minutes_between = Column(Integer, default=5)  # Deprecated: wait time now controlled by Inbox.wait_minutes_between
     stop_on_reply = Column(Boolean, default=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship(
         "CampaignInbox",
         back_populates="campaign",
@@ -84,7 +85,7 @@ class CampaignLead(Base):
     id = Column(Integer, primary_key=True, index=True)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
-    enrolled_at = Column(DateTime, default=datetime.utcnow)
+    enrolled_at = Column(DateTime, default=_utcnow)
     campaign = relationship("Campaign", back_populates="campaign_leads")
     lead = relationship("Lead", back_populates="campaign_leads")
     queue_slots = relationship("QueueSlot", back_populates="campaign_lead", cascade="all, delete-orphan", order_by="QueueSlot.sequence_index")
@@ -110,7 +111,7 @@ class EmailLog(Base):
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=True)  # Track which inbox sent this email
     sequence_index = Column(Integer, nullable=False)
-    sent_at = Column(DateTime, default=datetime.utcnow)
+    sent_at = Column(DateTime, default=_utcnow)
     subject = Column(String(512), default="")
     message_id = Column(String(512), default=None)  # RFC 822 Message-ID for In-Reply-To threading
     thread_id = Column(String(512), default=None)   # Gmail threadId for thread continuity
@@ -124,7 +125,7 @@ class LeadReply(Base):
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
-    replied_at = Column(DateTime, default=datetime.utcnow)
+    replied_at = Column(DateTime, default=_utcnow)
     lead = relationship("Lead", back_populates="replies")
     campaign = relationship("Campaign", back_populates="replies")
 
@@ -138,7 +139,7 @@ class AppSetting(Base):
     __tablename__ = "app_setting"
     key = Column(String(255), primary_key=True, nullable=False)
     value = Column(Text, nullable=False, default="")
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class GmailAccount(Base):
@@ -151,6 +152,6 @@ class GmailAccount(Base):
     refresh_token = Column(Text, nullable=False)
     token_expiry = Column(DateTime, nullable=True)
     scopes = Column(String(1024), default="https://www.googleapis.com/auth/gmail.send")
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     inbox = relationship("Inbox", back_populates="gmail_account")

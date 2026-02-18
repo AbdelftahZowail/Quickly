@@ -1,7 +1,7 @@
 """Global calendar API — all sent + scheduled emails across all campaigns."""
 import logging
 from fastapi import APIRouter, Depends
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -125,11 +125,20 @@ async def global_stats(db: AsyncSession = Depends(get_db)):
     }
 
 
+async def clear_queue(db: AsyncSession = Depends(get_db)):
+    """Delete all pending (future) queue slots across all campaigns."""
+    log.info("clear_queue: deleting all queue slots")
+    result = await db.execute(delete(QueueSlot))
+    deleted = result.rowcount
+    await db.commit()
+    log.info("clear_queue: deleted %d queue slots", deleted)
+    return {"ok": True, "deleted": deleted}
+
 @router.post("/recalculate-all")
 async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
     """Recalculate queue slots for all campaigns while preserving inbox assignments."""
     log.info("recalculate_all_campaigns: starting global recalculation")
-    
+    await clear_queue(db)
     # Count existing slots before recalculation
     slot_count_before = await db.execute(select(func.count(QueueSlot.id)))
     initial_slots = slot_count_before.scalar() or 0

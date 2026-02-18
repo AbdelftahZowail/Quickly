@@ -20,6 +20,7 @@ from app.models import (
 from app.sender import send_email, render_body, get_lead_data, SendResult
 from app.routers.gmail_oauth import refresh_access_token
 from app.app_settings import get_google_oauth_credentials
+from app import time as time_provider
 
 log = logging.getLogger(__name__)
 
@@ -58,7 +59,7 @@ async def run_send_job():
     """Run once: send today's due emails. Slots are per inbox (QueueSlot.inbox_id)."""
     global last_send_job_run, last_send_job_sent_count
     # Use local time so we match queue_logic (slots are stored in local time) and sending window (09:00–17:00 is local)
-    now = datetime.now()
+    now = time_provider.now()
     log.info("Send job running at %s (local)", now.isoformat())
 
     async with AsyncSessionLocal() as session:
@@ -82,7 +83,7 @@ async def run_send_job():
                 ga = ga_result.scalar_one_or_none()
                 if ga:
                     # Refresh token if expired (or within 5 min of expiry)
-                    if ga.token_expiry and ga.token_expiry <= datetime.utcnow():
+                    if ga.token_expiry and ga.token_expiry <= time_provider.utcnow():
                         refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
                         if refreshed:
                             await session.flush()
@@ -215,6 +216,6 @@ async def run_send_job():
 
         await session.commit()
 
-    last_send_job_run = datetime.now()
+    last_send_job_run = time_provider.now()
     last_send_job_sent_count = total_sent
     log.info("Send job finished: %d email(s) sent (next run in %d min)", total_sent, settings.queue_check_interval_minutes)
