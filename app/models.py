@@ -1,7 +1,6 @@
 """SQLAlchemy ORM models."""
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, UniqueConstraint
 from sqlalchemy.orm import relationship
-from datetime import datetime
 from app.time import utcnow as _utcnow
 
 from app.database import Base

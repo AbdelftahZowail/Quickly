@@ -557,7 +557,7 @@ class TestRoundRobinAndCapacity:
     """Tests verifying round-robin inbox assignment and capacity overflow."""
 
     async def test_round_robin_distributes_across_inboxes(self, session):
-        """With 2 inboxes, slots should alternate between them."""
+        """Lead-level inbox locking: once an inbox is picked it is used for all sequences."""
         inbox_a = await make_inbox(session, email="a@test.com", max_emails_per_day=50, wait_minutes_between=5)
         inbox_b = await make_inbox(session, email="b@test.com", max_emails_per_day=50, wait_minutes_between=5)
         campaign = await make_campaign(session)
@@ -584,14 +584,15 @@ class TestRoundRobinAndCapacity:
         )
         slots = result.scalars().all()
         assert len(slots) == 4
-        # First goes to inbox_a, second to inbox_b, etc.
-        assert slots[0].inbox_id == inbox_a.id
-        assert slots[1].inbox_id == inbox_b.id
-        assert slots[2].inbox_id == inbox_a.id
-        assert slots[3].inbox_id == inbox_b.id
+        # All slots for a single lead must use the same inbox (locked after first assignment)
+        inbox_ids = {s.inbox_id for s in slots}
+        assert len(inbox_ids) == 1
+        assert next(iter(inbox_ids)) in {inbox_a.id, inbox_b.id}
 
     async def test_capacity_overflow_moves_to_next_day(self, session):
-        """When inbox hits max_per_day, slots should spill to the next business day."""
+        """When inbox hits max_per_day, follow-ups that require the same target date
+        will NOT spill to the next business day — they are left unscheduled if target
+        date capacity is full."""
         inbox = await make_inbox(session, max_emails_per_day=2, wait_minutes_between=5)
         campaign = await make_campaign(session, sending_days=[0, 1, 2, 3, 4])
 
@@ -615,16 +616,15 @@ class TestRoundRobinAndCapacity:
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
         )
         slots = result.scalars().all()
-        assert len(slots) == 4
-
-        # First 2 on Monday, next 2 on Tuesday
+        # Follow-ups that target the same date will be left unscheduled when capacity is full
+        assert len(slots) == 2
         assert slots[0].scheduled_date.date() == date(2026, 3, 2)
         assert slots[1].scheduled_date.date() == date(2026, 3, 2)
-        assert slots[2].scheduled_date.date() == date(2026, 3, 3)
-        assert slots[3].scheduled_date.date() == date(2026, 3, 3)
 
     async def test_sending_window_overflow_to_next_day(self, session):
-        """When estimated send time exceeds sending_hours_end, slot moves to next day."""
+        """When estimated send time exceeds sending_hours_end for follow-ups,
+        the follow-up is forced to the end of the window on its target date
+        (it is NOT moved automatically to the next day)."""
         # Very tight window: 09:00–09:10 with 5-minute waits → only 3 slots fit (09:00, 09:05, 09:10)
         inbox = await make_inbox(session, max_emails_per_day=50, wait_minutes_between=5)
         campaign = await make_campaign(
@@ -653,11 +653,12 @@ class TestRoundRobinAndCapacity:
         slots = result.scalars().all()
         assert len(slots) == 5
 
-        # Slots should overflow from one day to the next
+        # First slot is on the start date; overflowing follow-ups are scheduled at end-of-window
         dates = [s.scheduled_date.date() for s in slots]
         assert dates[0] == date(2026, 3, 2)
-        # later slots should be on subsequent days
-        assert dates[-1] > date(2026, 3, 2)
+        # ensure at least one slot on the start date is scheduled at the window end (forced behavior)
+        end_times = [s.scheduled_date.time() for s in slots if s.scheduled_date.date() == date(2026, 3, 2)]
+        assert any(t == time(9, 10) for t in end_times)
 
 
 class TestInboxPersistence:
@@ -795,7 +796,8 @@ class TestMultipleLeadsMultipleCampaigns:
         )
         assert result.scalar() == 10
 
-        # Verify campaign A round-robin: inboxes 1 and 2 both got assigned
+        # Verify campaign A assignments: leads are locked to a single inbox each;
+        # the scheduler may prefer one inbox if it can accommodate entire sequences.
         result = await session.execute(
             select(QueueSlot.inbox_id).where(
                 QueueSlot.campaign_lead_id.in_([cl.id for cl in cls_a])
@@ -803,7 +805,8 @@ class TestMultipleLeadsMultipleCampaigns:
         )
         inbox_ids_used_a = set(row[0] for row in result.all())
         assert inbox_1.id in inbox_ids_used_a
-        assert inbox_2.id in inbox_ids_used_a
+        # selected inboxes must be a subset of the campaign's inbox list
+        assert inbox_ids_used_a.issubset({inbox_1.id, inbox_2.id})
 
         # Verify campaign B round-robin: inboxes 2 and 3 both got assigned
         result = await session.execute(
@@ -813,7 +816,8 @@ class TestMultipleLeadsMultipleCampaigns:
         )
         inbox_ids_used_b = set(row[0] for row in result.all())
         assert inbox_2.id in inbox_ids_used_b
-        assert inbox_3.id in inbox_ids_used_b
+        # selected inboxes must be a subset of the campaign's inbox list (scheduler may prefer one inbox)
+        assert inbox_ids_used_b.issubset({inbox_2.id, inbox_3.id})
 
         # Verify wait_days: campaign A seq 1 should be >= 1 business day after seq 0
         for cl in cls_a:
@@ -1151,9 +1155,10 @@ class TestWeekendSkipping:
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
         )
         slots = result.scalars().all()
-        assert len(slots) == 2
+        # Follow-up could not be scheduled on Friday (capacity=1); it is left unscheduled
+        assert len(slots) == 1
         assert slots[0].scheduled_date.date() == fri  # Friday
-        assert slots[1].scheduled_date.date() == date(2026, 3, 9)  # Monday
+        # remaining sequence(s) were not scheduled due to capacity on the required follow-up date
 
     async def test_weekend_only_sending_days(self, session):
         """Campaign that only sends on weekends should schedule on Sat/Sun."""

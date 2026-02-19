@@ -21,6 +21,7 @@ from app.sender import send_email, render_body, get_lead_data, SendResult
 from app.routers.gmail_oauth import refresh_access_token
 from app.app_settings import get_google_oauth_credentials
 from app import time as time_provider
+from app.queue_logic import _parse_time
 
 log = logging.getLogger(__name__)
 
@@ -29,20 +30,6 @@ last_send_job_run: datetime | None = None
 last_send_job_sent_count: int = 0
 
 
-def _parse_time(s: str) -> time:
-    try:
-        parts = s.strip().split(":")
-        if len(parts) != 2:
-            return time(9, 0)
-        h = int(parts[0])
-        m = int(parts[1])
-        if h == 24 and m == 0:
-            return time(23, 59)
-        if not (0 <= h <= 23 and 0 <= m <= 59):
-            return time(9, 0)
-        return time(h, m)
-    except Exception:
-        return time(9, 0)
 
 
 def _in_sending_window(now: datetime, campaign: Campaign) -> bool:

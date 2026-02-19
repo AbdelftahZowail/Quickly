@@ -3,7 +3,6 @@ import json
 import logging
 import urllib.parse
 import urllib.request
-import urllib.error
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request

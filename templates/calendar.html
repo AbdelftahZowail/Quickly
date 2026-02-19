@@ -116,6 +116,7 @@
   </select>
   <input type="text" id="filter-search" placeholder="Search lead, subject…" style="max-width:240px;">
   <button class="btn secondary" onclick="clearFilters()" style="padding:0.35rem 0.7rem;font-size:0.85rem;">Clear</button>
+  <button class="btn secondary" id="validate-queue-btn" onclick="validateQueue()" style="padding:0.35rem 0.7rem;font-size:0.85rem;">🔍 Validate Queue</button>
   <button class="btn" id="recalc-all-btn" onclick="recalculateAllCampaigns()" style="padding:0.35rem 0.7rem;font-size:0.85rem;">⚡ Recalculate All Campaigns</button>
 </div>
 
@@ -255,6 +256,48 @@ async function recalculateAllCampaigns() {
     setTimeout(() => {
       btn.disabled = false;
       btn.textContent = '⚡ Recalculate All Campaigns';
+    }, 2000);
+  }
+}
+
+async function validateQueue() {
+  const btn = document.getElementById('validate-queue-btn');
+  if (btn.disabled) return;
+
+  if (!confirm('Run validation checks for scheduled emails?')) {
+    return;
+  }
+
+  try {
+    btn.disabled = true;
+    btn.textContent = '🔍 Validating...';
+
+    const res = await fetch('/api/calendar/validate-queue', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      const issues = data.issues || [];
+      btn.textContent = `✓ Validated (${data.total_slots_checked} slots, ${issues.length} issue${issues.length !== 1 ? 's' : ''})`;
+
+      if (issues.length) {
+        alert(`Validation completed — ${issues.length} issue(s) found. Open browser console for details.`);
+        console.log('Validation result:', data);
+      } else {
+        alert('Validation passed — no issues found.');
+      }
+
+      await loadData();
+    } else {
+      const txt = await res.text();
+      alert('Validation failed: ' + txt);
+      btn.textContent = '🔍 Validate Queue';
+    }
+  } catch (err) {
+    alert('Error: ' + err.message);
+    btn.textContent = '🔍 Validate Queue';
+  } finally {
+    setTimeout(() => {
+      btn.disabled = false;
+      btn.textContent = '🔍 Validate Queue';
     }, 2000);
   }
 }

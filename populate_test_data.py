@@ -9,8 +9,8 @@ from app import time as time_provider
 
 # ========== CONFIGURATION ==========
 # Adjust these values to control the test data generation
-NUM_LEADS = 300                  # How many test leads to create
-NUM_CAMPAIGNS = 5               # How many test campaigns to create
+NUM_LEADS = 100                  # How many test leads to create
+NUM_CAMPAIGNS = 3               # How many test campaigns to create
 NUM_SEQUENCES_PER_CAMPAIGN = 3  # How many email sequences per campaign
 # WAIT_DAYS_BETWEEN_SEQUENCES = [1]  # Days to wait between follow-up sequences (cycles in order)
 WAIT_DAYS_BETWEEN_SEQUENCES = [2, 3, 1, 3, 3, 5, 3, 3, 1, 1]  # Days to wait between follow-up sequences (cycles in order)

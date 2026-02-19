@@ -82,9 +82,6 @@ async def campaign_detail_page(request: Request, campaign_id: int):
     )
 
 
-@app.get("/leads", response_class=HTMLResponse)
-async def leads_page(request: Request):
-    return templates.TemplateResponse("leads.html", {"request": request})
 
 
 @app.get("/inboxes", response_class=HTMLResponse)

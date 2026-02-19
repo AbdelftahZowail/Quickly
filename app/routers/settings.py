@@ -6,7 +6,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.settings_manager import settings, update_settings, reload_settings
+from app.settings_manager import settings, update_settings
 from app.app_settings import (
     get_google_oauth_credentials,
     save_google_oauth_credentials,

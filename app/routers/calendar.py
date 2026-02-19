@@ -10,6 +10,7 @@ from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
 )
 from app.queue_logic import recalculate_queue_after_sequence_change
+from validate_scheduled_emails import EmailScheduleValidator
 
 log = logging.getLogger("campaign_engine.calendar")
 
@@ -171,4 +172,33 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
         "campaigns_processed": campaigns_processed,
         "initial_slots": initial_slots,
         "total_slots": total_slots
+    }
+
+@router.post("/validate-queue")
+async def validate_queue(db: AsyncSession = Depends(get_db)):
+    """Run scheduled-emails validation (uses validate_scheduled_emails.EmailScheduleValidator)."""
+    log.info("validate_queue: starting validation of scheduled emails")
+    validator = EmailScheduleValidator(db)
+    result = await validator.validate_all()
+
+    issues = [
+        {
+            "check_name": i.check_name,
+            "severity": i.severity,
+            "lead_email": i.lead_email,
+            "campaign_name": i.campaign_name,
+            "details": i.details,
+        }
+        for i in result.issues
+    ]
+
+    return {
+        "ok": True,
+        "total_slots_checked": result.total_slots_checked,
+        "total_leads_checked": result.total_leads_checked,
+        "total_capacity": result.total_capacity,
+        "total_empty_slots": result.total_empty_slots,
+        "inbox_stats": result.inbox_stats,
+        "issues": issues,
+        "has_errors": result.has_errors(),
     }

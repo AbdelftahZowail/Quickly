@@ -25,20 +25,9 @@ async def list_leads(
 
 @router.post("", response_model=LeadResponse)
 async def create_lead(data: LeadCreate, db: AsyncSession = Depends(get_db)):
-    lead = Lead(
-        email=data.email,
-        name=data.name,
-        custom_data=data.custom_data or {},
-    )
-    db.add(lead)
-    await db.flush()
-    if data.campaign_id:
-        cl = CampaignLead(campaign_id=data.campaign_id, lead_id=lead.id)
-        db.add(cl)
-        await db.flush()
-        await reserve_slots_for_new_lead(db, cl.id, data.campaign_id)
-    await db.refresh(lead)
-    return lead
+    # Disallow creating standalone leads — leads must be added to a campaign.
+    # Use POST /api/campaigns/{campaign_id}/leads to create + enroll leads.
+    raise HTTPException(405, "Creating leads without a campaign is not allowed; use POST /api/campaigns/{campaign_id}/leads")
 
 
 @router.get("/{lead_id}", response_model=LeadResponse)

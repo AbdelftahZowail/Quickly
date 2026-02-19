@@ -666,6 +666,105 @@ async def reserve_slots_for_new_lead(
     await session.flush()
 
 
+async def reserve_slots_for_new_leads_bulk(
+    session: AsyncSession,
+    campaign_lead_ids: List[int],
+    campaign_id: int,
+    start_date: Optional[date] = None,
+) -> None:
+    """
+    Efficiently schedule queue slots for a batch of newly enrolled leads.
+
+    Unlike calling reserve_slots_for_new_lead in a loop (which re-fetches campaign
+    data and resets the cache for every lead), this function:
+      1. Fetches campaign/inbox/sequence data exactly once.
+      2. Pre-seeds a shared slot cache from existing QueueSlot rows (one query).
+      3. Iterates all new campaign_leads sharing that single cache.
+      4. Flushes once at the very end.
+
+    This gives the same DB efficiency as recalculate_queue_after_sequence_change
+    but scoped only to the freshly-enrolled leads.
+    """
+    if not campaign_lead_ids:
+        return
+
+    log.info(
+        "reserve_slots_for_new_leads_bulk: campaign=%s leads=%d",
+        campaign_id, len(campaign_lead_ids),
+    )
+
+    # ── Step 1: fetch campaign / inboxes / sequences once ────────────────────
+    data = await _fetch_campaign_scheduling_data(session, campaign_id)
+    if not data:
+        return
+    campaign, inboxes, sequences = data
+
+    if not inboxes:
+        log.warning("reserve_slots_for_new_leads_bulk: no inboxes for campaign %s", campaign_id)
+        return
+    if not sequences:
+        log.warning("reserve_slots_for_new_leads_bulk: no sequences for campaign %s — no slots created", campaign_id)
+        return
+
+    # ── Step 2: fetch CampaignLead rows for the given ids ────────────────────
+    cl_result = await session.execute(
+        select(CampaignLead).where(CampaignLead.id.in_(campaign_lead_ids))
+    )
+    campaign_leads = list(cl_result.scalars().all())
+
+    if not campaign_leads:
+        log.warning("reserve_slots_for_new_leads_bulk: no CampaignLead rows found for ids %s", campaign_lead_ids)
+        return
+
+    # ── Step 3: pre-seed cache from existing slots (single bulk query) ────────
+    inbox_ids = [i[0] for i in inboxes]
+    slot_cache: dict = {}
+
+    if inbox_ids:
+        preseed_result = await session.execute(
+            select(QueueSlot.inbox_id, QueueSlot.scheduled_date)
+            .where(
+                QueueSlot.inbox_id.in_(inbox_ids),
+                QueueSlot.scheduled_date >= datetime.combine(time_provider.today(), time(0, 0)),
+            )
+        )
+        for row in preseed_result.all():
+            dt = row.scheduled_date
+            day = dt.date() if isinstance(dt, datetime) else dt
+            # count cache
+            count_key = (row.inbox_id, day)
+            slot_cache[count_key] = slot_cache.get(count_key, 0) + 1
+            # time cache
+            time_key = ("times", row.inbox_id, day)
+            if time_key not in slot_cache:
+                slot_cache[time_key] = set()
+            slot_cache[time_key].add(dt.hour * 60 + dt.minute)
+
+    slot_cache[("_preseeded",)] = True  # signal: missing keys mean 0
+    log.info(
+        "reserve_slots_for_new_leads_bulk: pre-seeded cache with %d date entries",
+        sum(1 for k in slot_cache if isinstance(k, tuple) and len(k) == 2 and isinstance(k[0], int)),
+    )
+
+    # ── Step 4: schedule each lead sharing the same cache ────────────────────
+    base_start = start_date or time_provider.today()
+    for cl in campaign_leads:
+        await reserve_slots_for_lead(
+            session, cl.id, campaign, inboxes, sequences,
+            lead_id=cl.lead_id,
+            start_date=base_start,
+            last_sent_sequence_index=-1,  # brand-new leads: schedule everything
+            cache=slot_cache,
+        )
+
+    # ── Step 5: single flush ──────────────────────────────────────────────────
+    await session.flush()
+    log.info(
+        "reserve_slots_for_new_leads_bulk: done for campaign %s (%d leads)",
+        campaign_id, len(campaign_leads),
+    )
+
+
 async def recalculate_queue_after_sequence_change(session: AsyncSession, campaign_id: int) -> None:
     """After editing/adding/deleting sequences: delete pending queue slots, recalculate from last sent per lead."""
     log.info("recalculate_queue: campaign=%s", campaign_id)

@@ -30,12 +30,6 @@
         <option value="replied">replied</option>
       </select>
     </div>
-    <div class="form-group">
-      <label>Assign to campaign (optional)</label>
-      <select name="campaign_id" id="lead-campaign">
-        <option value="">— None —</option>
-      </select>
-    </div>
     <div style="display:flex; gap:0.5rem;">
       <button type="submit" class="btn" id="submit-btn">Add lead</button>
       <button type="button" class="btn secondary" id="cancel-btn" style="display:none;" onclick="resetForm()">Cancel</button>
@@ -52,26 +46,6 @@
 {% block extra_js %}
 <script>
 function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-let campaigns = [];
-let isEditMode = false;
-
-async function loadCampaigns() {
-  try {
-    const res = await fetch('/api/campaigns');
-    campaigns = await res.json();
-    const sel = document.getElementById('lead-campaign');
-    sel.innerHTML = '<option value="">— None —</option>';
-    campaigns.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c.id;
-      opt.textContent = c.name;
-      sel.appendChild(opt);
-    });
-  } catch (e) {
-    console.error('Failed to load campaigns:', e);
-  }
-}
 
 async function loadLeads() {
   const listEl = document.getElementById('lead-list');
@@ -224,7 +198,6 @@ document.getElementById('lead-form').addEventListener('submit', async (e) => {
       email: document.getElementById('lead-email').value.trim(),
       name: document.getElementById('lead-name').value.trim(),
       custom_data,
-      campaign_id: document.getElementById('lead-campaign').value ? parseInt(document.getElementById('lead-campaign').value, 10) : null,
     };
     
     const res = await fetch('/api/leads', {
@@ -246,7 +219,6 @@ document.getElementById('lead-form').addEventListener('submit', async (e) => {
 });
 
 // Initialize
-loadCampaigns();
 loadLeads();
 </script>
 {% endblock %}

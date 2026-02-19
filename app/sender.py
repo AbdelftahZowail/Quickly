@@ -2,19 +2,16 @@
 import base64
 import json
 import logging
-import os
 import re
 import smtplib
 import traceback
 import urllib.request
 import urllib.error
-import urllib.parse
 import resend
 from dataclasses import dataclass
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import make_msgid
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
 

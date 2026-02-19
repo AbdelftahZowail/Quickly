@@ -8,7 +8,6 @@ class LeadCreate(BaseModel):
     email: str
     name: str = ""
     custom_data: Dict[str, Any] = {}
-    campaign_id: Optional[int] = None
 
 
 class LeadUpdate(BaseModel):
@@ -122,6 +121,13 @@ class CampaignResponse(BaseModel):
 
 class AddLeadToCampaign(BaseModel):
     lead_id: int
+
+
+class CampaignLeadAdd(BaseModel):
+    """Used for adding (and optionally creating) leads directly from a campaign."""
+    email: str
+    name: str = ""
+    custom_data: Dict[str, Any] = {}
 
 
 class QueueSlotResponse(BaseModel):

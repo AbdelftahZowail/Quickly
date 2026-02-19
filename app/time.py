@@ -11,7 +11,6 @@ be persisted via the existing AppSetting mechanism. The module provides helpers 
 set/reset the persisted offset from scripts.
 """
 from datetime import datetime, date, timedelta
-from typing import Optional
 
 from app.settings_manager import settings
 
@@ -44,7 +43,7 @@ def offset_days() -> int:
 # DB-related helpers here as simple convenience functions.
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.settings_manager import save_setting_to_db, update_setting
+from app.settings_manager import update_setting
 
 
 async def persist_offset_days(db: AsyncSession, days: int | None) -> None:

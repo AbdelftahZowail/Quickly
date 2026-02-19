@@ -11,6 +11,7 @@ from app.schemas import (
     CampaignCreate,
     CampaignUpdate,
     CampaignResponse,
+    CampaignLeadAdd,
     SequenceCreate,
     SequenceUpdate,
     SequenceResponse,
@@ -449,6 +450,106 @@ async def remove_lead_from_campaign(
     await db.flush()
     log.info("remove_lead: campaign=%s lead=%s", campaign_id, lead_id)
     return {"ok": True}
+
+
+@router.post("/{campaign_id}/leads")
+async def bulk_add_leads_to_campaign(
+    campaign_id: int,
+    leads_data: list[CampaignLeadAdd],
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Add one or more leads to a campaign.
+    For each entry: find existing lead by email (or create), then enroll if not already enrolled.
+    Queues slots for each newly enrolled lead using reserve_slots_for_new_lead
+    (does NOT do a full recalculate — far cheaper for large campaigns).
+    """
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Campaign not found")
+
+    if not leads_data:
+        raise HTTPException(400, "No leads provided")
+
+    results = []
+    added = 0
+    already_enrolled = 0
+    errors = 0
+
+    for entry in leads_data:
+        email = entry.email.strip().lower()
+        if not email:
+            results.append({"email": entry.email, "status": "error", "detail": "Empty email"})
+            errors += 1
+            continue
+
+        try:
+            # Find or create lead by email
+            lead_result = await db.execute(select(Lead).where(Lead.email == email))
+            lead = lead_result.scalar_one_or_none()
+            if not lead:
+                lead = Lead(
+                    email=email,
+                    name=entry.name or "",
+                    custom_data=entry.custom_data or {},
+                )
+                db.add(lead)
+                await db.flush()  # Assigns lead.id
+                log.info("bulk_add_leads: created new lead %s (email=%s)", lead.id, email)
+            else:
+                # Update name/custom_data if supplied and lead has no existing values
+                changed = False
+                if entry.name and not lead.name:
+                    lead.name = entry.name
+                    changed = True
+                if entry.custom_data and not lead.custom_data:
+                    lead.custom_data = entry.custom_data
+                    changed = True
+                if changed:
+                    await db.flush()
+
+            # Check enrollment
+            existing_cl = await db.execute(
+                select(CampaignLead).where(
+                    CampaignLead.campaign_id == campaign_id,
+                    CampaignLead.lead_id == lead.id,
+                )
+            )
+            if existing_cl.scalar_one_or_none():
+                results.append({"email": email, "status": "already_enrolled"})
+                already_enrolled += 1
+                continue
+
+            # Enroll and queue
+            cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
+            db.add(cl)
+            await db.flush()
+            await reserve_slots_for_new_lead(db, cl.id, campaign_id)
+
+            # Count slots created
+            slot_count_result = await db.execute(
+                select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
+            )
+            slots = slot_count_result.scalar() or 0
+            log.info(
+                "bulk_add_leads: enrolled lead %s in campaign %s — %d slot(s)",
+                lead.id, campaign_id, slots,
+            )
+            results.append({"email": email, "status": "added", "lead_id": lead.id, "slots_created": slots})
+            added += 1
+
+        except Exception as exc:
+            log.exception("bulk_add_leads: error processing email %s: %s", email, exc)
+            results.append({"email": email, "status": "error", "detail": str(exc)})
+            errors += 1
+
+    return {
+        "ok": True,
+        "added": added,
+        "already_enrolled": already_enrolled,
+        "errors": errors,
+        "results": results,
+    }
 
 
 @router.post("/{campaign_id}/leads/{lead_id}")

@@ -24,7 +24,6 @@ uvicorn app.main:app --reload
 Open http://127.0.0.1:8000 for the web UI. Navigate between pages:
 - **Home** (`/`) - Dashboard and status
 - **Campaigns** (`/campaigns`) - Manage campaigns and sequences
-- **Leads** (`/leads`) - View and manage leads
 - **Inboxes** (`/inboxes`) - Configure sending addresses
 - **Calendar** (`/calendar`) - View sent and scheduled emails
 - **Settings** (`/settings`) - Configure email provider and app settings
@@ -65,7 +64,6 @@ No authentication required on any endpoint.
 
 ### Leads
 - `GET /api/leads` - List all leads
-- `POST /api/leads` - Create lead (body: `{email, name?, custom_data?}`)
 - `GET /api/leads/{id}` - Get single lead
 - `PATCH /api/leads/{id}` - Update lead
 - `DELETE /api/leads/{id}` - Delete lead
@@ -130,7 +128,7 @@ No authentication required on any endpoint.
 2. Add sending addresses in **Inboxes** page (or via `POST /api/inboxes`)
 3. Create campaign in **Campaigns** page, select inboxes
 4. Add sequences to campaign (position 0, 1, 2... with subject, body, wait days)
-5. Add leads via **Leads** page or API
+5. Add leads via campaign page or API (POST /api/campaigns/{id}/leads)
 6. Assign leads to campaign - slots are automatically reserved across campaign's inboxes
 7. Monitor progress in **Calendar** page or via `/api/calendar/sent` and `/api/calendar/scheduled`
 8. Check `/api/status` to verify scheduler is running
