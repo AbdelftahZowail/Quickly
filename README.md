@@ -149,4 +149,4 @@ Use these in email subject and body:
 - `{{email}}` - Lead's email
 - `{{company}}` - From lead's custom_data
 - `{{title}}` - From lead's custom_data
-- Any other key from lead's `custom_data` object
+- Any other key from lead's `custom_data` object.
