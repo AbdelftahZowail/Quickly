@@ -4,12 +4,12 @@ Minimal email campaign tool for personal use: leads, campaigns with email sequen
 
 ## Features
 
-- **Leads**: Add via web UI or API (email, name, custom data). Status tracking: active, unsubscribed, bounced, replied. Assign to campaigns on create or later.
+- **Leads**: Create and enroll leads from a campaign page or the campaign API (`POST /api/campaigns/{id}/leads`). Standalone lead creation (`POST /api/leads`) is not supported. Status tracking: active, unsubscribed, bounced, replied. Enroll leads into campaigns during create or later.
 - **Inboxes**: Add sending addresses (email, display name, max emails per day) via the **Inboxes** page or API. Support for Resend, SMTP, or Gmail OAuth. Campaigns can use multiple inboxes; the queue spreads sends across them by capacity.
 - **Campaigns**: Multiple sequences per campaign; each campaign has one or more inboxes. Each sequence: subject (optional = reply in thread), body (text/HTML), wait days after previous. Settings: sending days/hours, wait between emails, stop on reply, pause/resume.
 - **Queue**: When a lead joins, all sequence slots are reserved immediately. Each slot is assigned to an inbox that has capacity that day (round-robin across campaign inboxes). Business-day math and per-inbox daily limits. Add leads anytime; changing wait days recalculates pending slots.
 - **Sending**: A scheduled job (runs inside the same process as the server) sends due emails with template substitution (`{{name}}`, `{{email}}`, `{{company}}`, etc.) and threading (empty subject = reply in same thread).
-- **Calendar**: View all sent and scheduled emails across campaigns in one unified timeline with stats.
+- **Calendar**: View all sent and scheduled emails across campaigns in one unified timeline with stats. Includes validation checks ("Validate Queue") to detect scheduling issues.
 
 ## Quick Start
 
@@ -55,6 +55,11 @@ Enable test mode from the Settings page to safely test email sending without sen
 
 The web UI shows a banner when test mode is enabled.
 
+## Developer utilities
+
+- `add_bulk_leads.py` — CLI helper to create/add many test leads to a campaign via the API. Usage: `python add_bulk_leads.py --campaign-id 2 --count 50` (see file header for full options).
+- `populate_test_data.py` — Create sample inboxes, campaigns, sequences and leads for testing. Run with `python populate_test_data.py` (use `--delete` to remove test data).
+
 ## API Reference
 
 No authentication required on any endpoint.
@@ -71,6 +76,8 @@ No authentication required on any endpoint.
 - `POST /api/leads/{id}/campaigns/{campaign_id}` - Add lead to campaign
 - `POST /api/leads/mark-replied` - Mark lead as replied (body: `{lead_id, campaign_id}`)
 
+- Note: Creating standalone leads via `POST /api/leads` is not supported — use `POST /api/campaigns/{id}/leads` to create and enroll leads.
+
 ### Inboxes
 - `GET /api/inboxes` - List all inboxes
 - `POST /api/inboxes` - Create inbox (body: `{email, display_name?, max_emails_per_day?, provider?}`)
@@ -86,6 +93,7 @@ No authentication required on any endpoint.
 - `DELETE /api/campaigns/{id}` - Delete campaign
 - `POST /api/campaigns/{id}/duplicate` - Duplicate campaign with sequences
 - `GET /api/campaigns/{id}/leads` - List leads in campaign with progress
+- `POST /api/campaigns/{id}/leads` - Add one or more leads to campaign (body: list of `{email, name?, custom_data?}`); creates missing leads and schedules queue slots
 - `POST /api/campaigns/{id}/leads/{lead_id}` - Add lead to campaign
 - `DELETE /api/campaigns/{id}/leads/{lead_id}` - Remove lead from campaign
 - `GET /api/campaigns/{id}/queue` - View scheduled queue for campaign
@@ -101,6 +109,7 @@ No authentication required on any endpoint.
 ### Calendar
 - `GET /api/calendar/sent` - All sent emails across campaigns
 - `GET /api/calendar/scheduled` - All scheduled emails across campaigns
+- `POST /api/calendar/validate-queue` - Run scheduled-emails validation checks (returns issues list)
 - `GET /api/calendar/stats` - Aggregate statistics (sent today, scheduled today, total leads, etc.)
 
 ### Settings
