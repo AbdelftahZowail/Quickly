@@ -12,6 +12,8 @@ from app.app_settings import (
     save_google_oauth_credentials,
     get_test_mode,
     set_test_mode,
+    get_scheduling_strategy,
+    set_scheduling_strategy,
 )
 
 log = logging.getLogger("campaign_engine.settings")
@@ -181,3 +183,39 @@ def _mask_secret(value: str) -> str:
     if len(value) <= 8:
         return "***"
     return f"{value[:8]}***"
+
+
+# Scheduling strategy ---------------------------------------------------------
+
+@router.get("/scheduling-strategy")
+async def get_scheduling_strategy_endpoint(db: AsyncSession = Depends(get_db)):
+    """Return the active scheduling strategy ('priority' or 'round_robin')."""
+    strategy = await get_scheduling_strategy(db)
+    return {"scheduling_strategy": strategy}
+
+
+class _SchedulingStrategyPayload(_BaseModel):
+    scheduling_strategy: str  # 'priority' | 'round_robin'
+
+
+@router.post("/scheduling-strategy")
+async def set_scheduling_strategy_endpoint(
+    payload: _SchedulingStrategyPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Set the scheduling strategy used by *Recalculate All*.
+
+    - **priority** – campaigns are processed in ascending ``priority`` order;
+      use ``POST /api/campaigns/reorder`` to define that order.
+    - **round_robin** – inbox capacity is divided evenly across all active
+      campaigns and leads are scheduled in interleaved batches.
+    """
+    try:
+        await set_scheduling_strategy(db, payload.scheduling_strategy)
+        await db.commit()
+        return {"ok": True, "scheduling_strategy": payload.scheduling_strategy}
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        log.error("set_scheduling_strategy failed: %s", e)
+        raise HTTPException(500, f"Failed to update scheduling strategy: {e}")

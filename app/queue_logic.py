@@ -424,7 +424,6 @@ async def reserve_slots_for_lead(
             )
             current_date = original_start  # Reset to original if we exhausted attempts
 
-    abort_remaining = False
     for idx, seq in to_schedule:
         is_follow_up = (idx > 0)
         
@@ -450,7 +449,6 @@ async def reserve_slots_for_lead(
                 current_date = next_business_date(today, sending_days, 0)
 
         safety = 0
-        target_date = current_date  # Remember the target date for follow-ups
         while safety < 365:
             safety += 1
             candidate_inboxes = inboxes
@@ -468,12 +466,16 @@ async def reserve_slots_for_lead(
             # Follow-ups must not exceed inbox daily capacity.
             # If target date is full, leave this and remaining follow-ups unscheduled.
             if picked is None and is_follow_up:
+                # Inbox is full on the ideal follow-up date; advance one business day
+                # and retry rather than abandoning the remaining sequences entirely.
                 log.warning(
-                    "  -> seq=%d: no capacity on required follow-up date %s; leaving remaining sequence slots unscheduled",
+                    "  -> seq=%d: inbox full on follow-up date %s; advancing to next business day",
                     idx, current_date
                 )
-                abort_remaining = True
-                break
+                current_date += timedelta(days=1)
+                while current_date.weekday() not in sending_days:
+                    current_date += timedelta(days=1)
+                continue
             
             if picked is not None:
                 inbox_id, max_per_day = picked
@@ -502,48 +504,34 @@ async def reserve_slots_for_lead(
                                 idx, scheduled_dt.strftime("%H:%M"), now.strftime("%H:%M"),
                             )
                         else:
-                            # Sending window ended today
-                            if is_follow_up:
-                                # For follow-ups, must stay on target date; schedule at end of window
-                                log.warning(
-                                    "  -> seq=%d: sending window ended today; forcing schedule at end of window",
-                                    idx
-                                )
-                                scheduled_dt = datetime.combine(current_date, end_time)
-                            else:
-                                # For first emails, can move to next day
-                                log.info(
-                                    "  -> no slot left today for seq=%d (window ended); moving to next day",
-                                    idx,
-                                )
+                            # No slot left today (window ended or every grid point is taken).
+                            # Move to the next business day for ALL sequence types — stacking
+                            # emails at end_time violates the inbox rate-limit and causes a pile-up.
+                            log.info(
+                                "  -> no slot left today for seq=%d (window ended/full); moving to next day",
+                                idx,
+                            )
+                            current_date += timedelta(days=1)
+                            while current_date.weekday() not in sending_days:
                                 current_date += timedelta(days=1)
-                                while current_date.weekday() not in sending_days:
-                                    current_date += timedelta(days=1)
-                                continue
+                            continue
                     else:
                         scheduled_dt = datetime.combine(current_date, est_time)
                 else:
                     # Future day: check if estimated time exceeds sending window
                     est_t = _estimated_send_time(sending_start, wait_min, pos)
                     if est_t > end_time:
-                        # Time would overflow sending window
-                        if is_follow_up:
-                            # For follow-ups, must stay on target date; schedule at end of window
-                            log.warning(
-                                "  -> seq=%d pos=%d would send at %s (past %s); forcing schedule at end of window on target date",
-                                idx, pos, est_t.strftime("%H:%M"), end_time.strftime("%H:%M"),
-                            )
-                            scheduled_dt = datetime.combine(current_date, end_time)
-                        else:
-                            # For first emails, can move to next day
-                            log.info(
-                                "  -> seq=%d pos=%d would send at %s (past %s); moving to next day",
-                                idx, pos, est_t.strftime("%H:%M"), end_time.strftime("%H:%M"),
-                            )
+                        # Time would overflow the sending window — the inbox is full for this day.
+                        # Move to the next business day for ALL sequence types; forcing end_time
+                        # causes a pile-up of multiple leads at the same timestamp.
+                        log.info(
+                            "  -> seq=%d pos=%d would send at %s (past %s); moving to next day",
+                            idx, pos, est_t.strftime("%H:%M"), end_time.strftime("%H:%M"),
+                        )
+                        current_date += timedelta(days=1)
+                        while current_date.weekday() not in sending_days:
                             current_date += timedelta(days=1)
-                            while current_date.weekday() not in sending_days:
-                                current_date += timedelta(days=1)
-                            continue
+                        continue
                     else:
                         scheduled_dt = datetime.combine(current_date, est_t)
 
@@ -577,17 +565,10 @@ async def reserve_slots_for_lead(
                 round_robin = (inboxes.index(inbox_tuple) + 1) % len(inboxes)
                 break
             
-            # Only advance to next day for first emails (not follow-ups)
-            if not is_follow_up:
+            # Advance to next business day (for both first emails and follow-ups)
+            current_date += timedelta(days=1)
+            while current_date.weekday() not in sending_days:
                 current_date += timedelta(days=1)
-                while current_date.weekday() not in sending_days:
-                    current_date += timedelta(days=1)
-            else:
-                log.warning("  -> seq=%d: could not schedule follow-up on target date %s", idx, target_date)
-                break
-
-        if abort_remaining:
-            break
 
     log.info("reserve_slots_for_lead: done, created %d slots", len(scheduled_dates))
 
@@ -775,27 +756,48 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         return
     campaign, inboxes, sequences = data
 
-    if not inboxes:
-        log.warning("recalculate_queue: no inboxes for campaign %s", campaign_id)
-        return
-
-    # Fetch all leads
+    # Fetch all leads in the campaign
     result = await session.execute(
         select(CampaignLead).where(CampaignLead.campaign_id == campaign_id)
     )
     campaign_leads = list(result.scalars().all())
-    
-    if not campaign_leads:
-        log.info("recalculate_queue: no leads in campaign %s", campaign_id)
+
+    await _recalculate_queue_for_campaign_leads(
+        session,
+        campaign=campaign,
+        inboxes=inboxes,
+        sequences=sequences,
+        campaign_leads=campaign_leads,
+        log_prefix="recalculate_queue",
+    )
+
+
+async def _recalculate_queue_for_campaign_leads(
+    session: AsyncSession,
+    campaign: Campaign,
+    inboxes: List[Tuple[int, int, int]],
+    sequences: List[Sequence],
+    campaign_leads: List[CampaignLead],
+    *,
+    log_prefix: str,
+) -> None:
+    """Recalculate queue for a specific set of campaign leads in one campaign."""
+    campaign_id = campaign.id
+
+    if not inboxes:
+        log.warning("%s: no inboxes for campaign %s", log_prefix, campaign_id)
         return
-    
+
+    if not campaign_leads:
+        log.info("%s: no leads in campaign %s", log_prefix, campaign_id)
+        return
+
     # ============================================================================
     # BULK QUERY OPTIMIZATION: Fetch all lead metadata upfront (eliminates N+1)
     # ============================================================================
-    
+
     lead_ids = [cl.lead_id for cl in campaign_leads]
-    cl_id_by_lead_id = {cl.lead_id: cl.id for cl in campaign_leads}
-    
+
     # Query 1: Get max sequence_index and corresponding sent_at per lead
     email_log_query = await session.execute(
         select(
@@ -816,7 +818,7 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         last_sent_by_lead[row.lead_id] = row.max_seq if row.max_seq is not None else -1
         if row.last_sent_at:
             last_sent_date_by_lead[row.lead_id] = row.last_sent_at.date()
-    
+
     # Query 2: Get preferred inbox from EmailLog (most recent sent email per lead)
     preferred_inbox_query = await session.execute(
         select(EmailLog.lead_id, EmailLog.inbox_id)
@@ -829,7 +831,7 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         .order_by(EmailLog.lead_id, EmailLog.sent_at.desc())
     )
     preferred_inbox_from_log = {row.lead_id: row.inbox_id for row in preferred_inbox_query.all()}
-    
+
     # Query 3: Get preferred inbox from QueueSlot (for leads without sent emails)
     cl_ids = [cl.id for cl in campaign_leads]
     preferred_inbox_from_slot_query = await session.execute(
@@ -839,20 +841,21 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         .order_by(QueueSlot.campaign_lead_id, QueueSlot.sequence_index.asc())
     )
     preferred_inbox_from_slot = {row.campaign_lead_id: row.inbox_id for row in preferred_inbox_from_slot_query.all()}
-    
+
     # ============================================================================
     # END BULK QUERIES
     # ============================================================================
-    
+
     # Sort leads: those with sent emails first (to prioritize follow-ups), then new leads
     # This ensures follow-ups get their target dates before new leads fill capacity
     partially_sent_leads = [cl for cl in campaign_leads if cl.lead_id in last_sent_by_lead]
     new_leads = [cl for cl in campaign_leads if cl.lead_id not in last_sent_by_lead]
-    
+
     # Process in priority order: partially-sent first, then new
     ordered_leads = partially_sent_leads + new_leads
     log.info(
-        "recalculate_queue: %d leads (%d partially-sent, %d new), %d sequences, %d inboxes",
+        "%s: %d leads (%d partially-sent, %d new), %d sequences, %d inboxes",
+        log_prefix,
         len(ordered_leads), len(partially_sent_leads), len(new_leads), len(sequences), len(inboxes)
     )
 
@@ -888,7 +891,7 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         total_deleted += del_result.rowcount
 
     await session.flush()  # Single flush for all deletes
-    log.info("recalculate_queue: bulk-deleted %d old slots across %d leads", total_deleted, len(ordered_leads))
+    log.info("%s: bulk-deleted %d old slots across %d leads", log_prefix, total_deleted, len(ordered_leads))
 
     # ========================================================================
     # PHASE 2: PRE-SEED CACHES (count + time from one query, zero DB hits during reservation)
@@ -915,9 +918,26 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
                 slot_cache[time_key] = set()
             slot_cache[time_key].add(dt.hour * 60 + dt.minute)
 
+        # Also count today's emails already sent (their QueueSlots were deleted after sending).
+        # Without this, the capacity check sees only remaining unsent slots and allows
+        # far too many new slots to be added today.
+        _today = time_provider.today()
+        today_sent_result = await session.execute(
+            select(EmailLog.inbox_id, func.count(EmailLog.id).label("sent_count"))
+            .where(
+                EmailLog.inbox_id.in_(inbox_ids),
+                EmailLog.sent_at >= datetime.combine(_today, time(0, 0)),
+            )
+            .group_by(EmailLog.inbox_id)
+        )
+        for row in today_sent_result.all():
+            count_key = (row.inbox_id, _today)
+            slot_cache[count_key] = slot_cache.get(count_key, 0) + row.sent_count
+
     slot_cache[("_preseeded",)] = True  # Signal that cache is complete
     log.info(
-        "recalculate_queue: pre-seeded cache with %d date entries",
+        "%s: pre-seeded cache with %d date entries",
+        log_prefix,
         sum(1 for k in slot_cache if isinstance(k, tuple) and len(k) == 2 and isinstance(k[0], int)),
     )
 
@@ -925,8 +945,8 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
     # PHASE 3: RESERVE new slots for all leads (cache-only, zero DB queries)
     # ========================================================================
     if not sequences:
-        log.info("recalculate_queue: no sequences, nothing to reserve")
-        log.info("recalculate_queue: done for campaign %s", campaign_id)
+        log.info("%s: no sequences, nothing to reserve", log_prefix)
+        log.info("%s: done for campaign %s", log_prefix, campaign_id)
         return
 
     for cl in ordered_leads:
@@ -955,7 +975,359 @@ async def recalculate_queue_after_sequence_change(session: AsyncSession, campaig
         )
 
     await session.flush()  # Single flush for all new slots
-    log.info("recalculate_queue: done for campaign %s", campaign_id)
+    log.info("%s: done for campaign %s", log_prefix, campaign_id)
+
+
+async def recalculate_queue_after_sequence_change_for_leads(
+    session: AsyncSession,
+    campaign_lead_ids: List[int],
+) -> None:
+    """
+    Recalculate queue for an explicit list of campaign leads.
+
+    Leads are processed in caller order.
+    Adjacent leads with the same campaign_id are grouped together.
+    This may result in multiple groups per campaign.
+    """
+    if not campaign_lead_ids:
+        return
+
+    log.info("recalculate_queue_for_leads: leads=%d", len(campaign_lead_ids))
+
+    # Dedupe while preserving caller order
+    unique_ids = list(dict.fromkeys(campaign_lead_ids))
+
+    cl_result = await session.execute(
+        select(CampaignLead).where(CampaignLead.id.in_(unique_ids))
+    )
+    cl_by_id = {cl.id: cl for cl in cl_result.scalars().all()}
+
+    ordered_campaign_leads = [
+        cl_by_id[cl_id]
+        for cl_id in unique_ids
+        if cl_id in cl_by_id
+    ]
+
+    if not ordered_campaign_leads:
+        log.warning("recalculate_queue_for_leads: no CampaignLead rows found")
+        return
+
+    missing_ids = [cl_id for cl_id in unique_ids if cl_id not in cl_by_id]
+    if missing_ids:
+        log.warning(
+            "recalculate_queue_for_leads: %d campaign_lead ids not found",
+            len(missing_ids),
+        )
+
+    # Group ONLY adjacent leads with the same campaign_id
+    groups: list[tuple[int, list[CampaignLead]]] = []
+
+    for cl in ordered_campaign_leads:
+        if not groups or groups[-1][0] != cl.campaign_id:
+            groups.append((cl.campaign_id, [cl]))
+        else:
+            groups[-1][1].append(cl)
+
+    # Process each consecutive group independently
+    for campaign_id, campaign_leads in groups:
+        data = await _fetch_campaign_scheduling_data(session, campaign_id)
+        if not data:
+            continue
+
+        campaign, inboxes, sequences = data
+        await _recalculate_queue_for_campaign_leads(
+            session,
+            campaign=campaign,
+            inboxes=inboxes,
+            sequences=sequences,
+            campaign_leads=campaign_leads,
+            log_prefix="recalculate_queue_for_leads",
+        )
+
+
+async def recalculate_queue_round_robin(
+    session: AsyncSession,
+    campaign_lead_ids: List[int],
+    batch_size: Optional[int] = None,
+) -> None:
+    """Round-robin recalculation: distribute inbox capacity evenly across campaigns.
+
+    Unlike the priority-based approach (which processes one campaign at a time
+    and rebuilds a fresh cache for each), this function:
+
+    1. Fetches all campaign data and builds ONE shared slot-count cache covering
+       every inbox across every campaign.
+    2. Calculates ``batch_size = total_daily_inbox_capacity // num_active_campaigns``
+       (or uses the caller-supplied value) to determine how many leads from each
+       campaign are scheduled before rotating to the next campaign.
+    3. Interleaves lead scheduling in ``batch_size`` chunks per campaign, cycling
+       through all campaigns (round-robin) until every lead is processed.  The
+       shared cache persists across campaign switches so inbox load is visible to
+       every reservation call — no cache invalidation occurs on rotation.
+    4. Performs a single ``session.flush()`` at the very end.
+
+    This ensures inbox capacity is spread evenly across campaigns and avoids the
+    performance penalty of rebuilding the cache when switching campaigns.
+    """
+    if not campaign_lead_ids:
+        return
+
+    log.info("recalculate_queue_round_robin: %d campaign_lead ids", len(campaign_lead_ids))
+
+    # Dedupe while preserving order
+    unique_ids = list(dict.fromkeys(campaign_lead_ids))
+
+    cl_result = await session.execute(
+        select(CampaignLead).where(CampaignLead.id.in_(unique_ids))
+    )
+    cl_by_id = {cl.id: cl for cl in cl_result.scalars().all()}
+    ordered_cls = [cl_by_id[cl_id] for cl_id in unique_ids if cl_id in cl_by_id]
+
+    if not ordered_cls:
+        log.warning("recalculate_queue_round_robin: no CampaignLead rows found")
+        return
+
+    # Collect unique campaign IDs (preserving first-seen order from the caller)
+    campaign_ids_ordered: List[int] = []
+    for cl in ordered_cls:
+        if cl.campaign_id not in campaign_ids_ordered:
+            campaign_ids_ordered.append(cl.campaign_id)
+
+    # Fetch scheduling data for all campaigns
+    campaign_data: dict = {}  # campaign_id -> (campaign, inboxes, sequences)
+    for cid in campaign_ids_ordered:
+        data = await _fetch_campaign_scheduling_data(session, cid)
+        if data:
+            campaign_data[cid] = data
+
+    active_campaign_ids = [cid for cid in campaign_ids_ordered if cid in campaign_data]
+    if not active_campaign_ids:
+        log.warning("recalculate_queue_round_robin: no valid campaign data found")
+        return
+
+    num_campaigns = len(active_campaign_ids)
+
+    # Collect all unique inbox IDs across all active campaigns and total capacity
+    all_inbox_ids: List[int] = []
+    seen_inbox_ids: set = set()
+    total_daily_capacity = 0
+    for cid in active_campaign_ids:
+        _, inboxes, _ = campaign_data[cid]
+        for inbox_id, max_per_day, _ in inboxes:
+            if inbox_id not in seen_inbox_ids:
+                seen_inbox_ids.add(inbox_id)
+                all_inbox_ids.append(inbox_id)
+                total_daily_capacity += max_per_day
+
+    # Batch size: how many leads per campaign per rotation cycle
+    if batch_size is None:
+        batch_size = max(1, total_daily_capacity // num_campaigns)
+
+    log.info(
+        "recalculate_queue_round_robin: %d campaigns, %d unique inboxes, "
+        "total_capacity=%d/day, batch_size=%d/campaign",
+        num_campaigns, len(all_inbox_ids), total_daily_capacity, batch_size,
+    )
+
+    # Group leads by campaign (preserving per-campaign order)
+    leads_by_campaign: dict = {cid: [] for cid in active_campaign_ids}
+    for cl in ordered_cls:
+        if cl.campaign_id in leads_by_campaign:
+            leads_by_campaign[cl.campaign_id].append(cl)
+
+    # ===========================================================================
+    # PHASE 1: Pre-fetch email metadata for all campaigns' leads (bulk queries)
+    # ===========================================================================
+    last_sent_by_cl: dict = {}       # cl.id -> last_sent_sequence_index (int)
+    last_sent_date_by_cl: dict = {}  # cl.id -> date of last sent email
+    preferred_inbox_by_cl: dict = {} # cl.id -> preferred inbox_id
+
+    for cid in active_campaign_ids:
+        _, inboxes, _ = campaign_data[cid]
+        cls_for_campaign = leads_by_campaign[cid]
+        if not cls_for_campaign:
+            continue
+
+        lead_ids_c = [cl.lead_id for cl in cls_for_campaign]
+        cl_ids_c = [cl.id for cl in cls_for_campaign]
+        available_inbox_ids = [i[0] for i in inboxes]
+
+        # Max sequence_index + last sent_at per lead
+        email_log_rows = await session.execute(
+            select(
+                EmailLog.lead_id,
+                func.max(EmailLog.sequence_index).label("max_seq"),
+                func.max(EmailLog.sent_at).label("last_sent_at"),
+            )
+            .where(EmailLog.lead_id.in_(lead_ids_c), EmailLog.campaign_id == cid)
+            .group_by(EmailLog.lead_id)
+        )
+        lead_last_sent: dict = {}
+        lead_last_date: dict = {}
+        for row in email_log_rows.all():
+            lead_last_sent[row.lead_id] = row.max_seq if row.max_seq is not None else -1
+            if row.last_sent_at:
+                lead_last_date[row.lead_id] = row.last_sent_at.date()
+        for cl in cls_for_campaign:
+            last_sent_by_cl[cl.id] = lead_last_sent.get(cl.lead_id, -1)
+            if cl.lead_id in lead_last_date:
+                last_sent_date_by_cl[cl.id] = lead_last_date[cl.lead_id]
+
+        # Preferred inbox from EmailLog (most recent sent email per lead)
+        pref_log_rows = await session.execute(
+            select(EmailLog.lead_id, EmailLog.inbox_id)
+            .where(
+                EmailLog.lead_id.in_(lead_ids_c),
+                EmailLog.campaign_id == cid,
+                EmailLog.inbox_id.isnot(None),
+            )
+            .distinct(EmailLog.lead_id)
+            .order_by(EmailLog.lead_id, EmailLog.sent_at.desc())
+        )
+        lead_pref_inbox = {r.lead_id: r.inbox_id for r in pref_log_rows.all()}
+
+        # Preferred inbox from QueueSlot (fallback for uncontacted leads)
+        pref_slot_rows = await session.execute(
+            select(QueueSlot.campaign_lead_id, QueueSlot.inbox_id)
+            .where(QueueSlot.campaign_lead_id.in_(cl_ids_c))
+            .distinct(QueueSlot.campaign_lead_id)
+            .order_by(QueueSlot.campaign_lead_id, QueueSlot.sequence_index.asc())
+        )
+        cl_pref_inbox = {r.campaign_lead_id: r.inbox_id for r in pref_slot_rows.all()}
+
+        for cl in cls_for_campaign:
+            pref = None
+            if cl.lead_id in lead_pref_inbox:
+                ibx = lead_pref_inbox[cl.lead_id]
+                if ibx in available_inbox_ids:
+                    pref = ibx
+            elif cl.id in cl_pref_inbox:
+                ibx = cl_pref_inbox[cl.id]
+                if ibx in available_inbox_ids:
+                    pref = ibx
+            if pref is not None:
+                preferred_inbox_by_cl[cl.id] = pref
+
+    # ===========================================================================
+    # PHASE 2: Bulk delete old queue slots for ALL campaigns
+    # ===========================================================================
+    total_deleted = 0
+    for cid in active_campaign_ids:
+        cls_for_campaign = leads_by_campaign[cid]
+        if not cls_for_campaign:
+            continue
+
+        brand_new = [cl for cl in cls_for_campaign if last_sent_by_cl.get(cl.id, -1) < 0]
+        partially_sent = [cl for cl in cls_for_campaign if last_sent_by_cl.get(cl.id, -1) >= 0]
+
+        if brand_new:
+            del_r = await session.execute(
+                delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_([cl.id for cl in brand_new]))
+            )
+            total_deleted += del_r.rowcount
+
+        by_last_sent: dict = {}
+        for cl in partially_sent:
+            ls = last_sent_by_cl[cl.id]
+            by_last_sent.setdefault(ls, []).append(cl.id)
+        for last_sent_val, cl_ids_batch in by_last_sent.items():
+            del_r = await session.execute(
+                delete(QueueSlot).where(
+                    QueueSlot.campaign_lead_id.in_(cl_ids_batch),
+                    QueueSlot.sequence_index > last_sent_val,
+                )
+            )
+            total_deleted += del_r.rowcount
+
+    await session.flush()
+    log.info("recalculate_queue_round_robin: bulk-deleted %d old slots", total_deleted)
+
+    # ===========================================================================
+    # PHASE 3: Build ONE shared cache covering ALL inboxes from ALL campaigns
+    # ===========================================================================
+    shared_cache: dict = {}
+
+    if all_inbox_ids:
+        preseed_result = await session.execute(
+            select(QueueSlot.inbox_id, QueueSlot.scheduled_date)
+            .where(
+                QueueSlot.inbox_id.in_(all_inbox_ids),
+                QueueSlot.scheduled_date >= datetime.combine(time_provider.today(), time(0, 0)),
+            )
+        )
+        for row in preseed_result.all():
+            dt = row.scheduled_date
+            day = dt.date() if isinstance(dt, datetime) else dt
+            count_key = (row.inbox_id, day)
+            shared_cache[count_key] = shared_cache.get(count_key, 0) + 1
+            time_key = ("times", row.inbox_id, day)
+            if time_key not in shared_cache:
+                shared_cache[time_key] = set()
+            shared_cache[time_key].add(dt.hour * 60 + dt.minute)
+
+        # Also account for today's already-sent emails (QueueSlots deleted post-send)
+        _today = time_provider.today()
+        today_sent = await session.execute(
+            select(EmailLog.inbox_id, func.count(EmailLog.id).label("sent_count"))
+            .where(
+                EmailLog.inbox_id.in_(all_inbox_ids),
+                EmailLog.sent_at >= datetime.combine(_today, time(0, 0)),
+            )
+            .group_by(EmailLog.inbox_id)
+        )
+        for row in today_sent.all():
+            count_key = (row.inbox_id, _today)
+            shared_cache[count_key] = shared_cache.get(count_key, 0) + row.sent_count
+
+    shared_cache[("_preseeded",)] = True  # signal: missing keys → 0 slots
+    log.info(
+        "recalculate_queue_round_robin: shared cache pre-seeded — %d date entries, %d inboxes",
+        sum(1 for k in shared_cache if isinstance(k, tuple) and len(k) == 2 and isinstance(k[0], int)),
+        len(all_inbox_ids),
+    )
+
+    # ===========================================================================
+    # PHASE 4: Interleaved reservation — batch_size leads per campaign per cycle
+    # ===========================================================================
+    campaign_queues: dict = {cid: list(leads_by_campaign[cid]) for cid in active_campaign_ids}
+
+    total_reserved = 0
+    any_remaining = True
+    while any_remaining:
+        any_remaining = False
+        for cid in active_campaign_ids:
+            queue = campaign_queues[cid]
+            if not queue:
+                continue
+
+            campaign, inboxes, sequences = campaign_data[cid]
+            batch = queue[:batch_size]
+            campaign_queues[cid] = queue[batch_size:]
+
+            if campaign_queues[cid]:
+                any_remaining = True
+
+            for cl in batch:
+                last_sent = last_sent_by_cl.get(cl.id, -1)
+                forced_inbox = preferred_inbox_by_cl.get(cl.id, None)
+                start_date = last_sent_date_by_cl.get(cl.id, time_provider.today())
+
+                await reserve_slots_for_lead(
+                    session, cl.id, campaign, inboxes, sequences,
+                    lead_id=cl.lead_id,
+                    start_date=start_date,
+                    last_sent_sequence_index=last_sent,
+                    forced_inbox_id=forced_inbox,
+                    cache=shared_cache,  # shared — survives campaign rotation
+                )
+                total_reserved += 1
+
+    await session.flush()
+    log.info(
+        "recalculate_queue_round_robin: done — reserved slots for %d leads across %d campaigns "
+        "(batch_size=%d, total_capacity=%d/day)",
+        total_reserved, num_campaigns, batch_size, total_daily_capacity,
+    )
 
 
 # Backwards-compatible public API ------------------------------------------------

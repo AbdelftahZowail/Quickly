@@ -126,6 +126,7 @@ def _migrate_queue_slot_unique_constraint(conn):
         QueueSlot.__table__.create(conn, checkfirst=True)
     else:
         # Has data - preserve it with a migration
+        conn.execute(text("DROP TABLE IF EXISTS queue_slot_new"))
         conn.execute(text("""
             CREATE TABLE queue_slot_new (
                 id INTEGER NOT NULL PRIMARY KEY,
@@ -151,6 +152,14 @@ def _migrate_queue_slot_unique_constraint(conn):
         conn.execute(text("ALTER TABLE queue_slot_new RENAME TO queue_slot"))
 
 
+def _migrate_campaign_priority(conn):
+    """Add priority column to campaign table if missing (default 0 = highest priority)."""
+    cur = conn.execute(text("PRAGMA table_info(campaign)"))
+    columns = [row[1] for row in cur.fetchall()]
+    if "priority" not in columns:
+        conn.execute(text("ALTER TABLE campaign ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"))
+
+
 async def init_db():
     from app import models  # noqa: F401 - so Base.metadata has all tables
     from app.settings_manager import initialize_settings
@@ -163,6 +172,7 @@ async def init_db():
         await conn.run_sync(_migrate_inbox_wait_minutes)
         await conn.run_sync(_migrate_email_log_inbox_id)
         await conn.run_sync(_migrate_queue_slot_unique_constraint)
+        await conn.run_sync(_migrate_campaign_priority)
     
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:

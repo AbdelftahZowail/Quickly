@@ -90,6 +90,7 @@ class CampaignCreate(BaseModel):
     wait_minutes_between: int = 5  # Deprecated: wait time is now controlled by inbox settings
     stop_on_reply: bool = True
     paused: bool = False
+    priority: int = 0  # Lower value = processed first in priority scheduling
 
 
 class CampaignUpdate(BaseModel):
@@ -101,6 +102,7 @@ class CampaignUpdate(BaseModel):
     wait_minutes_between: Optional[int] = None
     stop_on_reply: Optional[bool] = None
     paused: Optional[bool] = None
+    priority: Optional[int] = None  # Lower value = processed first in priority scheduling
 
 
 class CampaignResponse(BaseModel):
@@ -113,6 +115,7 @@ class CampaignResponse(BaseModel):
     wait_minutes_between: int
     stop_on_reply: bool
     paused: bool
+    priority: int
     created_at: datetime
 
     class Config:

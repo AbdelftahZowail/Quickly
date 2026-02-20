@@ -12,6 +12,9 @@ Usage:
     python simulate_queue_2_days.py
     python simulate_queue_2_days.py --days 2 --dry-run
     python simulate_queue_2_days.py --start "2026-02-18 09:00" --days 2
+
+    Add --no-send to advance the application's time offset but do NOT create EmailLog
+    rows or delete QueueSlot rows (time will advance but no emails will be logged).
 """
 
 import argparse
@@ -44,6 +47,8 @@ class SimulationResult:
     window_end: datetime
     total_slots_found: int = 0
     simulated_sent: int = 0
+    # When --no-send is used, this records how many *would* have been sent
+    would_have_sent: int = 0
     skipped_paused_campaign: int = 0
     skipped_inactive_lead: int = 0
     skipped_stop_on_reply: int = 0
@@ -56,7 +61,7 @@ class SimulationResult:
     def bump_inbox(self, inbox_email: str):
         self.by_inbox[inbox_email] = self.by_inbox.get(inbox_email, 0) + 1
 
-    def print_summary(self, dry_run: bool):
+    def print_summary(self, dry_run: bool, send_emails: bool = True):
         title = "SIMULATION SUMMARY (DRY RUN)" if dry_run else "SIMULATION SUMMARY"
         print("\n" + "=" * 80)
         print(title)
@@ -64,7 +69,12 @@ class SimulationResult:
         print(f"Window start: {self.window_start.isoformat(sep=' ', timespec='seconds')}")
         print(f"Window end:   {self.window_end.isoformat(sep=' ', timespec='seconds')}")
         print(f"Queue slots found: {self.total_slots_found}")
-        print(f"Simulated sent:    {self.simulated_sent}")
+
+        if send_emails:
+            print(f"Simulated sent:    {self.simulated_sent}")
+        else:
+            print(f"Would have sent:   {self.would_have_sent}  (no emails were logged because --no-send was used)")
+
         print("Skipped:")
         print(f"  - Paused campaign: {self.skipped_paused_campaign}")
         print(f"  - Inactive lead:   {self.skipped_inactive_lead}")
@@ -87,7 +97,13 @@ class QueueSimulator:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def simulate(self, start_at: datetime, days: int, dry_run: bool) -> SimulationResult:
+    async def simulate(self, start_at: datetime, days: int, dry_run: bool, send_emails: bool = True) -> SimulationResult:
+        """If send_emails is False, advance time (no DB write of EmailLog/QueueSlot).
+
+        - dry_run: preview changes without committing
+        - send_emails=False: do NOT create EmailLog rows or delete QueueSlot rows
+          (useful to advance the application's persisted time offset without sending).
+        """
         if days <= 0:
             raise ValueError("days must be >= 1")
 
@@ -141,6 +157,16 @@ class QueueSimulator:
                     result.skipped_stop_on_reply += 1
                     continue
 
+            # This is what *would* be logged/sent. We always record the "would have sent"
+            # count so the summary can show what would happen when --no-send is used.
+            result.would_have_sent += 1
+            result.bump_campaign(campaign.name)
+            result.bump_inbox(inbox.email)
+
+            if not send_emails:
+                # Do not create EmailLog rows or delete queue slots when send_emails is False
+                continue
+
             subject = (sequence.subject or "").strip() or "(no subject)"
             simulated_log = EmailLog(
                 lead_id=lead.id,
@@ -155,12 +181,14 @@ class QueueSimulator:
             await self.session.delete(slot)
 
             result.simulated_sent += 1
-            result.bump_campaign(campaign.name)
-            result.bump_inbox(inbox.email)
 
-        if dry_run:
+        # If this was a dry-run or send_emails is disabled, don't persist simulator changes
+        if dry_run or not send_emails:
             await self.session.rollback()
-            log.info("Dry run enabled: rolled back all simulated changes")
+            if dry_run:
+                log.info("Dry run enabled: rolled back all simulated changes")
+            else:
+                log.info("Send disabled: no EmailLog rows were created and queue slots were NOT removed")
         else:
             await self.session.commit()
             log.info("Simulation committed: %d email(s) logged and queue slots removed", result.simulated_sent)
@@ -190,6 +218,11 @@ def parse_args() -> argparse.Namespace:
         help="Preview changes without committing them",
     )
     parser.add_argument(
+        "--no-send",
+        action="store_true",
+        help="Advance time and persist offset but do NOT log/send emails",
+    )
+    parser.add_argument(
         "--reset",
         action="store_true",
         help="Reset any persisted time-travel offset back to real now",
@@ -217,9 +250,11 @@ async def main():
 
     async with AsyncSessionLocal() as session:
         simulator = QueueSimulator(session)
-        sim_result = await simulator.simulate(start_at=start_at, days=args.days, dry_run=args.dry_run)
+        sim_result = await simulator.simulate(
+            start_at=start_at, days=args.days, dry_run=args.dry_run, send_emails=not args.no_send
+        )
 
-    sim_result.print_summary(dry_run=args.dry_run)
+    sim_result.print_summary(dry_run=args.dry_run, send_emails=not args.no_send)
 
     # Persist the requested offset so the whole application/server uses it.
     # Do not persist when doing a dry-run.

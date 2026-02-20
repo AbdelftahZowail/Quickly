@@ -93,6 +93,11 @@
       <span style="color:var(--muted); font-size:0.8rem;">Last Run Sent:</span>
       <span id="last-job-count" style="font-weight:600;">—</span>
     </div>
+    <div>
+      <span style="color:var(--muted); font-size:0.8rem;">Strategy:</span>
+      <span id="strategy-indicator" style="font-weight:600; cursor:pointer; text-decoration:underline dotted; text-underline-offset:3px;"
+            title="Change in Settings" onclick="window.location='/settings'"></span>
+    </div>
   </div>
   <div>
     <span style="color:var(--muted); font-size:0.75rem;">Auto-refresh: 30s</span>
@@ -151,11 +156,12 @@ async function safeFetch(url, fallback) {
 }
 
 async function loadData() {
-  const [sent, scheduled, stats, serverStatus] = await Promise.all([
+  const [sent, scheduled, stats, serverStatus, strategyData] = await Promise.all([
     safeFetch('/api/calendar/sent', []),
     safeFetch('/api/calendar/scheduled', []),
     safeFetch('/api/calendar/stats', {}),
     safeFetch('/api/status', {}),
+    safeFetch('/api/settings/scheduling-strategy', {}),
   ]);
   _sent = sent;
   _scheduled = scheduled;
@@ -182,6 +188,15 @@ async function loadData() {
     document.getElementById('last-job-time').textContent = diffMins < 1 ? 'Just now' : diffMins + 'm ago';
   }
   document.getElementById('last-job-count').textContent = serverStatus.last_send_job_sent_count ?? 0;
+
+  // Strategy indicator
+  const strategyEl = document.getElementById('strategy-indicator');
+  if (strategyEl) {
+    const STRATEGY_LABELS = { priority: 'Priority', round_robin: 'Round-Robin' };
+    const strat = strategyData.scheduling_strategy || 'priority';
+    strategyEl.textContent = STRATEGY_LABELS[strat] || strat;
+    strategyEl.style.color = strat === 'round_robin' ? 'var(--accent)' : 'var(--text)';
+  }
 
   // Populate campaign filter
   const campSet = new Map();
@@ -240,7 +255,10 @@ async function recalculateAllCampaigns() {
     const res = await fetch('/api/calendar/recalculate-all', { method: 'POST' });
     if (res.ok) {
       const data = await res.json();
-      btn.textContent = `✓ Done! (${data.campaigns_processed} campaigns, cleared ${data.cleared_slots}, created ${data.total_slots} slots)`;
+      const STRATEGY_LABELS = { priority: 'Priority', round_robin: 'Round-Robin' };
+      const stratLabel = STRATEGY_LABELS[data.strategy] || data.strategy || '';
+      const stratPart = stratLabel ? ` [${stratLabel}]` : '';
+      btn.textContent = `✓ Done!${stratPart} (${data.campaigns_processed} campaigns, ${data.total_slots} slots)`;
       
       // Reload all data after recalculation
       await loadData();

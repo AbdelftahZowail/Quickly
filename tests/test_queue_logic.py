@@ -25,6 +25,7 @@ from app.queue_logic import (
     reserve_slots_for_lead,
     reserve_slots_for_new_lead,
     recalculate_queue_after_sequence_change,
+    recalculate_queue_after_sequence_change_for_leads,
 )
 from tests.conftest import (
     make_inbox,
@@ -590,9 +591,8 @@ class TestRoundRobinAndCapacity:
         assert next(iter(inbox_ids)) in {inbox_a.id, inbox_b.id}
 
     async def test_capacity_overflow_moves_to_next_day(self, session):
-        """When inbox hits max_per_day, follow-ups that require the same target date
-        will NOT spill to the next business day — they are left unscheduled if target
-        date capacity is full."""
+        """When inbox hits max_per_day, follow-ups that can't fit on their ideal
+        date advance to the next business day rather than being abandoned."""
         inbox = await make_inbox(session, max_emails_per_day=2, wait_minutes_between=5)
         campaign = await make_campaign(session, sending_days=[0, 1, 2, 3, 4])
 
@@ -616,10 +616,14 @@ class TestRoundRobinAndCapacity:
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
         )
         slots = result.scalars().all()
-        # Follow-ups that target the same date will be left unscheduled when capacity is full
-        assert len(slots) == 2
+        # All 4 sequences get scheduled; the inbox-full follow-ups overflow to the next business day
+        assert len(slots) == 4
+        # First two fit on the start date
         assert slots[0].scheduled_date.date() == date(2026, 3, 2)
         assert slots[1].scheduled_date.date() == date(2026, 3, 2)
+        # Remaining two overflow to the next business day
+        assert slots[2].scheduled_date.date() == date(2026, 3, 3)
+        assert slots[3].scheduled_date.date() == date(2026, 3, 3)
 
     async def test_sending_window_overflow_to_next_day(self, session):
         """When estimated send time exceeds sending_hours_end for follow-ups,
@@ -1127,6 +1131,148 @@ class TestRecalculateQueueAfterSequenceChange:
         await recalculate_queue_after_sequence_change(session, 9999)
 
 
+class TestRecalculateQueueAfterSequenceChangeForLeads:
+    """Tests for recalculate_queue_after_sequence_change_for_leads."""
+
+    async def test_recalculates_only_selected_leads(self, session):
+        """Only the provided campaign_lead ids are recalculated."""
+        inbox = await make_inbox(session, max_emails_per_day=50, wait_minutes_between=5)
+        campaign = await make_campaign(session)
+        await make_campaign_inbox(session, campaign.id, inbox.id)
+
+        await make_sequence(session, campaign.id, position=0)
+        await make_sequence(session, campaign.id, position=1, wait_days_after_previous=1)
+
+        leads = []
+        for i in range(3):
+            lead = await make_lead(session, email=f"subset{i}@test.com")
+            cl = await make_campaign_lead(session, campaign.id, lead.id)
+            leads.append((lead, cl))
+            await reserve_slots_for_new_lead(session, cl.id, campaign.id, start_date=date(2027, 3, 2))
+
+        # Lead 0 already sent seq 0.
+        await make_email_log(
+            session,
+            leads[0][0].id,
+            campaign.id,
+            sequence_index=0,
+            inbox_id=inbox.id,
+            sent_at=datetime(2027, 3, 2, 10, 0),
+        )
+
+        # Add one more sequence, then recalc only lead 0 and lead 2.
+        await make_sequence(session, campaign.id, position=2, wait_days_after_previous=1)
+        await recalculate_queue_after_sequence_change_for_leads(
+            session,
+            [leads[0][1].id, leads[2][1].id],
+        )
+
+        result = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == leads[0][1].id)
+        )
+        assert result.scalar() == 3  # kept seq 0, rebuilt seq 1..2
+
+        result = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == leads[1][1].id)
+        )
+        assert result.scalar() == 2  # untouched
+
+        result = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == leads[2][1].id)
+        )
+        assert result.scalar() == 3  # rebuilt with new sequence
+
+    async def test_mixed_campaign_list_is_supported(self, session):
+        """Input list can contain leads from different campaigns."""
+        inbox_a = await make_inbox(session, email="mix-a@test.com", max_emails_per_day=50, wait_minutes_between=5)
+        inbox_b = await make_inbox(session, email="mix-b@test.com", max_emails_per_day=50, wait_minutes_between=5)
+
+        campaign_a = await make_campaign(session, name="Campaign A")
+        campaign_b = await make_campaign(session, name="Campaign B")
+        await make_campaign_inbox(session, campaign_a.id, inbox_a.id)
+        await make_campaign_inbox(session, campaign_b.id, inbox_b.id)
+
+        await make_sequence(session, campaign_a.id, position=0)
+        await make_sequence(session, campaign_a.id, position=1, wait_days_after_previous=1)
+        await make_sequence(session, campaign_b.id, position=0)
+        await make_sequence(session, campaign_b.id, position=1, wait_days_after_previous=1)
+
+        lead_a = await make_lead(session, email="mix-lead-a@test.com")
+        cl_a = await make_campaign_lead(session, campaign_a.id, lead_a.id)
+        lead_b = await make_lead(session, email="mix-lead-b@test.com")
+        cl_b = await make_campaign_lead(session, campaign_b.id, lead_b.id)
+
+        await reserve_slots_for_new_lead(session, cl_a.id, campaign_a.id, start_date=date(2027, 3, 2))
+        await reserve_slots_for_new_lead(session, cl_b.id, campaign_b.id, start_date=date(2027, 3, 2))
+
+        await make_sequence(session, campaign_a.id, position=2, wait_days_after_previous=1)
+        await make_sequence(session, campaign_b.id, position=2, wait_days_after_previous=1)
+
+        # Reverse order on purpose to prove caller-defined lead order is accepted.
+        await recalculate_queue_after_sequence_change_for_leads(session, [cl_b.id, cl_a.id])
+
+        result = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl_a.id)
+        )
+        assert result.scalar() == 3
+
+        result = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl_b.id)
+        )
+        assert result.scalar() == 3
+
+
+class TestOrderCampaignLeadsPrioritizingPartials:
+    """Ensure leads that have any prior EmailLog are prioritized across campaigns."""
+
+    async def test_prioritizes_partials_across_campaigns(self, session):
+        campaign_a = await make_campaign(session, name="A")
+        campaign_b = await make_campaign(session, name="B")
+
+        lead_sent = await make_lead(session, email="sent@example.com")
+        lead_new = await make_lead(session, email="new@example.com")
+
+        cl_a_sent = await make_campaign_lead(session, campaign_a.id, lead_sent.id)
+        cl_b_sent = await make_campaign_lead(session, campaign_b.id, lead_sent.id)
+        cl_b_new = await make_campaign_lead(session, campaign_b.id, lead_new.id)
+
+        # EmailLog exists for lead_sent (in campaign A)
+        await make_email_log(session, lead_sent.id, campaign_a.id, sequence_index=0)
+
+        from app.routers.calendar import order_campaign_leads_prioritizing_partials
+
+        # Provide campaign_leads in an order where cl_b_sent appears after cl_b_new
+        campaign_leads = [cl_a_sent, cl_b_new, cl_b_sent]
+        ordered_ids = await order_campaign_leads_prioritizing_partials(session, campaign_leads)
+
+        # Only campaign A has a matching EmailLog, so only cl_a_sent is
+        # treated as partial. Campaign B leads remain in their input order.
+        assert ordered_ids == [cl_a_sent.id, cl_b_new.id, cl_b_sent.id]
+
+        # Verify the on-disk `logs/partial.txt` uses lead email (and includes
+        # an EMAIL_LOGS section that contains the lead_id + lead_email).
+        from pathlib import Path
+        out_path = Path(__file__).resolve().parents[1] / "logs" / "partial.txt"
+        txt = out_path.read_text(encoding="utf-8")
+        assert txt.splitlines()[0] == "# EMAIL_LOGS"
+        assert f"{lead_sent.id}\t{lead_sent.email}\t{campaign_a.id}" in txt
+
+        before_block = txt.split("# BEFORE\n")[1].split("# AFTER\n")[0].strip().splitlines()
+        assert before_block == [
+            f"{lead_sent.email}\t{campaign_a.id}",
+            f"{lead_new.email}\t{campaign_b.id}",
+            f"{lead_sent.email}\t{campaign_b.id}",
+        ]
+
+        # AFTER should reflect the partials-only-within-same-campaign behavior
+        after_block = txt.split("# AFTER\n")[1].strip().splitlines()
+        assert after_block == [
+            f"{lead_sent.email}\t{campaign_a.id}",
+            f"{lead_new.email}\t{campaign_b.id}",
+            f"{lead_sent.email}\t{campaign_b.id}",
+        ]
+
+
 class TestWeekendSkipping:
     """Verifies that scheduling correctly skips non-sending days."""
 
@@ -1155,10 +1301,10 @@ class TestWeekendSkipping:
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
         )
         slots = result.scalars().all()
-        # Follow-up could not be scheduled on Friday (capacity=1); it is left unscheduled
-        assert len(slots) == 1
-        assert slots[0].scheduled_date.date() == fri  # Friday
-        # remaining sequence(s) were not scheduled due to capacity on the required follow-up date
+        # Both sequences are scheduled; the follow-up overflows from Friday to Monday
+        assert len(slots) == 2
+        assert slots[0].scheduled_date.date() == fri            # Friday
+        assert slots[1].scheduled_date.date() == date(2026, 3, 9)  # Monday (skipped weekend)
 
     async def test_weekend_only_sending_days(self, session):
         """Campaign that only sends on weekends should schedule on Sat/Sun."""

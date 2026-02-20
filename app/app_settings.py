@@ -15,6 +15,7 @@ log = logging.getLogger("campaign_engine.app_settings")
 GOOGLE_CLIENT_ID_KEY = "google_client_id"
 GOOGLE_CLIENT_SECRET_KEY = "google_client_secret"
 TEST_MODE_KEY = "test_mode"
+SCHEDULING_STRATEGY_KEY = "scheduling_strategy"  # "priority" (default) | "round_robin"
 
 
 # Generic helpers --------------------------------------------------------------
@@ -73,3 +74,25 @@ async def set_test_mode(db: AsyncSession, enabled: bool) -> None:
     from app.settings_manager import reload_settings
     await reload_settings(db)
     log.info("Test mode %s", "enabled" if enabled else "disabled")
+
+
+# Scheduling strategy convenience ---------------------------------------------
+
+VALID_SCHEDULING_STRATEGIES = ("priority", "round_robin")
+
+
+async def get_scheduling_strategy(db: AsyncSession) -> str:
+    """Return the active scheduling strategy ('priority' or 'round_robin')."""
+    value = await get_setting(db, SCHEDULING_STRATEGY_KEY)
+    if value in VALID_SCHEDULING_STRATEGIES:
+        return value
+    return "priority"  # default
+
+
+async def set_scheduling_strategy(db: AsyncSession, strategy: str) -> None:
+    """Persist the scheduling strategy ('priority' or 'round_robin')."""
+    if strategy not in VALID_SCHEDULING_STRATEGIES:
+        raise ValueError(f"Invalid strategy '{strategy}'; must be one of {VALID_SCHEDULING_STRATEGIES}")
+    await put_setting(db, SCHEDULING_STRATEGY_KEY, strategy)
+    await db.flush()
+    log.info("Scheduling strategy set to '%s'", strategy)

@@ -1,9 +1,11 @@
 """Campaigns and sequences API routes."""
 import logging
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
 from datetime import date
+from typing import List
 
 from app.database import get_db
 from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Lead, Inbox, EmailLog, CampaignInbox
@@ -34,6 +36,7 @@ def _campaign_to_response(campaign: Campaign, inbox_ids: list[int]) -> CampaignR
         wait_minutes_between=campaign.wait_minutes_between,
         stop_on_reply=campaign.stop_on_reply,
         paused=campaign.paused if hasattr(campaign, 'paused') else False,
+        priority=campaign.priority if hasattr(campaign, 'priority') else 0,
         created_at=campaign.created_at,
     )
 
@@ -55,7 +58,7 @@ async def _get_inbox_ids_for_campaigns(db: AsyncSession, campaign_ids: list[int]
 
 @router.get("", response_model=list[CampaignResponse])
 async def list_campaigns(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Campaign).order_by(Campaign.id))
+    result = await db.execute(select(Campaign).order_by(Campaign.priority, Campaign.id))
     campaigns = result.scalars().all()
     campaign_ids = [c.id for c in campaigns]
     inbox_map = await _get_inbox_ids_for_campaigns(db, campaign_ids)
@@ -77,6 +80,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         wait_minutes_between=data.wait_minutes_between,
         stop_on_reply=data.stop_on_reply,
         paused=data.paused,
+        priority=data.priority,
     )
     db.add(campaign)
     await db.flush()
@@ -84,6 +88,47 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         db.add(CampaignInbox(campaign_id=campaign.id, inbox_id=inbox_id, position=pos))
     await db.refresh(campaign)
     return _campaign_to_response(campaign, list(data.inbox_ids))
+
+
+class CampaignReorder(BaseModel):
+    """Body for POST /api/campaigns/reorder — explicit priority ordering.
+
+    ``campaign_ids`` is the desired order from highest-priority (index 0) to
+    lowest.  Each campaign's ``priority`` column is set to its index in this
+    list so that ``priority=0`` == highest priority.
+    """
+    campaign_ids: List[int]
+
+
+@router.post("/reorder")
+async def reorder_campaigns(data: CampaignReorder, db: AsyncSession = Depends(get_db)):
+    """Set the priority order of campaigns used by the priority-based scheduling strategy.
+
+    Pass a list of all campaign IDs in the desired order (highest priority first).
+    Each campaign's ``priority`` is updated to its position in the list (0 = highest).
+    """
+    if not data.campaign_ids:
+        raise HTTPException(400, "campaign_ids must not be empty")
+
+    result = await db.execute(
+        select(Campaign).where(Campaign.id.in_(data.campaign_ids))
+    )
+    campaigns_by_id = {c.id: c for c in result.scalars().all()}
+
+    missing = [cid for cid in data.campaign_ids if cid not in campaigns_by_id]
+    if missing:
+        raise HTTPException(404, f"Campaign IDs not found: {missing}")
+
+    for priority_index, cid in enumerate(data.campaign_ids):
+        campaigns_by_id[cid].priority = priority_index
+
+    await db.flush()
+    log.info(
+        "reorder_campaigns: updated priority for %d campaigns -> %s",
+        len(data.campaign_ids),
+        {cid: idx for idx, cid in enumerate(data.campaign_ids)},
+    )
+    return {"ok": True, "order": data.campaign_ids}
 
 
 @router.get("/{campaign_id}", response_model=CampaignResponse)
@@ -153,6 +198,8 @@ async def update_campaign(
         campaign.stop_on_reply = data.stop_on_reply
     if data.paused is not None:
         campaign.paused = data.paused
+    if data.priority is not None:
+        campaign.priority = data.priority
     await db.flush()
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))

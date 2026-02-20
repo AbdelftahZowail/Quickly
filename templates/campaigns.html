@@ -1,78 +1,221 @@
 {% extends "base.html" %}
 {% block title %}Campaigns{% endblock %}
+{% block extra_css %}
+.drag-handle {
+  cursor: grab;
+  color: var(--muted);
+  font-size: 1.2rem;
+  user-select: none;
+  padding: 0 0.4rem;
+  letter-spacing: -2px;
+}
+.drag-handle:active { cursor: grabbing; }
+tr.dragging { opacity: 0.35; }
+tr.drag-over td { border-top: 2px solid var(--accent); }
+.priority-badge {
+  display: inline-block;
+  min-width: 1.6rem;
+  text-align: center;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: rgba(34,211,238,0.12);
+  color: var(--accent);
+  margin-right: 0.3rem;
+  font-family: 'JetBrains Mono', monospace;
+}
+.reorder-banner {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  background: rgba(34,211,238,0.06);
+  border: 1px solid rgba(34,211,238,0.2);
+  border-radius: 8px;
+  padding: 0.65rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+.reorder-banner strong { color: var(--accent); }
+{% endblock %}
 {% block content %}
 <h1>Campaigns</h1>
 <p style="color: var(--muted); margin-bottom: 1rem;">Create and manage email sequences and settings.</p>
+<div id="priority-banner"></div>
 <div id="campaign-list"></div>
-<p style="margin-top: 1rem;"><a href="/campaigns/add" id="create-campaign-btn" class="btn">Create campaign</a></p>
+<div style="margin-top:1rem; display:flex; gap:0.75rem; align-items:center; flex-wrap:wrap;">
+  <a href="/campaigns/add" class="btn">Create campaign</a>
+  <button id="save-order-btn" class="btn" style="display:none;" onclick="saveOrder()">&#128190; Save Priority Order</button>
+  <span id="order-saved-msg" style="color:var(--success); font-size:0.85rem; display:none;">&#10003; Order saved!</span>
+</div>
 {% endblock %}
 {% block extra_js %}
 <script>
 (function() {
   function escapeHtml(s) { return (s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
-  const listEl = document.getElementById('campaign-list');
+  const listEl   = document.getElementById('campaign-list');
+  const bannerEl = document.getElementById('priority-banner');
+  const saveBtn  = document.getElementById('save-order-btn');
+  const savedMsg = document.getElementById('order-saved-msg');
 
-  async function load() {
-    const [campaignsRes, inboxesRes] = await Promise.all([
-      fetch('/api/campaigns'),
-      fetch('/api/inboxes'),
-    ]);
-    const campaigns = await campaignsRes.json();
-    const inboxes = await inboxesRes.json();
-    const inboxMap = Object.fromEntries(inboxes.map(i => [i.id, i.email]));
+  let _campaigns = [];
+  let _strategy  = 'priority';
+  let _inboxMap  = {};
 
-    if (!campaigns.length) {
+  // Drag-and-drop
+  let dragSrcIdx = null;
+  function onDragStart(e) {
+    dragSrcIdx = +this.dataset.idx;
+    this.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+  }
+  function onDragOver(e) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    document.querySelectorAll('tr.drag-over').forEach(r => r.classList.remove('drag-over'));
+    this.classList.add('drag-over');
+  }
+  function onDragLeave() { this.classList.remove('drag-over'); }
+  function onDrop(e) {
+    e.stopPropagation();
+    document.querySelectorAll('tr.drag-over').forEach(r => r.classList.remove('drag-over'));
+    const dropIdx = +this.dataset.idx;
+    if (dragSrcIdx === null || dragSrcIdx === dropIdx) return;
+    const moved = _campaigns.splice(dragSrcIdx, 1)[0];
+    _campaigns.splice(dropIdx, 0, moved);
+    render();
+    saveBtn.style.display = '';
+    savedMsg.style.display = 'none';
+  }
+  function onDragEnd() {
+    document.querySelectorAll('tr.dragging, tr.drag-over').forEach(r => {
+      r.classList.remove('dragging'); r.classList.remove('drag-over');
+    });
+    dragSrcIdx = null;
+  }
+
+  function render() {
+    const isPriority = _strategy === 'priority';
+    if (isPriority) {
+      bannerEl.innerHTML = `<div class="reorder-banner">
+        <strong>Priority strategy active.</strong>
+        Drag rows to set the order &mdash; <strong>#1</strong> gets inbox capacity first.
+        Click <strong>&#128190; Save Priority Order</strong> to persist.
+        <span style="margin-left:auto;font-size:0.82rem;">
+          Strategy: <a href="/settings" style="color:var(--accent);">change in Settings</a>
+        </span>
+      </div>`;
+    } else {
+      bannerEl.innerHTML = '';
+    }
+    if (!_campaigns.length) {
       listEl.innerHTML = '<div class="card"><p style="margin:0;">No campaigns yet. Click <strong>Create campaign</strong> below to add one.</p></div>';
+      saveBtn.style.display = 'none';
       return;
     }
-    listEl.innerHTML = '<table><thead><tr><th>Name</th><th>Inboxes</th><th>Sending</th><th></th></tr></thead><tbody></tbody></table>';
-    const tbody = listEl.querySelector('tbody');
-    campaigns.forEach(c => {
+    const headExtra = isPriority
+      ? '<th style="width:2rem;"></th><th style="width:2.5rem;color:var(--muted);font-size:0.8rem;">#</th>'
+      : '';
+    listEl.innerHTML = `<table><thead><tr>${headExtra}<th>Name</th><th>Inboxes</th><th>Sending</th><th></th></tr></thead><tbody id="camp-tbody"></tbody></table>`;
+    const tbody = document.getElementById('camp-tbody');
+    _campaigns.forEach((c, idx) => {
       const tr = document.createElement('tr');
-      const ids = c.inbox_ids || [];
-      const inboxLabel = ids.length === 0 ? '—' : ids.length === 1 ? (inboxMap[ids[0]] || 'id ' + ids[0]) : ids.length + ' inboxes';
-      const days = (c.sending_days || []).length;
+      tr.dataset.idx = idx;
+      tr.dataset.id  = c.id;
+      const ids        = c.inbox_ids || [];
+      const inboxLabel = ids.length === 0 ? '&mdash;'
+                       : ids.length === 1 ? escapeHtml(_inboxMap[ids[0]] || 'id ' + ids[0])
+                                          : ids.length + ' inboxes';
+      const days       = (c.sending_days || []).length;
       const pauseLabel = c.paused ? 'Resume' : 'Pause';
       const pauseClass = c.paused ? 'btn' : 'btn secondary';
-      const nameDisplay = c.paused ? `<span style="color:var(--muted);">${escapeHtml(c.name)} <span class="badge" style="background:rgba(244,63,94,0.2);color:var(--danger);">PAUSED</span></span>` : `<a href="/campaigns/${c.id}">${escapeHtml(c.name)}</a>`;
-      tr.innerHTML = `
-        <td>${nameDisplay}</td>
-        <td class="mono">${escapeHtml(inboxLabel)}</td>
-        <td>${days} days, ${c.sending_hours_start || '09:00'}–${c.sending_hours_end || '17:00'}</td>
-        <td style="display:flex;gap:0.4rem;">
+      const nameHtml   = c.paused
+        ? `<span style="color:var(--muted);">${escapeHtml(c.name)} <span class="badge" style="background:rgba(244,63,94,0.2);color:var(--danger);">PAUSED</span></span>`
+        : `<a href="/campaigns/${c.id}">${escapeHtml(c.name)}</a>`;
+      const safeName   = escapeHtml(c.name).replace(/'/g, "\\'");
+      const actions    = `<td style="display:flex;gap:0.4rem;flex-wrap:wrap;">
           <a href="/campaigns/${c.id}" class="btn secondary">View</a>
-          <button class="${pauseClass}" onclick="togglePause(${c.id}, ${c.paused}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">${pauseLabel}</button>
-          <button class="btn secondary" onclick="duplicateCampaign(${c.id}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">Duplicate</button>
-          <button class="btn danger" onclick="deleteCampaign(${c.id}, '${escapeHtml(c.name).replace(/'/g, "\\'")}')">Delete</button>
-        </td>
-      `;
+          <button class="${pauseClass}" onclick="togglePause(${c.id},${c.paused},'${safeName}')">${pauseLabel}</button>
+          <button class="btn secondary" onclick="duplicateCampaign(${c.id},'${safeName}')">Duplicate</button>
+          <button class="btn danger" onclick="deleteCampaign(${c.id},'${safeName}')">&times; Delete</button>
+        </td>`;
+      if (isPriority) {
+        tr.draggable = true;
+        tr.innerHTML = `
+          <td><span class="drag-handle" title="Drag to reorder">&#8942;&#8942;</span></td>
+          <td><span class="priority-badge">${idx + 1}</span></td>
+          <td>${nameHtml}</td>
+          <td class="mono">${inboxLabel}</td>
+          <td>${days} days, ${c.sending_hours_start || '09:00'}&ndash;${c.sending_hours_end || '17:00'}</td>
+          ${actions}`;
+        tr.addEventListener('dragstart',  onDragStart);
+        tr.addEventListener('dragover',   onDragOver);
+        tr.addEventListener('dragleave',  onDragLeave);
+        tr.addEventListener('drop',       onDrop);
+        tr.addEventListener('dragend',    onDragEnd);
+      } else {
+        tr.innerHTML = `
+          <td>${nameHtml}</td>
+          <td class="mono">${inboxLabel}</td>
+          <td>${days} days, ${c.sending_hours_start || '09:00'}&ndash;${c.sending_hours_end || '17:00'}</td>
+          ${actions}`;
+      }
       tbody.appendChild(tr);
     });
   }
 
+  async function load() {
+    const [campRes, inboxRes, stratRes] = await Promise.all([
+      fetch('/api/campaigns'),
+      fetch('/api/inboxes'),
+      fetch('/api/settings/scheduling-strategy').catch(() => ({ ok: false, json: async () => ({}) })),
+    ]);
+    _campaigns = await campRes.json();
+    const inboxes = await inboxRes.json();
+    _inboxMap = Object.fromEntries(inboxes.map(i => [i.id, i.email]));
+    const stratData = stratRes.ok ? await stratRes.json() : {};
+    _strategy = stratData.scheduling_strategy || 'priority';
+    saveBtn.style.display = 'none';
+    savedMsg.style.display = 'none';
+    render();
+  }
+
+  window.saveOrder = async function() {
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving\u2026';
+    try {
+      const res = await fetch('/api/campaigns/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ campaign_ids: _campaigns.map(c => c.id) }),
+      });
+      if (res.ok) {
+        saveBtn.style.display = 'none';
+        savedMsg.style.display = '';
+        setTimeout(() => { savedMsg.style.display = 'none'; }, 3000);
+      } else {
+        alert('Error saving order: ' + await res.text());
+      }
+    } finally {
+      saveBtn.disabled = false;
+      saveBtn.innerHTML = '&#128190; Save Priority Order';
+    }
+  };
+
   window.deleteCampaign = async function(id, name) {
     if (!confirm('Delete campaign "' + name + '"? This will remove all sequences, enrolled leads, and queue slots. This cannot be undone.')) return;
     const res = await fetch('/api/campaigns/' + id, { method: 'DELETE' });
-    if (res.ok) {
-      load();
-    } else {
-      const t = await res.text();
-      alert('Error deleting campaign: ' + t);
-    }
+    if (res.ok) { load(); } else { alert('Error deleting campaign: ' + await res.text()); }
   };
 
   window.duplicateCampaign = async function(id, name) {
     if (!confirm('Duplicate campaign "' + name + '"? This will create a copy with all sequences but no enrolled leads.')) return;
     const res = await fetch('/api/campaigns/' + id + '/duplicate', { method: 'POST' });
-    if (res.ok) {
-      const newCampaign = await res.json();
-      alert('Campaign duplicated: ' + newCampaign.name);
-      load();
-    } else {
-      const t = await res.text();
-      alert('Error duplicating campaign: ' + t);
-    }
+    if (res.ok) { const c = await res.json(); alert('Campaign duplicated: ' + c.name); load(); }
+    else { alert('Error duplicating campaign: ' + await res.text()); }
   };
 
   window.togglePause = async function(id, currentlyPaused, name) {
@@ -83,16 +226,11 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ paused: !currentlyPaused }),
     });
-    if (res.ok) {
-      load();
-    } else {
-      const t = await res.text();
-      alert('Error ' + action + 'ing campaign: ' + t);
-    }
+    if (res.ok) { load(); } else { alert('Error ' + action + 'ing campaign: ' + await res.text()); }
   };
 
   load().catch(function() {
-    listEl.innerHTML = '<div class="card"><p style="margin:0; color: var(--danger);">Failed to load campaigns.</p></div>';
+    listEl.innerHTML = '<div class="card"><p style="margin:0; color:var(--danger);">Failed to load campaigns.</p></div>';
   });
 })();
 </script>

@@ -9,11 +9,12 @@ from app import time as time_provider
 
 # ========== CONFIGURATION ==========
 # Adjust these values to control the test data generation
-NUM_LEADS = 100                  # How many test leads to create
+NUM_LEADS = 150                  # How many test leads to create
 NUM_CAMPAIGNS = 3               # How many test campaigns to create
 NUM_SEQUENCES_PER_CAMPAIGN = 3  # How many email sequences per campaign
 # WAIT_DAYS_BETWEEN_SEQUENCES = [1]  # Days to wait between follow-up sequences (cycles in order)
 WAIT_DAYS_BETWEEN_SEQUENCES = [2, 3, 1, 3, 3, 5, 3, 3, 1, 1]  # Days to wait between follow-up sequences (cycles in order)
+INBOX_NUMBER = 3  # How many inboxes to be available for campaigns to link to (will create if not enough exist)
 # ===================================
 
 TEST_PREFIX = "[TEST]"
@@ -28,8 +29,8 @@ async def main():
         inboxes = result.scalars().all()
         
         created_inbox_ids = []
-        if len(inboxes) < 7: # If we have less than 5 inboxes, create dummies until its 5 for testing
-            for i in range(len(inboxes) + 1, 8):
+        if len(inboxes) < INBOX_NUMBER: # If we have less than INBOX_NUMBER inboxes, create dummies until its INBOX_NUMBER for testing
+            for i in range(len(inboxes) + 1, INBOX_NUMBER + 1):
                 print("No inboxes found. Creating a dummy test inbox...")
                 dummy_inbox = Inbox(
                     email=f"test_inbox_{i}@example.com",
@@ -41,7 +42,7 @@ async def main():
                 session.add(dummy_inbox)
                 await session.commit()
                 await session.refresh(dummy_inbox)
-                inboxes = [dummy_inbox]
+                inboxes.append(dummy_inbox)
                 created_inbox_ids.append(dummy_inbox.id)
         else:
             print(f"Found {len(inboxes)} existing inboxes. Will use them for test campaigns.")

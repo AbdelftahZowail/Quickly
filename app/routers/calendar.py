@@ -4,12 +4,15 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from pathlib import Path
+from datetime import datetime
 
 from app.database import get_db
 from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
 )
-from app.queue_logic import recalculate_queue_after_sequence_change
+from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
+from app.app_settings import get_scheduling_strategy
 from validate_scheduled_emails import EmailScheduleValidator
 
 log = logging.getLogger("campaign_engine.calendar")
@@ -135,43 +138,207 @@ async def clear_queue(db: AsyncSession = Depends(get_db)):
     log.info("clear_queue: deleted %d queue slots", deleted)
     return {"ok": True, "deleted": deleted}
 
+
+async def order_campaign_leads_prioritizing_partials(
+    session: AsyncSession,
+    campaign_leads: list[CampaignLead],
+) -> list[int]:
+    """Reorder `campaign_leads` so that partially-sent leads appear first across
+    campaigns while keeping leads from the same campaign grouped together.
+
+    Ordering produced: c1_partial, c2_partial, ..., c1_new, c2_new, ...
+
+    Side effect: writes a file under `logs/` listing `campaign_lead_id\tcampaign_id\tcampaign_name`
+    in the produced order.
+    Returns the ordered list of `CampaignLead.id`.
+    """
+    if not campaign_leads:
+        return []
+
+    # Preserve first-seen campaign ordering
+    campaign_order: list[int] = []
+    for cl in campaign_leads:
+        if cl.campaign_id not in campaign_order:
+            campaign_order.append(cl.campaign_id)
+
+    # Group leads by campaign while keeping original order
+    campaign_to_leads: dict[int, list[CampaignLead]] = {cid: [] for cid in campaign_order}
+    for cl in campaign_leads:
+        campaign_to_leads[cl.campaign_id].append(cl)
+
+    # Build mapping lead_id -> lead_email for the provided campaign_leads
+    lead_ids = [cl.lead_id for cl in campaign_leads]
+    lead_id_to_email: dict[int, str] = {}
+    if lead_ids:
+        lead_rows = await session.execute(select(Lead.id, Lead.email).where(Lead.id.in_(lead_ids)))
+        lead_id_to_email = {r.id: r.email for r in lead_rows.all()}
+
+    # Determine which (campaign_id, lead_email) pairs have prior sent emails.
+    # Match by campaign_id **and** lead email (not lead id) as requested.
+    campaign_ids = list(campaign_to_leads.keys())
+    email_log_rows = []
+    partial_pairs = set()
+    if campaign_ids and lead_id_to_email:
+        q = await session.execute(
+            select(
+                EmailLog.id,
+                EmailLog.lead_id,
+                Lead.email.label("lead_email"),
+                EmailLog.campaign_id,
+                EmailLog.sequence_index,
+                EmailLog.sent_at,
+            )
+            .join(Lead, EmailLog.lead_id == Lead.id)
+            .where(
+                EmailLog.campaign_id.in_(campaign_ids),
+                Lead.email.in_(lead_id_to_email.values()),
+            )
+            .order_by(EmailLog.sent_at.desc())
+        )
+        email_log_rows = q.all()
+        partial_pairs = {(r.campaign_id, r.lead_email) for r in email_log_rows if r.lead_email}
+
+    # Partition campaign_leads into partials (same campaign + matching lead email)
+    campaign_to_partials: dict[int, list[CampaignLead]] = {cid: [] for cid in campaign_order}
+    campaign_to_new: dict[int, list[CampaignLead]] = {cid: [] for cid in campaign_order}
+
+    for cl in campaign_leads:
+        email = lead_id_to_email.get(cl.lead_id, "")
+        if (cl.campaign_id, email) in partial_pairs:
+            campaign_to_partials[cl.campaign_id].append(cl)
+        else:
+            campaign_to_new[cl.campaign_id].append(cl)
+
+    # Build ordered list: all campaigns' partials first (preserving campaign order),
+    # then all campaigns' new leads
+    ordered: list[CampaignLead] = []
+    for cid in campaign_order:
+        ordered.extend(campaign_to_partials.get(cid, []))
+    for cid in campaign_order:
+        ordered.extend(campaign_to_new.get(cid, []))
+
+    # Write email logs + before/after ordering to `logs/partial.txt`.
+    # New file format (overwrite on each run):
+    #   # EMAIL_LOGS
+    #   # lead_id\tlead_email\tcampaign_id\tsequence_index\tsent_at
+    #   <lead_id>\t<lead_email>\t<campaign_id>\t<sequence_index>\t<sent_at_iso>
+    #   \n
+    #   # BEFORE
+    #   <lead_email>\t<campaign_id>
+    #   # AFTER
+    #   <lead_email>\t<campaign_id>
+    project_root = Path(__file__).resolve().parents[2]
+    logs_dir = project_root / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    out_path = logs_dir / "partial.txt"
+    with out_path.open("w", encoding="utf-8") as fh:
+        fh.write("# EMAIL_LOGS\n")
+        fh.write("# lead_id\tlead_email\tcampaign_id\tsequence_index\tsent_at\n")
+        for r in email_log_rows:
+            sent_str = r.sent_at.isoformat() if r.sent_at else ""
+            fh.write(f"{r.lead_id}\t{r.lead_email}\t{r.campaign_id}\t{r.sequence_index}\t{sent_str}\n")
+        fh.write("\n# BEFORE\n")
+        for cl in campaign_leads:
+            fh.write(f"{lead_id_to_email.get(cl.lead_id, '')}\t{cl.campaign_id}\n")
+        fh.write("# AFTER\n")
+        for cl in ordered:
+            fh.write(f"{lead_id_to_email.get(cl.lead_id, '')}\t{cl.campaign_id}\n")
+
+    return [cl.id for cl in ordered]
+
+
 @router.post("/recalculate-all")
 async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
-    """Recalculate queue slots for all campaigns while preserving inbox assignments."""
-    log.info("recalculate_all_campaigns: starting global recalculation")
+    """Recalculate queue slots for all campaigns while preserving inbox assignments.
+
+    Dispatches to the correct scheduling strategy:
+    - **priority** (default): campaigns are processed in ascending ``priority`` order;
+      leads within each campaign are ordered with partially-sent leads first.
+    - **round_robin**: inbox capacity is divided evenly across all active campaigns;
+      leads are interleaved in batch-size chunks to keep the slot-count cache alive
+      across campaign boundaries.
+    """
+    strategy = await get_scheduling_strategy(db)
+    log.info("recalculate_all_campaigns: starting global recalculation (strategy=%s)", strategy)
     await clear_queue(db)
-    # Count existing slots before recalculation
+
+    # Count existing slots *after* the clear (should be 0, logged for diagnostics)
     slot_count_before = await db.execute(select(func.count(QueueSlot.id)))
     initial_slots = slot_count_before.scalar() or 0
-    log.info("recalculate_all_campaigns: starting with %d existing queue slots", initial_slots)
-    
-    # Get all campaigns
-    result = await db.execute(select(Campaign))
+    log.info("recalculate_all_campaigns: %d slots remain after clear", initial_slots)
+
+    # Fetch all campaigns — order by priority (ascending) for consistent behaviour
+    result = await db.execute(select(Campaign).order_by(Campaign.priority, Campaign.id))
     campaigns = result.scalars().all()
-    
+
     if not campaigns:
         log.warning("recalculate_all_campaigns: no campaigns found")
-        return {"ok": True, "campaigns_processed": 0, "total_slots": 0, "initial_slots": initial_slots}
-    
-    campaigns_processed = 0
-    for campaign in campaigns:
-        log.info("recalculate_all_campaigns: processing campaign_id=%s name=%s", campaign.id, campaign.name)
-        # Each campaign handles its own slot deletion while preserving inbox assignments
-        await recalculate_queue_after_sequence_change(db, campaign.id)
-        campaigns_processed += 1
-    
-    # Get updated slot count
+        return {"ok": True, "campaigns_processed": 0, "total_slots": 0, "initial_slots": initial_slots,
+                "strategy": strategy}
+
+    campaign_ids = [c.id for c in campaigns]
+    cl_result = await db.execute(
+        select(CampaignLead)
+        .where(CampaignLead.campaign_id.in_(campaign_ids))
+        .order_by(CampaignLead.campaign_id, CampaignLead.id)
+    )
+    _cls_unsorted = cl_result.scalars().all()
+    # Sort by Campaign.priority order (campaign_ids is already priority-sorted).
+    # The DB query orders by raw campaign_id (integer), which ignores user-defined priority.
+    _priority_index = {cid: idx for idx, cid in enumerate(campaign_ids)}
+    campaign_leads = sorted(
+        _cls_unsorted,
+        key=lambda cl: (_priority_index.get(cl.campaign_id, len(campaign_ids)), cl.id),
+    )
+
+    if not campaign_leads:
+        log.warning("recalculate_all_campaigns: no CampaignLead rows found for campaigns %s", campaign_ids)
+        campaigns_processed = len(campaigns)
+        slot_count = await db.execute(select(func.count(QueueSlot.id)))
+        total_slots = slot_count.scalar() or 0
+        return {"ok": True, "campaigns_processed": campaigns_processed, "initial_slots": initial_slots,
+                "total_slots": total_slots, "strategy": strategy}
+
+    if strategy == "round_robin":
+        # ── Round-robin: reorder leads as interleaved batches, share one cache ──
+        # First put partially-sent leads for each campaign ahead of new ones so
+        # follow-ups are still prioritised within each batch.
+        ordered_cl_ids = await order_campaign_leads_prioritizing_partials(db, campaign_leads)
+        if ordered_cl_ids:
+            log.info(
+                "recalculate_all_campaigns[round_robin]: %d campaign_leads across %d campaigns",
+                len(ordered_cl_ids), len(campaigns),
+            )
+            await recalculate_queue_round_robin(db, ordered_cl_ids)
+        else:
+            log.warning("recalculate_all_campaigns[round_robin]: no leads to process")
+    else:
+        # ── Priority (default): process campaigns in priority order ──
+        ordered_cl_ids = await order_campaign_leads_prioritizing_partials(db, campaign_leads)
+        if ordered_cl_ids:
+            log.info(
+                "recalculate_all_campaigns[priority]: %d campaign_leads across %d campaigns (partials first)",
+                len(ordered_cl_ids), len(campaigns),
+            )
+            await recalculate_queue_after_sequence_change_for_leads(db, ordered_cl_ids)
+        else:
+            log.warning("recalculate_all_campaigns[priority]: no leads to process")
+
+    campaigns_processed = len(campaigns)
+
     slot_count = await db.execute(select(func.count(QueueSlot.id)))
     total_slots = slot_count.scalar() or 0
-    
-    log.info("recalculate_all_campaigns: completed - processed %d campaigns, %d -> %d slots", 
-             campaigns_processed, initial_slots, total_slots)
-    
+
+    log.info(
+        "recalculate_all_campaigns: completed — strategy=%s, processed %d campaigns, %d -> %d slots",
+        strategy, campaigns_processed, initial_slots, total_slots,
+    )
     return {
-        "ok": True, 
+        "ok": True,
+        "strategy": strategy,
         "campaigns_processed": campaigns_processed,
         "initial_slots": initial_slots,
-        "total_slots": total_slots
+        "total_slots": total_slots,
     }
 
 @router.post("/validate-queue")

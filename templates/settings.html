@@ -114,8 +114,44 @@
     <button type="submit" class="btn" id="save-btn">Save Settings</button>
     <button type="button" class="btn secondary" onclick="loadSettings()">Reload</button>
   </div>
+</form>
 
-  <!-- ─── Setup instructions (only visible when OAuth not configured) ─── -->
+<!-- Scheduling Strategy (saved independently, outside main form) -->
+<div class="card" style="margin-top:1.5rem;">
+  <h2 style="margin-top: 0;">Scheduling Strategy</h2>
+  <p style="color: var(--muted); margin-bottom: 1rem; font-size: 0.9rem;">
+    Controls how <strong>⚡ Recalculate All Campaigns</strong> distributes emails across campaigns.
+  </p>
+
+  <div id="strategy-message" style="margin-bottom:0.75rem;"></div>
+
+  <div style="display: flex; flex-direction: column; gap: 0.9rem;">
+    <label style="display: flex; gap: 0.85rem; align-items: flex-start; cursor: pointer;">
+      <input type="radio" name="scheduling_strategy" id="strategy-priority" value="priority"
+             style="width:auto; max-width:none; margin-top:3px;" onchange="saveStrategy()">
+      <span>
+        <strong>Priority by campaign</strong><br>
+        <span style="color:var(--muted); font-size:0.85rem;">
+          Campaigns are processed in ascending priority order — #1 gets inbox capacity first.
+          <a href="/campaigns" style="color:var(--accent);">Go to Campaigns</a> to drag-and-drop rows into the desired order, then click <em>Save Priority Order</em>.
+        </span>
+      </span>
+    </label>
+
+    <label style="display: flex; gap: 0.85rem; align-items: flex-start; cursor: pointer;">
+      <input type="radio" name="scheduling_strategy" id="strategy-round-robin" value="round_robin"
+             style="width:auto; max-width:none; margin-top:3px;" onchange="saveStrategy()">
+      <span>
+        <strong>Round-robin distribution</strong><br>
+        <span style="color:var(--muted); font-size:0.85rem;">
+          Inbox capacity is divided evenly across all active campaigns.
+          Leads are scheduled in batches (capacity&nbsp;÷&nbsp;campaigns per cycle) so the queue
+          cache is shared across campaign switches — no cache invalidation on rotation.
+        </span>
+      </span>
+    </label>
+  </div>
+</div>
   <div id="setup-instructions" class="card" style="margin-top:2rem; margin-bottom:2rem; display:none;">
     <h2 style="margin-top:0;">Setup Instructions — Google Cloud Console</h2>
     <p style="color:var(--muted); margin-bottom:1rem;">Follow these steps to get your <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code>.</p>
@@ -333,5 +369,49 @@ document.getElementById('settings-form').addEventListener('submit', saveSettings
 
 // Load settings on page load
 loadSettings();
+
+// ── Scheduling strategy ──────────────────────────────────────────────────────
+function showStrategyMessage(msg, isError) {
+  const el = document.getElementById('strategy-message');
+  el.className = 'card';
+  el.style.background = isError ? 'rgba(244,63,94,0.1)' : 'rgba(52,211,153,0.1)';
+  el.style.borderColor = isError ? 'var(--danger)' : 'var(--success)';
+  el.style.color = isError ? 'var(--danger)' : 'var(--success)';
+  el.style.padding = '0.5rem 0.75rem';
+  el.style.marginBottom = '0.75rem';
+  el.textContent = msg;
+  setTimeout(() => { el.textContent = ''; el.style.background = ''; el.style.padding = ''; }, 4000);
+}
+
+async function loadStrategy() {
+  try {
+    const res = await fetch('/api/settings/scheduling-strategy');
+    if (!res.ok) return;
+    const data = await res.json();
+    const val = data.scheduling_strategy || 'priority';
+    const radio = document.querySelector(`input[name="scheduling_strategy"][value="${val}"]`);
+    if (radio) radio.checked = true;
+  } catch (e) { console.error('loadStrategy:', e); }
+}
+
+async function saveStrategy() {
+  const selected = document.querySelector('input[name="scheduling_strategy"]:checked');
+  if (!selected) return;
+  try {
+    const res = await fetch('/api/settings/scheduling-strategy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scheduling_strategy: selected.value }),
+    });
+    if (!res.ok) { const e = await res.json(); throw new Error(e.detail || 'Save failed'); }
+    const LABELS = { priority: 'Priority by campaign', round_robin: 'Round-robin distribution' };
+    showStrategyMessage('Strategy saved: ' + (LABELS[selected.value] || selected.value), false);
+  } catch (err) {
+    showStrategyMessage('Error: ' + err.message, true);
+    loadStrategy(); // revert radio to last saved value
+  }
+}
+
+loadStrategy();
 </script>
 {% endblock %}

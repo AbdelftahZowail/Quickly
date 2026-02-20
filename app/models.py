@@ -37,6 +37,7 @@ class Campaign(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(255), nullable=False)
     paused = Column(Boolean, default=False)  # If True, skip sending from this campaign
+    priority = Column(Integer, default=0, nullable=False)  # Lower = higher priority in priority-based scheduling
     # sending_days: 0=Mon .. 6=Sun, stored as JSON array e.g. [0,1,2,3,4]
     sending_days = Column(JSON, default=[0, 1, 2, 3, 4])  # Mon-Fri default
     sending_hours_start = Column(String(5), default="09:00")  # 9am

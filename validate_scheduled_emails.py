@@ -11,12 +11,12 @@ Usage:
 """
 import asyncio
 import logging
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, time, timedelta
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from collections import defaultdict
 
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -302,6 +302,7 @@ class EmailScheduleValidator:
         # Sort by sequence index
         timeline.sort(key=lambda x: x['sequence_index'])
         
+        today = date.today()
         violations = 0
 
         # Validate each email against the previous one
@@ -326,8 +327,43 @@ class EmailScheduleValidator:
                 sending_days
             )
             
-            if actual_business_days != expected_wait_days:
+            if actual_business_days < expected_wait_days:
+                # Gap is shorter than the required minimum — always an error.
                 violations += 1
+
+            elif actual_business_days > expected_wait_days and curr['type'] == 'scheduled':
+                # Gap is larger than required. This is only acceptable when:
+                #   (a) The ideal target date was already in the past at scheduling
+                #       time, so ASAP scheduling naturally pushed it forward, OR
+                #   (b) The inbox was at capacity on the ideal target date, so the
+                #       scheduler had no choice but to use a later day.
+                # Any other case means the algorithm introduced a delay for no reason.
+                ideal_date = next_business_date(prev['date'], sending_days, expected_wait_days)
+
+                if ideal_date >= today:
+                    # Ideal date is not in the past — check if the inbox was full.
+                    inbox_id = curr.get('inbox_id')
+                    if inbox_id is not None:
+                        day_start = datetime.combine(ideal_date, time(0, 0))
+                        day_end = datetime.combine(ideal_date + timedelta(days=1), time(0, 0))
+                        count_result = await self.session.execute(
+                            select(func.count(QueueSlot.id)).where(
+                                QueueSlot.inbox_id == inbox_id,
+                                QueueSlot.scheduled_date >= day_start,
+                                QueueSlot.scheduled_date < day_end,
+                            )
+                        )
+                        slots_on_ideal = count_result.scalar() or 0
+                        inbox_result = await self.session.execute(
+                            select(Inbox.max_emails_per_day).where(Inbox.id == inbox_id)
+                        )
+                        max_per_day = inbox_result.scalar() or 999
+
+                        if slots_on_ideal < max_per_day:
+                            # Inbox had capacity on the ideal date but slot was
+                            # placed later — the algorithm introduced an unnecessary gap.
+                            violations += 1
+                # else: ideal_date is in the past → ASAP scheduling is justified, no violation.
         
         return violations
     
