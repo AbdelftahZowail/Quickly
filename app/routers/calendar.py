@@ -5,7 +5,6 @@ from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 from pathlib import Path
-from datetime import datetime
 
 from app.database import get_db
 from app.models import (
@@ -13,7 +12,7 @@ from app.models import (
 )
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app.app_settings import get_scheduling_strategy
-from validate_scheduled_emails import EmailScheduleValidator
+from smoke_test.validate_scheduled_emails import EmailScheduleValidator
 
 log = logging.getLogger("campaign_engine.calendar")
 

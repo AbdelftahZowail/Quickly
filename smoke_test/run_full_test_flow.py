@@ -25,7 +25,6 @@ additional logging.
 """
 
 import asyncio
-from datetime import datetime
 
 from app.database import AsyncSessionLocal
 from app import time as time_provider
