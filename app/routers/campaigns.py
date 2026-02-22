@@ -128,6 +128,9 @@ async def reorder_campaigns(data: CampaignReorder, db: AsyncSession = Depends(ge
         len(data.campaign_ids),
         {cid: idx for idx, cid in enumerate(data.campaign_ids)},
     )
+    # changing campaign order affects scheduling;
+    from app.routers.calendar import recalculate_all_campaigns
+    await recalculate_all_campaigns(db)
     return {"ok": True, "order": data.campaign_ids}
 
 
@@ -174,11 +177,13 @@ async def update_campaign(
         await db.flush()
         # Recalculate queue since inbox assignments changed
         log.info("Campaign %s inbox list changed; triggering queue recalculation", campaign_id)
-        # gather all campaign lead ids and perform global recalculation
+        # gather all campaign lead ids; run full recalculation to ensure
+        # other campaigns can take advantage of capacity changes too
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
+            from app.routers.calendar import recalculate_all_campaigns
+            await recalculate_all_campaigns(db)
     
     schedule_changed = False
     if data.sending_days is not None:
@@ -197,16 +202,37 @@ async def update_campaign(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
+            from app.routers.calendar import recalculate_all_campaigns
+            await recalculate_all_campaigns(db)
     
     if data.wait_minutes_between is not None:
         campaign.wait_minutes_between = data.wait_minutes_between
     if data.stop_on_reply is not None:
         campaign.stop_on_reply = data.stop_on_reply
     if data.paused is not None:
+        # paused toggle impacts scheduling order and slot existence
+        old_paused = campaign.paused
         campaign.paused = data.paused
+        if old_paused != data.paused:
+            # run a full recalculation so that paused campaigns drop out of the
+            # schedule (or are added back when resumed) and other campaigns can
+            # move into the newly freed capacity.  Using the global routine is
+            # simpler than trying to reason about individual leads.
+            from app.routers.calendar import recalculate_all_campaigns
+            log.info(
+                "Campaign %s paused state changed (%s -> %s); triggering full recalculation",
+                campaign_id,
+                old_paused,
+                data.paused,
+            )
+            # we can call the router helper directly
+            await recalculate_all_campaigns(db)
     if data.priority is not None:
         campaign.priority = data.priority
+        # Changing priority affects the order campaigns are scheduled, so
+        # rebuild globally.
+        from app.routers.calendar import recalculate_all_campaigns
+        await recalculate_all_campaigns(db)
     await db.flush()
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
@@ -296,7 +322,8 @@ async def create_sequence(
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
-        await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
+        from app.routers.calendar import recalculate_all_campaigns
+        await recalculate_all_campaigns(db)
     return seq
 
 
@@ -326,7 +353,8 @@ async def update_sequence(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
+            from app.routers.calendar import recalculate_all_campaigns
+            await recalculate_all_campaigns(db)
     await db.refresh(seq)
     return seq
 
@@ -361,7 +389,8 @@ async def delete_sequence(
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
-        await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
+        from app.routers.calendar import recalculate_all_campaigns
+        await recalculate_all_campaigns(db)
     return {"ok": True}
 
 

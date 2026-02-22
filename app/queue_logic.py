@@ -718,6 +718,24 @@ async def _recalculate_queue_for_campaign_leads(
     """Recalculate queue for a specific set of campaign leads in one campaign."""
     campaign_id = campaign.id
 
+    # If the campaign is paused we should simply clear any existing slots for the
+    # provided leads and skip reservation completely.  The send job ignores paused
+    # campaigns, but holding onto slots would block capacity when the campaign is
+    # resumed later.  Whoever toggles the pause state is responsible for
+    # invoking a recalculation (routes now do this).
+    if getattr(campaign, "paused", False):
+        cl_ids = [cl.id for cl in campaign_leads]
+        if cl_ids:
+            await session.execute(
+                delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids))
+            )
+            await session.flush()
+            log.info("%s: campaign %s paused; cleared slots for %d leads",
+                     log_prefix, campaign_id, len(cl_ids))
+        else:
+            log.info("%s: campaign %s paused; no leads to clear", log_prefix, campaign_id)
+        return
+
     if not inboxes:
         log.warning("%s: no inboxes for campaign %s", log_prefix, campaign_id)
         return

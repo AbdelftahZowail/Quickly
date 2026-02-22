@@ -276,9 +276,16 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
                 "strategy": strategy}
 
     campaign_ids = [c.id for c in campaigns]
+    # only include leads that are still active; inactive leads will be
+    # cleared when we wiped the queue at the top of this routine
+    from app.models import Lead
     cl_result = await db.execute(
         select(CampaignLead)
-        .where(CampaignLead.campaign_id.in_(campaign_ids))
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id.in_(campaign_ids),
+            Lead.status == "active",
+        )
         .order_by(CampaignLead.campaign_id, CampaignLead.id)
     )
     _cls_unsorted = cl_result.scalars().all()

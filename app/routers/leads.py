@@ -49,9 +49,28 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
         lead.name = data.name
     if data.custom_data is not None:
         lead.custom_data = data.custom_data
-    if data.status is not None:
+    status_changed = False
+    if data.status is not None and data.status != lead.status:
+        old_status = lead.status
         lead.status = data.status
+        status_changed = True
     await db.flush()
+
+    # schedule impact: lead becoming unsubscribed/bounced/etc should free up
+    # slots and allow other leads to move earlier.  likewise, re-activating a
+    # lead should cause it to be re-scheduled.  easiest is to recalc all
+    # campaigns so that capacity is redistributed correctly.
+    if status_changed:
+        from app.routers.calendar import recalculate_all_campaigns
+        log = __import__("logging").getLogger("campaign_engine.routes")
+        log.info(
+            "Lead %s status changed (%s -> %s); triggering full recalculation",
+            lead_id,
+            old_status,
+            data.status,
+        )
+        await recalculate_all_campaigns(db)
+
     await db.refresh(lead)
     return lead
 
@@ -62,9 +81,27 @@ async def delete_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
     lead = result.scalar_one_or_none()
     if not lead:
         raise HTTPException(404, "Lead not found")
+    # gather campaigns this lead belongs to prior to deletion
+    cl_res = await db.execute(
+        select(CampaignLead.campaign_id)
+        .where(CampaignLead.lead_id == lead_id)
+    )
+    campaign_ids = [r[0] for r in cl_res.all()]
     await db.execute(delete(EmailLog).where(EmailLog.lead_id == lead_id))
     await db.execute(delete(LeadReply).where(LeadReply.lead_id == lead_id))
     await db.delete(lead)
+
+    # capacity freed by deletion; recalc whole queue to allow other leads to
+    # move earlier
+    if campaign_ids:
+        from app.routers.calendar import recalculate_all_campaigns
+        log = __import__("logging").getLogger("campaign_engine.routes")
+        log.info(
+            "Lead %s deleted (campaigns=%s); triggering full recalculation",
+            lead_id,
+            campaign_ids,
+        )
+        await recalculate_all_campaigns(db)
     return {"ok": True}
 
 

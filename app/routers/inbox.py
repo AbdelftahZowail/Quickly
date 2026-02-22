@@ -62,10 +62,16 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
         inbox.wait_minutes_between = data.wait_minutes_between
         capacity_changed = True
     if data.provider is not None:
+        if data.provider != inbox.provider:
+            # provider switch may indicate credentials revoked / toggle-off
+            capacity_changed = True
         inbox.provider = data.provider
     await db.flush()
     
-    # If capacity or timing changed, recalculate all campaigns using this inbox
+    # If capacity or timing changed, recalculate queue globally rather than
+    # just per-campaign.  A full recalculation will rebalance across campaigns
+    # and is easier to reason about; the existing per-campaign loop worked but
+    # became redundant after we added global recalc support.
     if capacity_changed:
         from app.models import CampaignInbox, CampaignLead
         campaign_result = await db.execute(
@@ -74,12 +80,9 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
             .distinct()
         )
         campaign_ids = [cid for (cid,) in campaign_result.all()]
-        log.info("Inbox %s capacity changed; recalculating %d campaigns", inbox_id, len(campaign_ids))
-        for cid in campaign_ids:
-            cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == cid))
-            cl_ids = [r[0] for r in cl_res.all()]
-            if cl_ids:
-                await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
+        log.info("Inbox %s capacity changed; campaigns touched %s", inbox_id, campaign_ids)
+        from app.routers.calendar import recalculate_all_campaigns
+        await recalculate_all_campaigns(db)
     await db.refresh(inbox)
     return inbox
 

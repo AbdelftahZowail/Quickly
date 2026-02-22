@@ -27,6 +27,12 @@ from app.queue_logic import (
     recalculate_queue_after_sequence_change_for_leads,
     recalculate_queue_round_robin,
 )
+# import API route helpers so we can invoke them directly and verify they
+# implicitly trigger queue recalculation
+from app.routers.campaigns import update_campaign, create_sequence, delete_sequence, reorder_campaigns, CampaignReorder
+from app.routers.leads import update_lead, delete_lead
+from app.routers.inbox import update_inbox
+from app.schemas import CampaignUpdate, LeadUpdate, InboxUpdate, SequenceCreate
 from tests.conftest import (
     make_inbox,
     make_campaign,
@@ -1240,6 +1246,184 @@ class TestRecalculateQueueAfterSequenceChangeForLeads:
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl_b.id)
         )
         assert result.scalar() == 3
+
+
+
+# ---------------------------------------------------------------------------
+# 4. API TRIGGER TESTS
+# ---------------------------------------------------------------------------
+
+class TestApiRecalculationTriggers:
+    """Ensure mutations that should kick off a recalculation actually do so.
+
+    These tests call the router functions directly rather than the HTTP layer.
+    """
+
+    async def test_pause_unpause_campaign_clears_and_restores_slots(self, session):
+        inbox = await make_inbox(session, max_emails_per_day=50, wait_minutes_between=5)
+        campaign = await make_campaign(session)
+        await make_campaign_inbox(session, campaign.id, inbox.id)
+        seq = await make_sequence(session, campaign.id, position=0)
+        lead = await make_lead(session)
+        cl = await make_campaign_lead(session, campaign.id, lead.id)
+
+        # reserve one slot for the lead
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026, 3, 2))
+        cnt = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
+        )
+        assert cnt.scalar() == 1
+
+        # pause the campaign (should clear the slot)
+        await update_campaign(campaign.id, CampaignUpdate(paused=True), db=session)
+        cnt2 = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
+        )
+        assert cnt2.scalar() == 0
+
+        # unpause should recompute and add the slot back
+        await update_campaign(campaign.id, CampaignUpdate(paused=False), db=session)
+        cnt3 = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
+        )
+        assert cnt3.scalar() == 1
+
+    async def test_lead_status_change_removes_slots_and_rebalances(self, session):
+        inbox = await make_inbox(session, max_emails_per_day=50, wait_minutes_between=5)
+        campaign = await make_campaign(session)
+        await make_campaign_inbox(session, campaign.id, inbox.id)
+        seq = await make_sequence(session, campaign.id, position=0)
+
+        lead = await make_lead(session)
+        cl = await make_campaign_lead(session, campaign.id, lead.id)
+        # schedule a slot
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026, 3, 2))
+        cnt = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
+        )
+        assert cnt.scalar() == 1
+
+        # change status to unsubscribed
+        await update_lead(lead.id, LeadUpdate(status="unsubscribed"), db=session)
+        cnt2 = await session.execute(
+            select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
+        )
+        assert cnt2.scalar() == 0
+
+    async def test_delete_lead_triggers_global_recalc(self, session):
+        # two leads share an inbox with capacity 1 -> second lead initially flows to next day
+        inbox = await make_inbox(session, max_emails_per_day=1, wait_minutes_between=5)
+        campaign = await make_campaign(session, sending_days=[0,1,2,3,4])
+        await make_campaign_inbox(session, campaign.id, inbox.id)
+        seq = await make_sequence(session, campaign.id, position=0)
+
+        lead1 = await make_lead(session)
+        cl1 = await make_campaign_lead(session, campaign.id, lead1.id)
+        lead2 = await make_lead(session)
+        cl2 = await make_campaign_lead(session, campaign.id, lead2.id)
+        await reserve_slots_for_new_leads_bulk(session, [cl1.id, cl2.id], campaign.id, start_date=date(2026,3,2))
+        slots = await session.execute(select(QueueSlot).order_by(QueueSlot.scheduled_date))
+        dates = [s.scheduled_date.date() for s in slots.scalars().all()]
+        assert dates[0] == date(2026,3,2)
+        assert dates[1] == date(2026,3,3)
+
+        # delete the first lead; after a full recalculation the remaining
+        # lead should be scheduled earlier than the original March 3 date
+        await delete_lead(lead1.id, db=session)
+        slots2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id))
+        new_date = slots2.scalars().one().scheduled_date.date()
+        assert new_date < date(2026,3,3)
+
+    async def test_inbox_capacity_update_recalculates(self, session):
+        # inbox with cap=1 then bump to 2 should pull second lead earlier
+        inbox = await make_inbox(session, max_emails_per_day=1, wait_minutes_between=5)
+        campaign = await make_campaign(session, sending_days=[0,1,2,3,4])
+        await make_campaign_inbox(session, campaign.id, inbox.id)
+        await make_sequence(session, campaign.id, position=0)
+
+        lead1 = await make_lead(session)
+        cl1 = await make_campaign_lead(session, campaign.id, lead1.id)
+        lead2 = await make_lead(session)
+        cl2 = await make_campaign_lead(session, campaign.id, lead2.id)
+
+        await reserve_slots_for_new_leads_bulk(session, [cl1.id, cl2.id], campaign.id, start_date=date(2026,3,2))
+        # second lead moved out to 3/3
+        slot2 = await session.execute(
+            select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id)
+        )
+        assert slot2.scalars().one().scheduled_date.date() == date(2026,3,3)
+
+        # bump inbox capacity and update via router
+        await update_inbox(inbox.id, InboxUpdate(max_emails_per_day=2), db=session)
+        slot2b = await session.execute(
+            select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id)
+        )
+        new_date = slot2b.scalars().one().scheduled_date.date()
+        # should have moved earlier than the original March 3 slot
+        assert new_date < date(2026,3,3)
+
+    # sequence-related API operations should also recompute globally
+    async def test_sequence_create_triggers_global_recalc(self, session):
+        campaign = await make_campaign(session)
+        await make_campaign_inbox(session, campaign.id, (await make_inbox(session)).id)
+        # initial sequence and lead
+        await make_sequence(session, campaign.id, position=0)
+        lead = await make_lead(session)
+        cl = await make_campaign_lead(session, campaign.id, lead.id)
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026,3,2))
+        cnt = await session.execute(select(func.count(QueueSlot.id)))
+        assert cnt.scalar() == 1
+        # add another sequence via router
+        await create_sequence(campaign.id, SequenceCreate(position=1, body="x"), db=session)
+        cnt2 = await session.execute(select(func.count(QueueSlot.id)))
+        assert cnt2.scalar() == 2
+
+    async def test_sequence_delete_triggers_global_recalc(self, session):
+        campaign = await make_campaign(session)
+        await make_campaign_inbox(session, campaign.id, (await make_inbox(session)).id)
+        for pos in range(3):
+            await make_sequence(session, campaign.id, position=pos)
+        lead = await make_lead(session)
+        cl = await make_campaign_lead(session, campaign.id, lead.id)
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026,3,2))
+        cnt = await session.execute(select(func.count(QueueSlot.id)))
+        assert cnt.scalar() == 3
+        # delete middle sequence
+        await delete_sequence(campaign.id, 1, db=session)
+        cnt2 = await session.execute(select(func.count(QueueSlot.id)))
+        assert cnt2.scalar() == 2
+
+    async def test_campaign_reorder_triggers_global_recalc(self, session):
+        # two campaigns share one inbox with capacity 1; priority determines who
+        # gets the first slot
+        inbox = await make_inbox(session, max_emails_per_day=1, wait_minutes_between=5)
+        camp_a = await make_campaign(session, name="a")
+        camp_b = await make_campaign(session, name="b")
+        await make_campaign_inbox(session, camp_a.id, inbox.id)
+        await make_campaign_inbox(session, camp_b.id, inbox.id)
+        await make_sequence(session, camp_a.id, position=0)
+        await make_sequence(session, camp_b.id, position=0)
+        lead_a = await make_lead(session)
+        cl_a = await make_campaign_lead(session, camp_a.id, lead_a.id)
+        lead_b = await make_lead(session)
+        cl_b = await make_campaign_lead(session, camp_b.id, lead_b.id)
+        # perform a global recalculation across both leads so priority is
+        # considered when assigning slots
+        await global_recalculate(session, cl_ids=[cl_a.id, cl_b.id])
+        # default priority is the creation order (a then b), so b should be
+        # scheduled after a (later date)
+        slot_a = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_a.id))
+        slot_b = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_b.id))
+        date_a = slot_a.scalars().one().scheduled_date.date()
+        date_b = slot_b.scalars().one().scheduled_date.date()
+        assert date_b > date_a
+        # now swap priority via reorder API
+        await reorder_campaigns(CampaignReorder(campaign_ids=[camp_b.id, camp_a.id]), db=session)
+        # after recalculation b should now be scheduled before a
+        slot_a2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_a.id))
+        slot_b2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_b.id))
+        assert slot_b2.scalars().one().scheduled_date.date() < slot_a2.scalars().one().scheduled_date.date()
+
 
 
 class TestOrderCampaignLeadsPrioritizingPartials:

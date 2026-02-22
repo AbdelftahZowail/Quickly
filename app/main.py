@@ -39,6 +39,21 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
     app.state.scheduler = scheduler
+
+    # perform a global recalculation on startup to ensure the queue reflects
+    # any configuration changes that may have occurred while the server was down.
+    # this addresses the "server starts/restarts" trigger from the docs.
+    from app.database import AsyncSessionLocal
+    from app.routers.calendar import recalculate_all_campaigns
+    async with AsyncSessionLocal() as session:
+        try:
+            await recalculate_all_campaigns(session)
+        except Exception as e:
+            # log but don't prevent the server from starting
+            logging.getLogger("campaign_engine.routes").error(
+                "startup recalculation failed: %s", e
+            )
+
     yield
     scheduler.shutdown()
 
