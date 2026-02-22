@@ -18,7 +18,7 @@ from app.schemas import (
     SequenceUpdate,
     SequenceResponse,
 )
-from app.queue_logic import reserve_slots_for_new_lead, recalculate_queue_after_sequence_change
+from app.queue_logic import reserve_slots_for_new_leads_bulk, recalculate_queue_after_sequence_change_for_leads
 
 log = logging.getLogger("campaign_engine.routes")
 
@@ -174,7 +174,11 @@ async def update_campaign(
         await db.flush()
         # Recalculate queue since inbox assignments changed
         log.info("Campaign %s inbox list changed; triggering queue recalculation", campaign_id)
-        await recalculate_queue_after_sequence_change(db, campaign_id)
+        # gather all campaign lead ids and perform global recalculation
+        cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
+        cl_ids = [r[0] for r in cl_res.all()]
+        if cl_ids:
+            await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
     
     schedule_changed = False
     if data.sending_days is not None:
@@ -190,7 +194,10 @@ async def update_campaign(
     if schedule_changed:
         await db.flush()
         log.info("Campaign %s sending schedule changed; triggering queue recalculation", campaign_id)
-        await recalculate_queue_after_sequence_change(db, campaign_id)
+        cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
+        cl_ids = [r[0] for r in cl_res.all()]
+        if cl_ids:
+            await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
     
     if data.wait_minutes_between is not None:
         campaign.wait_minutes_between = data.wait_minutes_between
@@ -286,7 +293,10 @@ async def create_sequence(
     await db.refresh(seq)
     log.info("create_sequence: campaign=%s position=%s id=%s", campaign_id, data.position, seq.id)
     # Recalculate queue so already-enrolled leads get slots for the new sequence
-    await recalculate_queue_after_sequence_change(db, campaign_id)
+    cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
+    cl_ids = [r[0] for r in cl_res.all()]
+    if cl_ids:
+        await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
     return seq
 
 
@@ -313,7 +323,10 @@ async def update_sequence(
     if data.wait_days_after_previous is not None:
         seq.wait_days_after_previous = data.wait_days_after_previous
         await db.flush()
-        await recalculate_queue_after_sequence_change(db, campaign_id)
+        cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
+        cl_ids = [r[0] for r in cl_res.all()]
+        if cl_ids:
+            await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
     await db.refresh(seq)
     return seq
 
@@ -345,7 +358,10 @@ async def delete_sequence(
     for s in remaining.scalars().all():
         s.position -= 1
     await db.flush()
-    await recalculate_queue_after_sequence_change(db, campaign_id)
+    cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
+    cl_ids = [r[0] for r in cl_res.all()]
+    if cl_ids:
+        await recalculate_queue_after_sequence_change_for_leads(db, cl_ids)
     return {"ok": True}
 
 
@@ -434,22 +450,6 @@ async def list_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
     ]
 
 
-@router.post("/{campaign_id}/recalculate-queue")
-async def recalculate_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    """Manually recalculate the queue, preserving already-sent sequences."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-    if not result.scalar_one_or_none():
-        raise HTTPException(404, "Campaign not found")
-    await recalculate_queue_after_sequence_change(db, campaign_id)
-    # Return the new slot count
-    slot_count = await db.execute(
-        select(func.count(QueueSlot.id))
-        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
-        .where(CampaignLead.campaign_id == campaign_id)
-    )
-    n = slot_count.scalar() or 0
-    log.info("recalculate_queue: campaign=%s slots=%d", campaign_id, n)
-    return {"ok": True, "slots": n}
 
 
 @router.get("/{campaign_id}/sent")
@@ -508,9 +508,8 @@ async def bulk_add_leads_to_campaign(
     """
     Add one or more leads to a campaign.
     For each entry: find existing lead by email (or create), then enroll if not already enrolled.
-    Queues slots for each newly enrolled lead using reserve_slots_for_new_lead
-    (does NOT do a full recalculate — far cheaper for large campaigns).
-    """
+    Queues slots for each newly enrolled lead using the bulk scheduler
+    (accepts a single id as well; does NOT perform a full recalculate).    """
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
@@ -571,7 +570,8 @@ async def bulk_add_leads_to_campaign(
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)
             await db.flush()
-            await reserve_slots_for_new_lead(db, cl.id, campaign_id)
+            # schedule using bulk API even for a single lead
+            await reserve_slots_for_new_leads_bulk(db, [cl.id], campaign_id)
 
             # Count slots created
             slot_count_result = await db.execute(
@@ -599,34 +599,3 @@ async def bulk_add_leads_to_campaign(
     }
 
 
-@router.post("/{campaign_id}/leads/{lead_id}")
-async def add_lead_to_campaign(
-    campaign_id: int, lead_id: int, db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(Lead).where(Lead.id == lead_id))
-    lead = result.scalar_one_or_none()
-    if not lead:
-        raise HTTPException(404, "Lead not found")
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-    if not result.scalar_one_or_none():
-        raise HTTPException(404, "Campaign not found")
-    existing = await db.execute(
-        select(CampaignLead).where(
-            CampaignLead.campaign_id == campaign_id,
-            CampaignLead.lead_id == lead_id,
-        )
-    )
-    if existing.scalar_one_or_none():
-        return {"ok": True, "message": "Already in campaign"}
-    cl = CampaignLead(campaign_id=campaign_id, lead_id=lead_id)
-    db.add(cl)
-    await db.flush()
-    log.info("add_lead_to_campaign: campaign=%s lead=%s cl=%s", campaign_id, lead_id, cl.id)
-    await reserve_slots_for_new_lead(db, cl.id, campaign_id)
-    # Verify slots were created
-    slot_count = await db.execute(
-        select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
-    )
-    n = slot_count.scalar() or 0
-    log.info("add_lead_to_campaign: %d queue slots created for cl=%s", n, cl.id)
-    return {"ok": True, "slots_created": n}

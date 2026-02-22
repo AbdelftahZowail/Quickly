@@ -9,3 +9,5 @@ pydantic>=2.5
 pydantic-settings>=2.1
 python-dotenv>=1.0
 resend>=2.0
+httpx>=0.24
+

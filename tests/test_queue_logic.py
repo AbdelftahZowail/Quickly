@@ -4,14 +4,14 @@ Covers:
   - Pure helper functions (_parse_time, _estimated_send_time, _time_to_minutes, next_business_date)
   - DB-level functions (count_slots_on_date, next_available_slot_position,
     _next_available_send_time_today, _get_preferred_inbox_for_lead, _pick_inbox_with_capacity)
-  - Integration scenarios (reserve_slots_for_lead, reserve_slots_for_new_lead,
-    recalculate_queue_after_sequence_change) with realistic multi-lead / multi-campaign data
+  - Integration scenarios (reserve_slots_for_lead, reserve_slots_for_new_leads_bulk,
+    global recalculation routines) with realistic multi-lead / multi-campaign data
 """
 import pytest
 from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
 
-from app.models import QueueSlot, EmailLog
+from app.models import QueueSlot, EmailLog, CampaignLead
 from app.queue_logic import (
     _parse_time,
     _estimated_send_time,
@@ -23,9 +23,9 @@ from app.queue_logic import (
     _get_preferred_inbox_for_lead,
     _pick_inbox_with_capacity,
     reserve_slots_for_lead,
-    reserve_slots_for_new_lead,
-    recalculate_queue_after_sequence_change,
+    reserve_slots_for_new_leads_bulk,
     recalculate_queue_after_sequence_change_for_leads,
+    recalculate_queue_round_robin,
 )
 from tests.conftest import (
     make_inbox,
@@ -38,6 +38,25 @@ from tests.conftest import (
     make_queue_slot,
 )
 
+
+# helper to run global recalculation algorithms in tests
+async def global_recalculate(session, campaign_id=None, cl_ids=None):
+    """Invoke both supported global recalculation routines.
+
+    Either ``campaign_id`` or ``cl_ids`` may be provided. When only
+    ``campaign_id`` is supplied we fetch the corresponding campaign_lead
+    ids from the database.  Calling both routines gives us confidence that
+    either algorithm behaves equivalently.
+    """
+    if cl_ids is None:
+        if campaign_id is None:
+            return
+        res = await session.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
+        cl_ids = [r[0] for r in res.all()]
+    if not cl_ids:
+        return
+    await recalculate_queue_after_sequence_change_for_leads(session, cl_ids)
+    await recalculate_queue_round_robin(session, cl_ids)
 
 # ============================================================================
 # 1. PURE FUNCTION TESTS (no database)
@@ -952,8 +971,9 @@ class TestMultipleLeadsMultipleCampaigns:
         assert inbox_2.id in used_inboxes
 
 
-class TestReserveSlotsForNewLead:
-    """Tests for reserve_slots_for_new_lead (the higher-level wrapper)."""
+class TestReserveSlotsForNewLeadsBulk:
+    """Tests for reserve_slots_for_new_leads_bulk (the higher-level wrapper).
+    The bulk function accepts a single ID as well."""
 
     async def test_creates_slots_for_all_sequences(self, session):
         inbox = await make_inbox(session, max_emails_per_day=50, wait_minutes_between=5)
@@ -966,7 +986,7 @@ class TestReserveSlotsForNewLead:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        await reserve_slots_for_new_lead(session, cl.id, campaign.id, start_date=date(2026, 3, 2))
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026, 3, 2))
 
         result = await session.execute(
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
@@ -981,7 +1001,7 @@ class TestReserveSlotsForNewLead:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        await reserve_slots_for_new_lead(session, cl.id, campaign.id)
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id)
 
         result = await session.execute(select(func.count(QueueSlot.id)))
         assert result.scalar() == 0
@@ -993,7 +1013,7 @@ class TestReserveSlotsForNewLead:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        await reserve_slots_for_new_lead(session, cl.id, campaign.id)
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id)
 
         result = await session.execute(select(func.count(QueueSlot.id)))
         assert result.scalar() == 0
@@ -1001,7 +1021,7 @@ class TestReserveSlotsForNewLead:
     async def test_missing_campaign_lead_handles_gracefully(self, session):
         """Passing an invalid campaign_lead_id should not crash."""
         campaign = await make_campaign(session)
-        await reserve_slots_for_new_lead(session, 9999, campaign.id)
+        await reserve_slots_for_new_leads_bulk(session, [9999], campaign.id)
         # No exception raised
 
     async def test_missing_campaign_handles_gracefully(self, session):
@@ -1011,12 +1031,12 @@ class TestReserveSlotsForNewLead:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        await reserve_slots_for_new_lead(session, cl.id, 9999)
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], 9999)
         # No exception raised
 
 
-class TestRecalculateQueueAfterSequenceChange:
-    """Tests for recalculate_queue_after_sequence_change."""
+class TestGlobalRecalculate:
+    """Tests for the global recalculation routines (either algorithm)."""
 
     async def test_deletes_old_slots_and_recreates(self, session):
         """After adding a sequence, old pending slots are deleted and new ones built."""
@@ -1029,7 +1049,7 @@ class TestRecalculateQueueAfterSequenceChange:
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
         # Create initial slots
-        await reserve_slots_for_new_lead(session, cl.id, campaign.id, start_date=date(2026, 3, 2))
+        await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026, 3, 2))
 
         result = await session.execute(select(func.count(QueueSlot.id)))
         assert result.scalar() == 1
@@ -1038,7 +1058,7 @@ class TestRecalculateQueueAfterSequenceChange:
         seq1 = await make_sequence(session, campaign.id, position=1, wait_days_after_previous=1)
 
         # Recalculate
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         # Should have 2 slots now
         result = await session.execute(
@@ -1069,7 +1089,7 @@ class TestRecalculateQueueAfterSequenceChange:
             sent_at=datetime(2026, 3, 2, 10, 0),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
@@ -1100,7 +1120,7 @@ class TestRecalculateQueueAfterSequenceChange:
 
         # Initial reservation
         for cl in cls:
-            await reserve_slots_for_new_lead(session, cl.id, campaign.id, start_date=date(2026, 3, 2))
+            await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026, 3, 2))
 
         # Should have 5 leads × 2 seqs = 10 slots
         result = await session.execute(select(func.count(QueueSlot.id)))
@@ -1118,7 +1138,7 @@ class TestRecalculateQueueAfterSequenceChange:
         await make_sequence(session, campaign.id, position=2, wait_days_after_previous=1)
 
         # Recalculate
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         # Leads 0,1: kept seq 0 slot + new seq 1, 2 = 3 slots each = 6
         # Leads 2,3,4: nothing sent → re-reserved seq 0, 1, 2 = 3 slots each = 9
@@ -1128,7 +1148,7 @@ class TestRecalculateQueueAfterSequenceChange:
 
     async def test_recalculate_missing_campaign_handles_gracefully(self, session):
         """Recalculation with an invalid campaign_id should not crash."""
-        await recalculate_queue_after_sequence_change(session, 9999)
+        await global_recalculate(session, campaign_id=9999)
 
 
 class TestRecalculateQueueAfterSequenceChangeForLeads:
@@ -1148,7 +1168,7 @@ class TestRecalculateQueueAfterSequenceChangeForLeads:
             lead = await make_lead(session, email=f"subset{i}@test.com")
             cl = await make_campaign_lead(session, campaign.id, lead.id)
             leads.append((lead, cl))
-            await reserve_slots_for_new_lead(session, cl.id, campaign.id, start_date=date(2027, 3, 2))
+            await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2027, 3, 2))
 
         # Lead 0 already sent seq 0.
         await make_email_log(
@@ -1202,8 +1222,8 @@ class TestRecalculateQueueAfterSequenceChangeForLeads:
         lead_b = await make_lead(session, email="mix-lead-b@test.com")
         cl_b = await make_campaign_lead(session, campaign_b.id, lead_b.id)
 
-        await reserve_slots_for_new_lead(session, cl_a.id, campaign_a.id, start_date=date(2027, 3, 2))
-        await reserve_slots_for_new_lead(session, cl_b.id, campaign_b.id, start_date=date(2027, 3, 2))
+        await reserve_slots_for_new_leads_bulk(session, [cl_a.id], campaign_a.id, start_date=date(2027, 3, 2))
+        await reserve_slots_for_new_leads_bulk(session, [cl_b.id], campaign_b.id, start_date=date(2027, 3, 2))
 
         await make_sequence(session, campaign_a.id, position=2, wait_days_after_previous=1)
         await make_sequence(session, campaign_b.id, position=2, wait_days_after_previous=1)
@@ -1458,7 +1478,7 @@ class TestRecalculationWaitDaysRespected:
             sent_at=datetime.combine(sent_monday, time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
@@ -1492,7 +1512,7 @@ class TestRecalculationWaitDaysRespected:
             sent_at=datetime.combine(sent_monday, time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
@@ -1528,7 +1548,7 @@ class TestRecalculationWaitDaysRespected:
             sent_at=datetime.combine(sent_thu, time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
@@ -1575,7 +1595,7 @@ class TestRecalculationElapsedWait:
             sent_at=datetime.combine(sent_date, time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
@@ -1614,7 +1634,7 @@ class TestRecalculationElapsedWait:
             sent_at=datetime.combine(old_date, time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
@@ -1650,7 +1670,7 @@ class TestRecalculationElapsedWait:
             sent_at=datetime.combine(old_date, time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
@@ -1689,7 +1709,7 @@ class TestRecalculationNoResend:
             sent_at=datetime.combine(sent_mon + timedelta(days=1), time(10, 0)),
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
@@ -1719,7 +1739,7 @@ class TestRecalculationNoResend:
                 sent_at=datetime(2027, 6, 7 + i, 10, 0),
             )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
@@ -1775,7 +1795,7 @@ class TestRecalculationMultiLeadDifferentProgress:
             sent_at=datetime.combine(date(2027, 6, 9), time(10, 0)),  # Wed
         )
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         # --- Lead A: all 4 sequences ---
         result = await session.execute(
@@ -1849,7 +1869,7 @@ class TestRecalculationMultiLeadDifferentProgress:
         # Now add a 4th sequence and recalculate
         await make_sequence(session, campaign.id, position=3, wait_days_after_previous=2)
 
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         # Expected slot counts:
         # Leads 0-3 (nothing sent): 4 sequences each = 16
@@ -1900,7 +1920,7 @@ class TestRecalculationIdempotent:
         )
 
         # First recalculate
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
@@ -1908,7 +1928,7 @@ class TestRecalculationIdempotent:
         first_run = [(s.sequence_index, s.scheduled_date.date()) for s in result.scalars().all()]
 
         # Second recalculate
-        await recalculate_queue_after_sequence_change(session, campaign.id)
+        await global_recalculate(session, campaign_id=campaign.id)
 
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)

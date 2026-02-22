@@ -6,7 +6,7 @@ from sqlalchemy import select, delete
 from app.database import get_db
 from app.models import Lead, CampaignLead, EmailLog, LeadReply
 from app.schemas import LeadCreate, LeadUpdate, LeadResponse, MarkReplied
-from app.queue_logic import reserve_slots_for_new_lead
+from app.queue_logic import reserve_slots_for_new_leads_bulk
 
 router = APIRouter(prefix="/api/leads", tags=["leads"])
 
@@ -68,27 +68,6 @@ async def delete_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
     return {"ok": True}
 
 
-@router.post("/{lead_id}/campaigns/{campaign_id}")
-async def add_lead_to_campaign(
-    lead_id: int, campaign_id: int, db: AsyncSession = Depends(get_db)
-):
-    result = await db.execute(select(Lead).where(Lead.id == lead_id))
-    lead = result.scalar_one_or_none()
-    if not lead:
-        raise HTTPException(404, "Lead not found")
-    existing = await db.execute(
-        select(CampaignLead).where(
-            CampaignLead.lead_id == lead_id,
-            CampaignLead.campaign_id == campaign_id,
-        )
-    )
-    if existing.scalar_one_or_none():
-        return {"ok": True, "message": "Already in campaign"}
-    cl = CampaignLead(campaign_id=campaign_id, lead_id=lead_id)
-    db.add(cl)
-    await db.flush()
-    await reserve_slots_for_new_lead(db, cl.id, campaign_id)
-    return {"ok": True}
 
 
 @router.post("/mark-replied")

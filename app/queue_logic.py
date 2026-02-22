@@ -173,7 +173,7 @@ async def _get_preferred_inbox_for_lead(
     Check if this lead was already contacted with an inbox in this campaign.
     Checks both sent emails (EmailLog) and existing queue slots (QueueSlot).
     If yes and that inbox is still available, return it (inbox persistence).
-    Otherwise return None to use round-robin.
+    Otherwise, return None to use round-robin.
     """
     # First check EmailLog for sent emails (highest priority)
     result = await session.execute(
@@ -604,47 +604,6 @@ async def _fetch_campaign_scheduling_data(
     return (campaign, inboxes, sequences)
 
 
-async def reserve_slots_for_new_lead(
-    session: AsyncSession, campaign_lead_id: int, campaign_id: int, start_date: Optional[date] = None
-) -> None:
-    """When a new lead is added to a campaign, reserve all sequence slots across campaign inboxes."""
-    log.info("reserve_slots_for_new_lead: cl=%s campaign=%s", campaign_lead_id, campaign_id)
-
-    # Get campaign_lead to extract lead_id
-    cl_result = await session.execute(
-        select(CampaignLead).where(CampaignLead.id == campaign_lead_id)
-    )
-    cl = cl_result.scalar_one_or_none()
-    if not cl:
-        log.error("reserve_slots_for_new_lead: campaign_lead %s not found", campaign_lead_id)
-        return
-
-    # Fetch campaign data
-    data = await _fetch_campaign_scheduling_data(session, campaign_id)
-    if not data:
-        return
-    campaign, inboxes, sequences = data
-
-    if not inboxes:
-        log.warning("reserve_slots_for_new_lead: no inboxes for campaign %s", campaign_id)
-        return
-    if not sequences:
-        log.warning("reserve_slots_for_new_lead: no sequences for campaign %s — no slots created", campaign_id)
-        return
-
-    log.info("reserve_slots_for_new_lead: found %d inboxes, %d sequences", len(inboxes), len(sequences))
-    
-    # Create a cache for this single lead reservation
-    slot_cache: dict = {}
-    
-    await reserve_slots_for_lead(
-        session, campaign_lead_id, campaign, inboxes, sequences,
-        lead_id=cl.lead_id,
-        start_date=start_date or time_provider.today(),
-        last_sent_sequence_index=-1,
-        cache=slot_cache,
-    )
-    await session.flush()
 
 
 async def reserve_slots_for_new_leads_bulk(
@@ -656,15 +615,14 @@ async def reserve_slots_for_new_leads_bulk(
     """
     Efficiently schedule queue slots for a batch of newly enrolled leads.
 
-    Unlike calling reserve_slots_for_new_lead in a loop (which re-fetches campaign
-    data and resets the cache for every lead), this function:
+    Unlike calling individual scheduling in a loop, this function:
       1. Fetches campaign/inbox/sequence data exactly once.
       2. Pre-seeds a shared slot cache from existing QueueSlot rows (one query).
       3. Iterates all new campaign_leads sharing that single cache.
       4. Flushes once at the very end.
 
-    This gives the same DB efficiency as recalculate_queue_after_sequence_change
-    but scoped only to the freshly-enrolled leads.
+    This gives the same DB efficiency as the recalculation routines but scoped
+    only to the freshly-enrolled leads.  Passing a single ID is also supported.
     """
     if not campaign_lead_ids:
         return
@@ -746,30 +704,6 @@ async def reserve_slots_for_new_leads_bulk(
     )
 
 
-async def recalculate_queue_after_sequence_change(session: AsyncSession, campaign_id: int) -> None:
-    """After editing/adding/deleting sequences: delete pending queue slots, recalculate from last sent per lead."""
-    log.info("recalculate_queue: campaign=%s", campaign_id)
-
-    # Fetch campaign data
-    data = await _fetch_campaign_scheduling_data(session, campaign_id)
-    if not data:
-        return
-    campaign, inboxes, sequences = data
-
-    # Fetch all leads in the campaign
-    result = await session.execute(
-        select(CampaignLead).where(CampaignLead.campaign_id == campaign_id)
-    )
-    campaign_leads = list(result.scalars().all())
-
-    await _recalculate_queue_for_campaign_leads(
-        session,
-        campaign=campaign,
-        inboxes=inboxes,
-        sequences=sequences,
-        campaign_leads=campaign_leads,
-        log_prefix="recalculate_queue",
-    )
 
 
 async def _recalculate_queue_for_campaign_leads(
@@ -1330,11 +1264,3 @@ async def recalculate_queue_round_robin(
     )
 
 
-# Backwards-compatible public API ------------------------------------------------
-async def recalculate_queue(session: AsyncSession, campaign_id: int) -> None:
-    """Compatibility wrapper kept for older callers (e.g. scripts).
-
-    Forwards to `recalculate_queue_after_sequence_change` which contains the
-    current implementation.
-    """
-    await recalculate_queue_after_sequence_change(session, campaign_id)

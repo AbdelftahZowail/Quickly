@@ -4,7 +4,7 @@ from datetime import date, timedelta
 from sqlalchemy import select, delete
 from app.database import AsyncSessionLocal
 from app.models import Lead, Campaign, CampaignInbox, CampaignLead, Inbox, Sequence, QueueSlot, EmailLog, LeadReply
-from app.queue_logic import recalculate_queue
+from app.queue_logic import recalculate_queue_after_sequence_change_for_leads
 from app import time as time_provider
 
 # ========== CONFIGURATION ==========
@@ -160,7 +160,11 @@ async def main():
             await session.refresh(cl)
 
             # Schedule logic - Let it calculate based on sending_days (which excludes today)
-            await recalculate_queue(session, camp.id)
+            # perform global recalculation for this campaign
+            cl_res = await session.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == camp.id))
+            cl_ids = [r[0] for r in cl_res.all()]
+            if cl_ids:
+                await recalculate_queue_after_sequence_change_for_leads(session, cl_ids)
             # print(f"Assigned Lead {lead_id} to Campaign {camp.id} - sending days exclude today")
 
         print("Done! Test data populated.")
