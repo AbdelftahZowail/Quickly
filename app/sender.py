@@ -15,8 +15,15 @@ from email.utils import make_msgid
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+# google client libraries for Gmail API
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
 from app.settings_manager import settings
 from app import time as time_provider
+from app.models import GmailAccount
+from app.routers.gmail_oauth import refresh_access_token  # needed for token refresh when sending via gmail
 
 log = logging.getLogger("campaign_engine.sender")
 
@@ -255,16 +262,62 @@ def _send_via_gmail(
     references: Optional[str] = None,
     is_html: bool = False,
     access_token: str = "",
+    gmail_account: GmailAccount | None = None,
     thread_id: Optional[str] = None,
 ) -> Optional[SendResult]:
     """
-    Send one email via Gmail API using an OAuth access token.
-    Returns SendResult with Message-ID header and Gmail threadId for threading.
+    Send one email via Gmail API using an OAuth access token or ``GmailAccount``
+    model instance.  When a model is provided the function will:
+
+      * ensure the token is up‑to‑date (refreshing it if expired),
+      * build a ``google-api-python-client`` service object,
+      * automatically retry on transient errors,
+      * update the ``GmailAccount`` object with any refreshed access token or
+        expiry returned by the library.
+
+    The return value is the same ``SendResult`` as before: ``message_id`` is
+    the RFC‑822 Message‑ID header (the library requires a second API call to
+    fetch the real value) and ``thread_id`` is the Gmail thread identifier.
     """
+    # prefer the token on the account if one is supplied
+    if gmail_account:
+        # make sure the access token is fresh; the helper will update the model
+        if gmail_account.token_expiry and gmail_account.token_expiry <= time_provider.utcnow():
+            refreshed = refresh_access_token(gmail_account)
+            if not refreshed:
+                log.error("Gmail send: token refresh failed for %s", gmail_account.google_email)
+                return None
+        access_token = gmail_account.access_token or ""
+
     if not access_token:
         log.error("Gmail send: no access token for %s", from_email)
         return None
 
+    # build credentials object; supplying refresh/secret info allows the
+    # client library to refresh automatically and keep ``creds.token``
+    # up‑to‑date.
+    creds_kwargs: dict[str, object] = {"token": access_token}
+    if gmail_account and gmail_account.refresh_token:
+        creds_kwargs.update(
+            {
+                "refresh_token": gmail_account.refresh_token,
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "scopes": ["https://www.googleapis.com/auth/gmail.send"],
+            }
+        )
+    creds = Credentials(**creds_kwargs)  # type: ignore[arg-type]
+
+    # construct the gmail service; ``cache_discovery=False`` avoids writing
+    # files to disk in environments without a home directory.
+    try:
+        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+    except Exception as e:
+        log.error("Failed to build Gmail service: %s", e)
+        return None
+
+    # compose the message exactly as before
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
@@ -281,55 +334,97 @@ def _send_via_gmail(
     msg.attach(part)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
-    payload_dict: Dict[str, Any] = {"raw": raw}
+    body_payload: Dict[str, Any] = {"raw": raw}
     if thread_id:
-        payload_dict["threadId"] = thread_id
-    payload = json.dumps(payload_dict).encode("utf-8")
+        body_payload["threadId"] = thread_id
 
-    # Log full raw email for debugging
-    _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id)
+    # log pre-send state (do not include creds accidentally)
+    _log_gmail_call(to_email, from_email, subject, msg.as_string(), body_payload, thread_id)
 
-    req = urllib.request.Request(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            resp_data = json.loads(resp.read().decode())
-            gmail_thread_id = resp_data.get("threadId")
-            gmail_msg_id = resp_data.get("id")
+        send_resp = (
+            service.users()
+            .messages()
+            .send(userId="me", body=body_payload)
+            .execute(num_retries=3)
+        )
+        gmail_thread_id = send_resp.get("threadId")
+        gmail_msg_id = send_resp.get("id")
 
-            # Fetch the REAL Message-ID that Gmail assigned (not our local one)
-            # Gmail replaces Message-ID on send, so we must read it back.
-            real_message_id = message_id  # fallback to local one
-            if gmail_msg_id:
-                real_message_id = _fetch_gmail_message_id(gmail_msg_id, access_token) or message_id
+        # if the library automatically refreshed the token, save it back to
+        # the model so the caller can commit it.
+        if gmail_account and creds.token and creds.token != access_token:
+            gmail_account.access_token = creds.token
+            if getattr(creds, "expiry", None):
+                gmail_account.token_expiry = creds.expiry
 
-            _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id,
-                            status="200 OK",
-                            response=json.dumps({**resp_data, "real_message_id": real_message_id}))
-            log.info("Gmail API: sent to=%s gmail_id=%s threadId=%s real_message_id=%s",
-                     to_email, gmail_msg_id, gmail_thread_id, real_message_id)
-            return SendResult(message_id=real_message_id, thread_id=gmail_thread_id)
-    except urllib.error.HTTPError as e:
+        # second call to get the real Message-ID header
+        real_message_id = message_id
+        if gmail_msg_id:
+            get_resp = (
+                service.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=gmail_msg_id,
+                    format="metadata",
+                    metadataHeaders=["Message-Id"],
+                )
+                .execute(num_retries=3)
+            )
+            for header in get_resp.get("payload", {}).get("headers", []):
+                if header.get("name", "").lower() == "message-id":
+                    real_message_id = header["value"]
+                    break
+
+        _log_gmail_call(
+            to_email,
+            from_email,
+            subject,
+            msg.as_string(),
+            body_payload,
+            thread_id,
+            status="200 OK",
+            response=json.dumps({**send_resp, "real_message_id": real_message_id}),
+        )
+        log.info(
+            "Gmail API: sent to=%s gmail_id=%s threadId=%s real_message_id=%s",
+            to_email,
+            gmail_msg_id,
+            gmail_thread_id,
+            real_message_id,
+        )
+        return SendResult(message_id=real_message_id, thread_id=gmail_thread_id)
+    except HttpError as e:
         err_body = ""
         try:
-            err_body = e.read().decode()
+            err_body = e.content.decode()
         except Exception:
             pass
-        _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id,
-                        status=f"ERROR {e.code}", error=f"{e.reason}: {err_body}")
-        log.error("Gmail API error %s %s: %s", e.code, e.reason, err_body)
+        _log_gmail_call(
+            to_email,
+            from_email,
+            subject,
+            msg.as_string(),
+            body_payload,
+            thread_id,
+            status=f"ERROR {e.resp.status}",
+            error=f"{e.resp.reason}: {err_body}",
+        )
+        log.error("Gmail API error %s %s: %s", e.resp.status, e.resp.reason, err_body)
         return None
     except Exception as e:
-        _log_gmail_call(to_email, from_email, subject, msg.as_string(), payload_dict, thread_id,
-                        status="ERROR", error=str(e))
-        log.error("Gmail API error: %s\n%s", e, traceback.format_exc())
+        _log_gmail_call(
+            to_email,
+            from_email,
+            subject,
+            msg.as_string(),
+            body_payload,
+            thread_id,
+            status="ERROR",
+            error=str(e),
+        )
+        log.error("Gmail API error: %s", e)
         return None
 
 
@@ -344,6 +439,7 @@ def send_email(
     is_html: bool = False,
     provider: str = "",
     gmail_access_token: str = "",
+    gmail_account: "GmailAccount" | None = None,
     thread_id: Optional[str] = None,
 ) -> Optional[SendResult]:
     """
@@ -384,7 +480,7 @@ def send_email(
     if settings.test_mode:
         to_email = _test_mode_redirect(to_email)
 
-    if effective == "gmail" and gmail_access_token:
+    if effective == "gmail" and (gmail_access_token or gmail_account):
         return _send_via_gmail(
             to_email=to_email,
             subject=subject,
@@ -395,6 +491,7 @@ def send_email(
             references=references,
             is_html=is_html,
             access_token=gmail_access_token,
+            gmail_account=gmail_account,
             thread_id=thread_id,
         )
     if effective == "resend" and settings.resend_api_key:

@@ -16,6 +16,9 @@ GOOGLE_CLIENT_ID_KEY = "google_client_id"
 GOOGLE_CLIENT_SECRET_KEY = "google_client_secret"
 TEST_MODE_KEY = "test_mode"
 SCHEDULING_STRATEGY_KEY = "scheduling_strategy"  # "priority" (default) | "round_robin"
+GMAIL_PUSH_TOPIC_KEY = "gmail_push_topic"
+GMAIL_PUSH_WEBHOOK_TOKEN_KEY = "gmail_push_webhook_token"
+GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY = "gmail_reply_sync_interval_minutes"
 
 
 # Generic helpers --------------------------------------------------------------
@@ -96,3 +99,36 @@ async def set_scheduling_strategy(db: AsyncSession, strategy: str) -> None:
     await put_setting(db, SCHEDULING_STRATEGY_KEY, strategy)
     await db.flush()
     log.info("Scheduling strategy set to '%s'", strategy)
+
+
+# Gmail reply sync / push settings --------------------------------------------
+
+async def get_gmail_sync_config(db: AsyncSession) -> dict:
+    """Return Gmail push/poll sync settings."""
+    topic = await get_setting(db, GMAIL_PUSH_TOPIC_KEY) or ""
+    webhook_token = await get_setting(db, GMAIL_PUSH_WEBHOOK_TOKEN_KEY) or ""
+    interval_raw = await get_setting(db, GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY) or "5"
+    try:
+        interval_minutes = max(1, int(interval_raw))
+    except Exception:
+        interval_minutes = 5
+    return {
+        "push_topic": topic,
+        "push_topic_configured": bool(topic),
+        "webhook_token": webhook_token,
+        "webhook_token_configured": bool(webhook_token),
+        "sync_interval_minutes": interval_minutes,
+    }
+
+
+async def save_gmail_sync_config(
+    db: AsyncSession,
+    push_topic: str,
+    webhook_token: str,
+    sync_interval_minutes: int,
+) -> None:
+    """Persist Gmail push/poll sync settings."""
+    await put_setting(db, GMAIL_PUSH_TOPIC_KEY, push_topic.strip())
+    await put_setting(db, GMAIL_PUSH_WEBHOOK_TOKEN_KEY, webhook_token.strip())
+    await put_setting(db, GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY, str(max(1, int(sync_interval_minutes))))
+    await db.flush()

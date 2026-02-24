@@ -1,5 +1,19 @@
 """SQLAlchemy ORM models."""
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, Text, JSON, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    ForeignKeyConstraint,
+    Integer,
+    JSON,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+    Index,
+)
 from sqlalchemy.orm import relationship
 from app.time import utcnow as _utcnow
 
@@ -17,6 +31,8 @@ class Inbox(Base):
     created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
+    gmail_sync_state = relationship("GmailSyncState", uselist=False, cascade="all, delete-orphan")
+    gmail_threads = relationship("GmailThread", back_populates="inbox", cascade="all, delete-orphan")
 
 
 class Lead(Base):
@@ -142,6 +158,15 @@ class AppSetting(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class UniboxCache(Base):
+    """Persistent cache for unibox list + thread detail payloads."""
+    __tablename__ = "unibox_cache"
+    cache_key = Column(String(1024), primary_key=True, nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
 class GmailAccount(Base):
     """Stores Gmail/G Suite OAuth 2.0 tokens linked to an Inbox."""
     __tablename__ = "gmail_account"
@@ -155,3 +180,108 @@ class GmailAccount(Base):
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     inbox = relationship("Inbox", back_populates="gmail_account")
+
+
+class GmailSyncState(Base):
+    """Tracks Gmail history sync checkpoints and watch expiry per inbox."""
+    __tablename__ = "gmail_sync_state"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    anchor_history_id = Column(String(64), default="")
+    latest_history_id = Column(String(64), default="")
+    oldest_internal_date = Column(BigInteger, nullable=True)
+    last_history_id = Column(String(64), default="")
+    watch_expiration = Column(DateTime, nullable=True)
+    last_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="gmail_sync_state")
+
+
+class GmailThread(Base):
+    """Local authoritative metadata mirror for Gmail threads."""
+
+    __tablename__ = "gmail_thread"
+    __table_args__ = (
+        Index("ix_gmail_thread_inbox_last_internal", "inbox_id", "last_internal_date"),
+    )
+
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), primary_key=True)
+    thread_id = Column(String(128), primary_key=True)
+    history_id = Column(String(64), nullable=False, default="")
+    snippet = Column(Text, default="")
+    last_internal_date = Column(BigInteger, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    inbox = relationship("Inbox", back_populates="gmail_threads")
+    messages = relationship("GmailMessage", back_populates="thread", cascade="all, delete-orphan")
+
+
+class GmailMessage(Base):
+    """Local Gmail message mirror (metadata eager, bodies lazy)."""
+
+    __tablename__ = "gmail_message"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["inbox_id", "thread_id"],
+            ["gmail_thread.inbox_id", "gmail_thread.thread_id"],
+            name="fk_gmail_message_thread",
+            ondelete="CASCADE",
+        ),
+        Index("ix_gmail_message_inbox_thread_date", "inbox_id", "thread_id", "internal_date"),
+        Index("ix_gmail_message_inbox_internal_date", "inbox_id", "internal_date"),
+    )
+
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), primary_key=True)
+    message_id = Column(String(128), primary_key=True)
+    thread_id = Column(String(128), nullable=False)
+    internal_date = Column(BigInteger, nullable=True)
+    snippet = Column(Text, default="")
+    headers_json = Column(Text, default="[]")
+    label_ids_json = Column(Text, default="[]")
+
+    body_fetched = Column(Boolean, default=False, nullable=False)
+    body_plain = Column(Text, default="")
+    body_html = Column(Text, default="")
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    inbox = relationship("Inbox")
+    thread = relationship("GmailThread", back_populates="messages")
+    attachments = relationship("GmailAttachment", back_populates="message", cascade="all, delete-orphan")
+
+
+class GmailAttachment(Base):
+    """Attachment metadata and optional downloaded bytes (lazy)."""
+
+    __tablename__ = "gmail_attachment"
+    __table_args__ = (
+        UniqueConstraint(
+            "inbox_id",
+            "message_id",
+            "attachment_id",
+            name="uq_gmail_attachment_message_attachment",
+        ),
+        ForeignKeyConstraint(
+            ["inbox_id", "message_id"],
+            ["gmail_message.inbox_id", "gmail_message.message_id"],
+            name="fk_gmail_attachment_message",
+            ondelete="CASCADE",
+        ),
+        Index("ix_gmail_attachment_inbox_message", "inbox_id", "message_id"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False)
+    attachment_id = Column(String(256), nullable=False)
+    message_id = Column(String(128), nullable=False)
+    filename = Column(String(1024), default="")
+    mime_type = Column(String(255), default="")
+    size = Column(Integer, default=0)
+    data = Column(LargeBinary, nullable=True)
+    downloaded = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+    message = relationship("GmailMessage", back_populates="attachments")

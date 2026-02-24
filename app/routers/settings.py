@@ -12,6 +12,8 @@ from app.app_settings import (
     save_google_oauth_credentials,
     get_test_mode,
     set_test_mode,
+    get_gmail_sync_config,
+    save_gmail_sync_config,
     get_scheduling_strategy,
     set_scheduling_strategy,
 )
@@ -24,6 +26,12 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 class GoogleOAuthConfig(BaseModel):
     client_id: str
     client_secret: str
+
+
+class GmailSyncConfig(BaseModel):
+    push_topic: str = ""
+    webhook_token: str = ""
+    sync_interval_minutes: int = 5
 
 
 class AllSettings(BaseModel):
@@ -46,6 +54,8 @@ async def get_all_settings(db: AsyncSession = Depends(get_db)):
     """Get all application settings (sensitive values are partially masked)."""
     test_mode_value = await get_test_mode(db)
     
+    gmail_sync = await get_gmail_sync_config(db)
+
     return {
         "base_url": settings.base_url,
         "email_provider": settings.email_provider,
@@ -64,6 +74,11 @@ async def get_all_settings(db: AsyncSession = Depends(get_db)):
         "queue_check_interval_minutes": settings.queue_check_interval_minutes,
         "test_mode": test_mode_value,
         "time_offset_days": settings.time_offset_days,
+        "gmail_push_topic": gmail_sync.get("push_topic") or "",
+        "gmail_push_topic_configured": gmail_sync.get("push_topic_configured", False),
+        "gmail_push_webhook_token": _mask_secret(gmail_sync.get("webhook_token") or ""),
+        "gmail_push_webhook_token_configured": gmail_sync.get("webhook_token_configured", False),
+        "gmail_reply_sync_interval_minutes": gmail_sync.get("sync_interval_minutes", 5),
     }
 
 
@@ -148,6 +163,43 @@ async def save_google_oauth(
     except Exception as e:
         log.error("save_google_oauth: failed to save credentials: %s", e)
         raise HTTPException(500, f"Failed to save credentials: {str(e)}")
+
+
+@router.get("/gmail-sync")
+async def get_gmail_sync_settings(db: AsyncSession = Depends(get_db)):
+    """Return Gmail push/poll sync settings."""
+    cfg = await get_gmail_sync_config(db)
+    return {
+        "push_topic": cfg.get("push_topic") or "",
+        "push_topic_configured": cfg.get("push_topic_configured", False),
+        "webhook_token": _mask_secret(cfg.get("webhook_token") or ""),
+        "webhook_token_configured": cfg.get("webhook_token_configured", False),
+        "sync_interval_minutes": cfg.get("sync_interval_minutes", 5),
+    }
+
+
+@router.post("/gmail-sync")
+async def save_gmail_sync_settings(
+    config: GmailSyncConfig,
+    db: AsyncSession = Depends(get_db),
+):
+    """Persist Gmail push/poll sync settings."""
+    try:
+        token_value = config.webhook_token or ""
+        if "***" in token_value:
+            existing_cfg = await get_gmail_sync_config(db)
+            token_value = existing_cfg.get("webhook_token") or ""
+        await save_gmail_sync_config(
+            db,
+            push_topic=config.push_topic or "",
+            webhook_token=token_value,
+            sync_interval_minutes=max(1, int(config.sync_interval_minutes or 5)),
+        )
+        await db.commit()
+        return {"ok": True, "message": "Gmail sync settings saved. Restart server to apply new interval."}
+    except Exception as e:
+        log.error("save_gmail_sync_settings failed: %s", e)
+        raise HTTPException(500, f"Failed to save Gmail sync settings: {e}")
 
 
 # Time offset helpers ---------------------------------------------------------

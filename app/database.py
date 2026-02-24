@@ -160,6 +160,26 @@ def _migrate_campaign_priority(conn):
         conn.execute(text("ALTER TABLE campaign ADD COLUMN priority INTEGER NOT NULL DEFAULT 0"))
 
 
+def _migrate_gmail_sync_state_columns(conn):
+    """Add mirror sync state columns if missing."""
+    cur = conn.execute(text("PRAGMA table_info(gmail_sync_state)"))
+    columns = [row[1] for row in cur.fetchall()]
+    if "anchor_history_id" not in columns:
+        conn.execute(text("ALTER TABLE gmail_sync_state ADD COLUMN anchor_history_id VARCHAR(64) DEFAULT ''"))
+    if "latest_history_id" not in columns:
+        conn.execute(text("ALTER TABLE gmail_sync_state ADD COLUMN latest_history_id VARCHAR(64) DEFAULT ''"))
+    if "oldest_internal_date" not in columns:
+        conn.execute(text("ALTER TABLE gmail_sync_state ADD COLUMN oldest_internal_date BIGINT"))
+    # Backfill from legacy field when possible.
+    conn.execute(
+        text(
+            "UPDATE gmail_sync_state "
+            "SET anchor_history_id = COALESCE(NULLIF(anchor_history_id, ''), last_history_id, ''), "
+            "latest_history_id = COALESCE(NULLIF(latest_history_id, ''), last_history_id, '')"
+        )
+    )
+
+
 async def init_db():
     from app import models  # noqa: F401 - so Base.metadata has all tables
     from app.settings_manager import initialize_settings
@@ -173,6 +193,7 @@ async def init_db():
         await conn.run_sync(_migrate_email_log_inbox_id)
         await conn.run_sync(_migrate_queue_slot_unique_constraint)
         await conn.run_sync(_migrate_campaign_priority)
+        await conn.run_sync(_migrate_gmail_sync_state_columns)
     
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:

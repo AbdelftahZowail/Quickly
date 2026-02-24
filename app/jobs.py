@@ -184,6 +184,7 @@ async def run_send_job():
                     is_html=is_html,
                     provider=inbox_provider,
                     gmail_access_token=gmail_token,
+                    gmail_account=ga,
                     thread_id=prev_thread_id,
                 )
                 if result:

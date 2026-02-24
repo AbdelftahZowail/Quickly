@@ -20,8 +20,12 @@ from app.database import init_db
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
+from app.routers import gmail_sync as gmail_sync_router
 from app.routers import calendar as calendar_router
 from app.routers import settings as settings_router
+from app.routers import unibox as unibox_router
+from app.gmail_sync import run_gmail_reply_sync_job, run_gmail_watch_renew_job
+from app.app_settings import get_gmail_sync_config
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 
 
@@ -30,6 +34,14 @@ async def lifespan(app: FastAPI):
     await init_db()
     scheduler = AsyncIOScheduler()
     interval_minutes = max(1, settings.queue_check_interval_minutes)
+    gmail_sync_interval_minutes = 5
+    from app.database import AsyncSessionLocal
+    async with AsyncSessionLocal() as session:
+        try:
+            sync_cfg = await get_gmail_sync_config(session)
+            gmail_sync_interval_minutes = max(1, int(sync_cfg.get("sync_interval_minutes") or 5))
+        except Exception:
+            gmail_sync_interval_minutes = 5
     scheduler.add_job(
         run_send_job,
         "cron",
@@ -37,13 +49,27 @@ async def lifespan(app: FastAPI):
         second=0,
         id="send_queue",
     )
+    scheduler.add_job(
+        run_gmail_reply_sync_job,
+        "cron",
+        minute=f"*/{gmail_sync_interval_minutes}",
+        second=20,
+        id="gmail_reply_sync",
+    )
+    scheduler.add_job(
+        run_gmail_watch_renew_job,
+        "cron",
+        hour="*/6",
+        minute=15,
+        second=0,
+        id="gmail_watch_renew",
+    )
     scheduler.start()
     app.state.scheduler = scheduler
 
     # perform a global recalculation on startup to ensure the queue reflects
     # any configuration changes that may have occurred while the server was down.
     # this addresses the "server starts/restarts" trigger from the docs.
-    from app.database import AsyncSessionLocal
     from app.routers.calendar import recalculate_all_campaigns
     async with AsyncSessionLocal() as session:
         try:
@@ -65,8 +91,10 @@ app.include_router(leads.router)
 app.include_router(campaigns.router)
 app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
+app.include_router(gmail_sync_router.router)
 app.include_router(calendar_router.router)
 app.include_router(settings_router.router)
+app.include_router(unibox_router.router)
 
 # Web UI
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -77,23 +105,23 @@ if (BASE_DIR / "static").exists():
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "active": "home"})
 
 
 @app.get("/campaigns", response_class=HTMLResponse)
 async def campaigns_page(request: Request):
-    return templates.TemplateResponse("campaigns.html", {"request": request})
+    return templates.TemplateResponse("campaigns.html", {"request": request, "active": "campaigns"})
 
 
 @app.get("/campaigns/add", response_class=HTMLResponse)
 async def campaign_add_page(request: Request):
-    return templates.TemplateResponse("campaign_add.html", {"request": request})
+    return templates.TemplateResponse("campaign_add.html", {"request": request, "active": "campaigns"})
 
 
 @app.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
 async def campaign_detail_page(request: Request, campaign_id: int):
     return templates.TemplateResponse(
-        "campaign_detail.html", {"request": request, "campaign_id": campaign_id}
+        "campaign_detail.html", {"request": request, "campaign_id": campaign_id, "active": "campaigns"}
     )
 
 
@@ -101,18 +129,23 @@ async def campaign_detail_page(request: Request, campaign_id: int):
 
 @app.get("/inboxes", response_class=HTMLResponse)
 async def inboxes_page(request: Request):
-    return templates.TemplateResponse("inboxes.html", {"request": request})
+    return templates.TemplateResponse("inboxes.html", {"request": request, "active": "inboxes"})
+
+
+@app.get("/unibox", response_class=HTMLResponse)
+async def unibox_page(request: Request):
+    return templates.TemplateResponse("unibox.html", {"request": request, "active": "unibox"})
 
 
 @app.get("/calendar", response_class=HTMLResponse)
 async def calendar_page(request: Request):
-    return templates.TemplateResponse("calendar.html", {"request": request})
+    return templates.TemplateResponse("calendar.html", {"request": request, "active": "calendar"})
 
 
 
 @app.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request):
-    return templates.TemplateResponse("settings.html", {"request": request})
+    return templates.TemplateResponse("settings.html", {"request": request, "active": "settings"})
 
 
 @app.get("/api/status")

@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Settings{% endblock %}
 {% block content %}
-<h1>Application Settings</h1>
-<p style="color: var(--muted); margin-bottom: 1.5rem;">Manage all application configuration from the database. Changes take effect immediately.</p>
 
 <div id="settings-message" style="margin-bottom: 1rem;"></div>
 
@@ -152,6 +150,46 @@
     </label>
   </div>
 </div>
+
+<!-- Gmail Reply Detection Sync -->
+<div class="card" style="margin-top:1.5rem;">
+  <h2 style="margin-top: 0;">Gmail Reply Detection</h2>
+  <p style="color: var(--muted); margin-bottom: 1rem; font-size: 0.9rem;">
+    Enable near-real-time reply detection via Gmail Push + periodic fallback sync.
+  </p>
+
+  <div id="gmail-sync-message" style="margin-bottom:0.75rem;"></div>
+
+  <div class="form-group">
+    <label>Google Pub/Sub Topic (optional but recommended)</label>
+    <input type="text" id="gmail_push_topic" placeholder="projects/your-project/topics/gmail-replies">
+    <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+      If set, Gmail watch renewal runs automatically and push webhook can trigger immediate sync.
+    </small>
+  </div>
+
+  <div class="form-group">
+    <label>Webhook Token (optional)</label>
+    <input type="password" id="gmail_push_webhook_token" placeholder="shared-secret-token">
+    <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+      If set, webhook calls must include <code>?token=...</code> (or <code>X-Gmail-Webhook-Token</code> header).
+    </small>
+  </div>
+
+  <div class="form-group">
+    <label>Fallback Sync Interval (minutes)</label>
+    <input type="number" id="gmail_reply_sync_interval_minutes" min="1" max="60" value="5">
+    <small style="color: var(--muted); display: block; margin-top: 0.25rem;">
+      Background polling fallback interval. Takes effect after server restart.
+    </small>
+  </div>
+
+  <div style="display:flex; gap:0.6rem; flex-wrap: wrap;">
+    <button type="button" class="btn secondary" onclick="saveGmailSyncSettings()">Save Gmail Sync</button>
+    <button type="button" class="btn secondary" onclick="runGmailSyncNow()">Run Sync Now</button>
+    <button type="button" class="btn secondary" onclick="renewGmailWatchNow()">Renew Watch Now</button>
+  </div>
+</div>
   <div id="setup-instructions" class="card" style="margin-top:2rem; margin-bottom:2rem; display:none;">
     <h2 style="margin-top:0;">Setup Instructions — Google Cloud Console</h2>
     <p style="color:var(--muted); margin-bottom:1rem;">Follow these steps to get your <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code>.</p>
@@ -257,6 +295,18 @@ function showMessage(msg, isError) {
   setTimeout(() => { el.textContent = ''; el.style.background = ''; }, 5000);
 }
 
+function showGmailSyncMessage(msg, isError) {
+  const el = document.getElementById('gmail-sync-message');
+  el.className = 'card';
+  el.style.background = isError ? 'rgba(244, 63, 94, 0.1)' : 'rgba(52, 211, 153, 0.1)';
+  el.style.borderColor = isError ? 'var(--danger)' : 'var(--success)';
+  el.style.color = isError ? 'var(--danger)' : 'var(--success)';
+  el.style.padding = '0.5rem 0.75rem';
+  el.style.marginBottom = '0.75rem';
+  el.textContent = msg;
+  setTimeout(() => { el.textContent = ''; el.style.background = ''; el.style.padding = ''; }, 5000);
+}
+
 function toggleProviderSettings() {
   const provider = document.getElementById('email_provider').value;
   document.getElementById('resend-settings').style.display = provider === 'resend' ? '' : 'none';
@@ -305,6 +355,14 @@ async function loadSettings() {
     if (data.google_client_secret_configured && data.google_client_secret.includes('***')) {
       document.getElementById('google_client_secret').placeholder = 'Already configured (hidden)';
     }
+
+    // Gmail reply sync
+    document.getElementById('gmail_push_topic').value = data.gmail_push_topic || '';
+    document.getElementById('gmail_push_webhook_token').value = data.gmail_push_webhook_token || '';
+    if (data.gmail_push_webhook_token_configured && (data.gmail_push_webhook_token || '').includes('***')) {
+      document.getElementById('gmail_push_webhook_token').placeholder = 'Already configured (hidden)';
+    }
+    document.getElementById('gmail_reply_sync_interval_minutes').value = data.gmail_reply_sync_interval_minutes || 5;
     
   } catch (err) {
     showMessage('Failed to load settings: ' + err.message, true);
@@ -413,5 +471,66 @@ async function saveStrategy() {
 }
 
 loadStrategy();
+
+async function saveGmailSyncSettings() {
+  try {
+    const topic = document.getElementById('gmail_push_topic').value || '';
+    let token = document.getElementById('gmail_push_webhook_token').value || '';
+    const interval = parseInt(document.getElementById('gmail_reply_sync_interval_minutes').value, 10) || 5;
+
+    // Keep existing token if field is masked and unchanged.
+    if (token.includes('***')) {
+      const existing = await fetch('/api/settings/gmail-sync').then(r => r.json());
+      token = existing.webhook_token || '';
+    }
+
+    const res = await fetch('/api/settings/gmail-sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        push_topic: topic,
+        webhook_token: token,
+        sync_interval_minutes: Math.max(1, interval),
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Failed to save Gmail sync settings');
+    }
+    showGmailSyncMessage('Gmail sync settings saved. Restart server to apply interval changes.', false);
+    await loadSettings();
+  } catch (err) {
+    showGmailSyncMessage('Error: ' + err.message, true);
+  }
+}
+
+async function runGmailSyncNow() {
+  try {
+    const res = await fetch('/api/gmail/sync-now', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.detail || data.error || 'Sync failed');
+    }
+    showGmailSyncMessage(
+      `Sync done. Processed ${data.processed ?? 1} inbox(es), replies added: ${data.replies_added ?? 0}.`,
+      false
+    );
+  } catch (err) {
+    showGmailSyncMessage('Sync error: ' + err.message, true);
+  }
+}
+
+async function renewGmailWatchNow() {
+  try {
+    const res = await fetch('/api/gmail/watch/renew', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok || data.ok === false) {
+      throw new Error(data.detail || data.reason || 'Watch renewal failed');
+    }
+    showGmailSyncMessage(`Watch renewed for ${data.renewed ?? 0} inbox(es).`, false);
+  } catch (err) {
+    showGmailSyncMessage('Watch renewal error: ' + err.message, true);
+  }
+}
 </script>
 {% endblock %}
