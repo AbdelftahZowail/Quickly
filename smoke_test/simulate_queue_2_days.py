@@ -17,6 +17,14 @@ Usage:
     rows or delete QueueSlot rows (time will advance but no emails will be logged).
 """
 
+import os
+import sys
+
+# ensure project root is on sys.path when run directly as a script so that
+# ``import app`` works even though the script lives in the smoke_test subpackage.
+# identical logic is used in populate_test_data.py.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import argparse
 import asyncio
 import logging

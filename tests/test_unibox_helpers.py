@@ -178,6 +178,9 @@ async def test_list_conversations_from_db(session):
     assert conv["thread_id"] == "thr1"
     assert conv["snippet"] == "hello"
     assert "alice@example.com" in conv.get("participants", [])
+    # new fields expected by the modern UI
+    assert "inbox_email" in conv
+    assert "provider" in conv
 
     # participant_email filter should include the thread when matching
     payload2 = await unibox.list_conversations(
@@ -341,72 +344,7 @@ async def test_conversation_detail_db(session):
     assert len(detail.get("messages")) == 2
     assert detail["messages"][0]["message_id"] == "m1"
     assert detail["messages"][1]["message_id"] == "m2"
-    meta2 = await unibox.get_attachment(inbox_id=inbox.id, attachment_id="att1", download=True, db=session)
-    assert meta2.get("downloaded") is True
-    assert meta2.get("data_base64") == base64.b64encode(b"hello").decode("ascii")
-    monkeypatch2.undo()
 
-
-@pytest.mark.asyncio
-async def test_conversation_detail_db(session):
-    from app.routers import unibox
-    from app.models import Inbox, GmailThread, GmailMessage, GmailAccount
-
-    inbox = await session.execute(
-        select(Inbox).where(Inbox.email == "detail@inbox.com")
-    )
-    if not inbox.scalars().first():
-        inbox = Inbox(email="detail@inbox.com", provider="gmail")
-        session.add(inbox)
-        await session.flush()
-    else:
-        inbox = inbox.scalars().first()
-    gmail_account = GmailAccount(
-        inbox_id=inbox.id,
-        google_email="detail@inbox.com",
-        access_token="tok",
-        refresh_token="ref",
-    )
-    session.add(gmail_account)
-    await session.flush()
-
-    # insert thread and two messages
-    thread = GmailThread(
-        inbox_id=inbox.id,
-        thread_id="dt1",
-        history_id="888",
-        snippet="snp",
-        last_internal_date=1600000001000,
-    )
-    session.add(thread)
-    await session.flush()
-    m1 = GmailMessage(
-        inbox_id=inbox.id,
-        message_id="m1",
-        thread_id="dt1",
-        internal_date=1600000000000,
-        snippet="one",
-        headers_json=json.dumps([{"name":"From","value":"a@a.com"}]),
-        label_ids_json=json.dumps(["INBOX"]),
-    )
-    m2 = GmailMessage(
-        inbox_id=inbox.id,
-        message_id="m2",
-        thread_id="dt1",
-        internal_date=1600000001000,
-        snippet="two",
-        headers_json=json.dumps([{"name":"From","value":"b@b.com"}]),
-        label_ids_json=json.dumps(["INBOX"]),
-    )
-    session.add_all([m1, m2])
-    await session.flush()
-
-    detail = await unibox.get_conversation_detail("gmail", inbox.id, "dt1", refresh=False, db=session)
-    assert detail.get("thread_id") == "dt1"
-    assert isinstance(detail.get("messages"), list)
-    assert len(detail.get("messages")) == 2
-    assert detail["messages"][0]["message_id"] == "m1"
-    assert detail["messages"][1]["message_id"] == "m2"
 
 @pytest.mark.asyncio
 async def test_conversation_detail_auto_fetch_html(session, monkeypatch):

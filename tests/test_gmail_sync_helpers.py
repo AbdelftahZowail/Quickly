@@ -1,7 +1,9 @@
 import base64
 import json
 import pytest
+import asyncio
 from sqlalchemy import select
+import urllib.parse
 
 from app.gmail_sync import parse_gmail_push_payload
 
@@ -85,7 +87,15 @@ async def test_sync_history_invalidates_and_prefetches(
 
     # stub gmail API responses: history then thread metadata and message metadata
     def fake_request(token, url, method="GET", payload=None):
+        # verify comma-separated historyTypes is never used and values are valid
         if "history?" in url:
+            qry = urllib.parse.urlparse(url).query
+            assert "," not in qry
+            # check each parameter has allowed value
+            for part in qry.split('&'):
+                if part.startswith('historyTypes='):
+                    val = part.split('=',1)[1]
+                    assert val in ('messageAdded','messageDeleted','labelAdded','labelRemoved')
             return {
                 "historyId": "10",
                 "history": [
@@ -124,6 +134,46 @@ async def test_sync_history_invalidates_and_prefetches(
 
     result = await sync_gmail_history_for_account(session, inbox, gmail_account, hinted_history_id="1")
     assert result.get("ok")
+
+    # verify the thread/message were stored locally
+    from app.models import GmailThread, GmailMessage
+
+    thr = await session.get(GmailThread, (inbox.id, "thread123"))
+    assert thr is not None, "thread row not created"
+    msgrow = await session.get(GmailMessage, (inbox.id, "msg1"))
+    assert msgrow is not None, "message row not created"
+    assert msgrow.thread_id == "thread123"
+
+    # now simulate a messages-added event using labelsAdded shape; it should
+    # be treated equivalently by the sync routine.
+    def fake_request2(token, url, method="GET", payload=None):
+        if "history?" in url:
+            return {
+                "historyId": "20",
+                "history": [
+                    {"id": "2", "labelsAdded": [{"message": {"id": "msg2", "threadId": "thread456", "labelIds": ["INBOX"]}}]},
+                ],
+            }
+        if "/threads/" in url:
+            return {
+                "id": "thread456",
+                "historyId": "6",
+                "snippet": "snip2",
+                "messages": [
+                    {"id": "msg2", "threadId": "thread456", "internalDate": "1600000005000", "snippet": "world", "payload": {"headers": []}, "labelIds": ["INBOX"]},
+                ],
+            }
+        if "/messages/" in url:
+            return {"payload": {"headers": [{"name": "From", "value": "external@example.com"}]}}
+        return {}
+
+    monkeypatch.setattr("app.gmail_sync._gmail_request_json", fake_request2)
+    result2 = await sync_gmail_history_for_account(session, inbox, gmail_account)
+    assert result2.get("ok")
+    thr2 = await session.get(GmailThread, (inbox.id, "thread456"))
+    assert thr2 is not None
+    msg2 = await session.get(GmailMessage, (inbox.id, "msg2"))
+    assert msg2 is not None
     assert invalidated, "unibox caches were not invalidated"
     # previously we prefetched metadata, but the new mirror avoids extra calls
 
@@ -309,3 +359,125 @@ async def test_initial_sync_creates_threads(session, monkeypatch):
     assert thr is not None
     msgrow = await session.get(GmailMessage, (inbox.id, "mA"))
     assert msgrow is not None
+
+
+# --- new tests for webhook behaviour ------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_push_webhook_triggers_sync(monkeypatch, session):
+    """The /api/gmail/push endpoint should accept a valid payload and
+    enqueue a sync task with the provided email/history id.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+    from app.routers.gmail_sync import _run_single_sync_task
+    from app.app_settings import save_gmail_sync_config
+    from app.database import get_db
+
+    # make the API endpoints use the same session as this test fixture
+    async def _override_db():
+        yield session
+    app.dependency_overrides[get_db] = _override_db
+
+    # prepare a gmail sync config with a webhook token so authorization is required
+    await save_gmail_sync_config(session, push_topic="", webhook_token="secret", sync_interval_minutes=5)
+    await session.commit()
+
+    called: list[tuple[str, str]] = []
+
+    async def fake_run(email, history_id):
+        called.append((email, history_id))
+
+    monkeypatch.setattr("app.routers.gmail_sync._run_single_sync_task", fake_run)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # invalid payload should be accepted but ignored
+        resp = await client.post("/api/gmail/push?token=secret", json={"foo": "bar"})
+        assert resp.json().get("accepted") is False
+        # valid shape should queue a background task
+        payload = {"emailAddress": "test@inbox.com", "historyId": "42"}
+        resp = await client.post("/api/gmail/push?token=secret", json=payload)
+        assert resp.status_code == 200
+        assert resp.json().get("accepted") is True
+        # also try without any token; should still be accepted (warning logged)
+        resp = await client.post("/api/gmail/push", json=payload)
+        assert resp.status_code == 200
+        assert resp.json().get("accepted") is True
+        # give the event loop a moment for the fake task to run
+        await asyncio.sleep(0.01)
+    assert called == [("test@inbox.com", "42"), ("test@inbox.com", "42")]
+
+    # wrong token should still be rejected
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/gmail/push?token=wrong", json=payload)
+        assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_settings_save_triggers_watch_renewal(monkeypatch, session):
+    """POST /settings/gmail-sync should schedule a watch renewal job."""
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+    from app.database import get_db
+    called = False
+
+    # direct API calls should share the in-memory fixture session
+    async def _override_db():
+        yield session
+    app.dependency_overrides[get_db] = _override_db
+
+    async def fake_renew(db):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("app.gmail_sync.renew_gmail_watch_for_all", fake_renew)
+
+    payload = {"push_topic": "projects/foo/topics/bar", "webhook_token": "tok", "sync_interval_minutes": 3}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post("/api/settings/gmail-sync", json=payload)
+        assert resp.status_code == 200
+        # allow background task a moment to run
+        await asyncio.sleep(0.01)
+    assert called, "renew_gmail_watch_for_all was not called"
+
+
+@pytest.mark.asyncio
+async def test_conversation_list_refresh_runs_sync(monkeypatch, session):
+    """GET /unibox/conversations?refresh=true should invoke gmail sync logic."""
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+    from app.database import get_db
+    from app.models import Inbox
+
+    # route handlers should use our test session
+    async def _override_db():
+        yield session
+    app.dependency_overrides[get_db] = _override_db
+
+    called = {"all": False, "single": None}
+
+    async def fake_all(db):
+        called["all"] = True
+    async def fake_one(db, email):
+        called["single"] = email
+
+    monkeypatch.setattr("app.gmail_sync.sync_all_gmail_inboxes", fake_all)
+    monkeypatch.setattr("app.gmail_sync.sync_gmail_inbox_by_email", fake_one)
+
+    # create a gmail inbox row so that lookup by inbox_id works
+    inbox = Inbox(email="foo@test.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(f"/api/unibox/conversations?refresh=true&inbox_id={inbox.id}")
+        assert resp.status_code == 200
+    assert called["single"] == "foo@test.com"
+
+    # call again without specifying inbox_id should call sync_all
+    called["all"] = False
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/unibox/conversations?refresh=true")
+        assert resp.status_code == 200
+    assert called["all"]
+

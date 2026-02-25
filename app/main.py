@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+import asyncio
 
 # Configure logging so our debug messages show up
 logging.basicConfig(
@@ -70,21 +71,46 @@ async def lifespan(app: FastAPI):
     # perform a global recalculation on startup to ensure the queue reflects
     # any configuration changes that may have occurred while the server was down.
     # this addresses the "server starts/restarts" trigger from the docs.
-    from app.routers.calendar import recalculate_all_campaigns
-    async with AsyncSessionLocal() as session:
+    # we don't want to block startup so launch a background task with a brief
+    # delay; failures are logged but ignored.
+    from httpx import AsyncClient, ASGITransport
+
+    async def kickoff():
+        # give the server a moment to finish starting
+        await asyncio.sleep(1)
         try:
-            await recalculate_all_campaigns(session)
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.post("/api/calendar/recalculate-all")
+                resp.raise_for_status()
         except Exception as e:
-            # log but don't prevent the server from starting
             logging.getLogger("campaign_engine.routes").error(
                 "startup recalculation failed: %s", e
             )
+
+    # fire-and-forget; lifetime of task tied to event loop
+    asyncio.create_task(kickoff())
 
     yield
     scheduler.shutdown()
 
 
 app = FastAPI(title="Campaign Engine", lifespan=lifespan)
+
+# enable CORS so the frontend (running on a different port) can talk to
+# the API.  The UI typically runs at http://localhost:5173 during
+# development; allow it (and other origins, if needed).  We explicitly
+# list the origin(s) instead of using "*" to avoid issues with
+# credentials later, but using "*" is acceptable for a local dev setup.
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(inbox.router)
 app.include_router(leads.router)

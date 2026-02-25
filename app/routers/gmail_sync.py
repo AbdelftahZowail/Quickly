@@ -56,8 +56,16 @@ async def gmail_push_webhook(
     expected_token = str(sync_config.get("webhook_token") or "").strip()
     header_token = (request.headers.get("X-Gmail-Webhook-Token") or "").strip()
     provided_token = (token or header_token or "").strip()
-    if expected_token and provided_token != expected_token:
-        raise HTTPException(403, "Invalid webhook token")
+
+    # token is optional; if one is configured we log when it's missing but
+    # still accept the request.  this prevents failed deliveries when the
+    # push subscription was created without embedding the token (common during
+    # initial setup).  an explicit non-matching token is still rejected.
+    if expected_token:
+        if not provided_token:
+            log.warning("gmail_push_webhook: request without token while one is configured")
+        elif provided_token != expected_token:
+            raise HTTPException(403, "Invalid webhook token")
 
     asyncio.create_task(_run_single_sync_task(email_address, history_id))
     return {"ok": True, "accepted": True}

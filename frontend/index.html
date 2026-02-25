@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quickly</title>
+    <!-- favicon -->
+    <link rel="icon" href="/src/assets/quickly_logo.svg" />
+    <!-- pre‑react dark mode initializer to prevent flash -->
+    <script>
+      (function(){
+        try {
+          var pref = localStorage.getItem('darkreader');
+          if (pref === 'on') {
+            // add a temporary class to reduce white flash
+            document.documentElement.classList.add('darkreader-init');
+            var s = document.createElement('script');
+            s.src = 'https://unpkg.com/darkreader@4.9.120/darkreader.min.js';
+            s.onload = function() {
+              DarkReader.enable({brightness:100,contrast:90,sepia:0});
+              document.documentElement.classList.remove('darkreader-init');
+            };
+            document.head.appendChild(s);
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <style>
+      .darkreader-init { background: #111; color: #eee; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/index.jsx"></script>
+  </body>
+</html>

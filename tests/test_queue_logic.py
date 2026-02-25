@@ -10,6 +10,7 @@ Covers:
 import pytest
 from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
+import inspect
 
 from app.models import QueueSlot, EmailLog, CampaignLead
 from app.queue_logic import (
@@ -1424,6 +1425,107 @@ class TestApiRecalculationTriggers:
         slot_b2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_b.id))
         assert slot_b2.scalars().one().scheduled_date.date() < slot_a2.scalars().one().scheduled_date.date()
 
+
+class TestCampaignStats:
+    """Verify that campaign listing/get endpoints include aggregated metrics.
+
+    These metrics drive the simplified analytics view on the frontend and are
+    intentionally kept basic (lead count, emails sent, replies, sequences).
+    """
+
+    async def test_list_and_get_include_counts(self, session):
+        from app.routers.campaigns import list_campaigns, get_campaign
+        from app.models import LeadReply
+
+        camp = await make_campaign(session, name="stats-camp")
+        inbox = await make_inbox(session)
+        await make_campaign_inbox(session, camp.id, inbox.id)
+        # two sequences so expected emails = leads * 2
+        await make_sequence(session, camp.id, position=0)
+        await make_sequence(session, camp.id, position=1)
+
+        # two leads
+        lead1 = await make_lead(session, email="a@example.com")
+        await make_campaign_lead(session, camp.id, lead1.id)
+        lead2 = await make_lead(session, email="b@example.com")
+        await make_campaign_lead(session, camp.id, lead2.id)
+
+        # email logs: three total (two for lead1, one for lead2)
+        await make_email_log(session, lead1.id, camp.id, sequence_index=0)
+        await make_email_log(session, lead1.id, camp.id, sequence_index=1)
+        await make_email_log(session, lead2.id, camp.id, sequence_index=0)
+
+        # one reply
+        session.add(LeadReply(lead_id=lead1.id, campaign_id=camp.id))
+        await session.flush()
+
+        res_list = await list_campaigns(db=session)
+        assert len(res_list) == 1
+        stats = res_list[0].stats
+        assert stats.total_leads == 2
+        assert stats.sequences == 2
+        assert stats.emails_sent == 3
+        assert stats.replies == 1
+        # new fields default to zero
+        assert getattr(stats, 'open_rate', 0) == 0
+        assert getattr(stats, 'click_rate', 0) == 0
+
+        res_get = await get_campaign(camp.id, db=session)
+        assert res_get.stats == stats
+
+
+class TestCampaignsHasLeads:
+    """Endpoint used by front end to determine if strategy change needs a warning."""
+
+    async def test_no_leads_returns_false(self, session):
+        from app.routers.campaigns import campaigns_have_leads
+        res = await campaigns_have_leads(db=session)
+        assert res == {"has_leads": False}
+
+    async def test_with_lead_returns_true(self, session):
+        from app.routers.campaigns import campaigns_have_leads
+        camp = await make_campaign(session)
+        lead = await make_lead(session)
+        await make_campaign_lead(session, camp.id, lead.id)
+        res = await campaigns_have_leads(db=session)
+        assert res == {"has_leads": True}
+
+
+class TestSchedulingStrategyEndpoint:
+    async def test_change_queues_background_recalc(self, session):
+        # create a small campaign with one lead so the recalculation has work
+        camp = await make_campaign(session)
+        inbox = await make_inbox(session, max_emails_per_day=1)
+        await make_campaign_inbox(session, camp.id, inbox.id)
+        await make_sequence(session, camp.id, position=0)
+        lead = await make_lead(session)
+        await make_campaign_lead(session, camp.id, lead.id)
+
+        from fastapi import BackgroundTasks
+        from app.routers.settings import set_scheduling_strategy_endpoint, _SchedulingStrategyPayload
+        from app.app_settings import get_scheduling_strategy
+
+        tasks = BackgroundTasks()
+        result = await set_scheduling_strategy_endpoint(
+            _SchedulingStrategyPayload(scheduling_strategy="round_robin"),
+            background_tasks=tasks,
+            db=session,
+        )
+        assert result["scheduling_strategy"] == "round_robin"
+        assert tasks.tasks, "expected at least one background task"
+
+        # run queued tasks manually to exercise the background logic
+        for t in tasks.tasks:
+            func = t.func
+            args = getattr(t, 'args', ()) or ()
+            kwargs = getattr(t, 'kwargs', {}) or {}
+            if inspect.iscoroutinefunction(func):
+                await func(*args, **kwargs)
+            else:
+                func(*args, **kwargs)
+
+        strat = await get_scheduling_strategy(session)
+        assert strat == "round_robin"
 
 
 class TestOrderCampaignLeadsPrioritizingPartials:

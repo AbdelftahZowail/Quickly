@@ -1,5 +1,8 @@
 # Campaign Engine
 
+This project previously used server-rendered HTML templates. A new modern frontend has been added using React and Tailwind CSS. See the **Frontend** section below for details.
+
+
 Minimal email campaign tool for personal use: leads, campaigns with email sequences, and a smart queue that sends at the right time. No authentication required.
 
 ## Features
@@ -79,16 +82,25 @@ No authentication required on any endpoint.
 - Note: Creating standalone leads via `POST /api/leads` is not supported — use `POST /api/campaigns/{id}/leads` to create and enroll leads.
 
 ### Inboxes
-- `GET /api/inboxes` - List all inboxes
+- `GET /api/inboxes` - List all inboxes (each entry now includes a `sent_today` count reflecting how many emails have been sent from that inbox so far today).
 - `POST /api/inboxes` - Create inbox (body: `{email, display_name?, max_emails_per_day?, provider?}`)
 - `GET /api/inboxes/{id}` - Get single inbox
 - `PATCH /api/inboxes/{id}` - Update inbox
 - `DELETE /api/inboxes/{id}` - Delete inbox
 
 ### Campaigns
-- `GET /api/campaigns` - List all campaigns
+- `GET /api/campaigns` - List all campaigns (response now includes `stats` object containing totals for leads, emails sent, replies and sequence count)
 - `POST /api/campaigns` - Create campaign (body: `{name, inbox_ids, sending_days?, sending_hours_start?, sending_hours_end?, wait_minutes_between?, stop_on_reply?}`)
-- `GET /api/campaigns/{id}` - Get single campaign
+- `GET /api/campaigns/{id}` - Get single campaign (response includes a `stats` object with aggregated progress info)
+
+The frontend now includes an **Analytics** page (`/analytics`) which uses
+`GET /api/campaigns` to display per-campaign progress, reply rates, and will
+later surface open/click metrics.  A multi-select dropdown at the top lets
+you add campaigns to the view (leave blank to see all); selected names appear
+as tags that can be removed.  An area chart above the filter shows progress
+percentages for the displayed campaigns, and summary bar graphs show
+combined progress and reply rate.  Each row in the table also contains a
+mini bar for progress and reply rate for easier visual comparison.
 - `PATCH /api/campaigns/{id}` - Update campaign
 - `DELETE /api/campaigns/{id}` - Delete campaign
 - `POST /api/campaigns/{id}/duplicate` - Duplicate campaign with sequences
@@ -141,6 +153,81 @@ No authentication required on any endpoint.
 6. Assign leads to campaign - slots are automatically reserved across campaign's inboxes
 7. Monitor progress in **Calendar** page or via `/api/calendar/sent` and `/api/calendar/scheduled`
 8. Check `/api/status` to verify scheduler is running
+
+## Frontend development
+
+A new single‑page application is located in the `frontend/` directory. It was scaffolded with Vite, React 18, React Router and Tailwind CSS. The backend serves the production build as static files so everything can run under one domain (see **Hosting** below).
+
+### Getting started
+
+```bash
+cd frontend
+npm install          # or yarn
+npm run dev          # starts Vite dev server on localhost:5173
+```
+
+During development the React app provides the following routes:
+
+- `/` – dashboard with status and quick links
+- `/campaigns` – list, reorder, pause/duplicate/delete
+- `/campaigns/add` – form to create a campaign
+- `/campaigns/:id` – campaign details (sequences, leads, etc.; under construction)
+- `/inboxes` – manage sending inboxes with add/edit/delete, including Gmail OAuth flow
+- `/unibox` – (placeholder)
+- `/calendar` – (placeholder)
+- `/settings` – (placeholder)
+
+As you build new functionality you can add new React components under `frontend/src/pages`.
+
+During development the app proxies `/api` requests to `http://localhost:8000`, so you can run the FastAPI server side‑by‑side.
+
+### Building for production
+
+```bash
+cd frontend
+npm run build        # outputs static files to frontend/dist
+```
+
+Copy or serve the contents of `frontend/dist` from the backend's `static/` directory (see hosting instructions).
+
+### Hosting (single domain)
+
+1. **Build the frontend** as shown above.
+2. **Move the build**: either copy `frontend/dist/*` into `static/` at the project root or configure the backend to mount `frontend/dist` directly:
+
+   ```python
+   # app/main.py
+   from fastapi.staticfiles import StaticFiles
+   BASE_DIR = Path(__file__).resolve().parent.parent
+   app.mount("/", StaticFiles(directory=str(BASE_DIR / "frontend/dist"), html=True), name="frontend")
+   ```
+
+   the `html=True` flag makes FastAPI return `index.html` for unknown routes (SPA fallback). Remove or update the existing template routes if you migrate fully to React.
+
+3. **Run the backend**: `uvicorn app.main:app --host 0.0.0.0 --port 8000` (or via Gunicorn/Uvicorn for production). All UI traffic and API traffic share the same origin (`https://yourdomain.com`).
+
+4. **Reverse proxy (optional)**: In production you can put Nginx, Caddy, or Cloudflare Tunnel in front of the FastAPI process. Configure a catch‑all that forwards `/api` to the FastAPI app and serves static files for all other requests. Example Nginx snippet:
+
+   ```nginx
+   server {
+       listen 80;
+       server_name example.com;
+
+       location /api/ {
+           proxy_pass http://127.0.0.1:8000/api/;
+           proxy_set_header Host $host;
+       }
+
+       location / {
+           root /path/to/project/frontend/dist;
+           try_files $uri $uri/ /index.html;
+       }
+   }
+   ```
+
+5. **Single domain benefit**: cookies, OAuth callbacks and relative links all work without cross‑origin complications.
+
+You can continue serving the legacy Jinja templates during the migration by keeping both `app.mount("/static", ...)` and the template routes, or you may delete them once the React UI covers all pages.
 
 ## Template Variables
 

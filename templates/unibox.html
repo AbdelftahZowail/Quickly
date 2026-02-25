@@ -119,6 +119,7 @@ nav { margin-bottom: 0.75rem; }
   padding: 0.75rem 0.85rem;
   margin-bottom: 0.7rem;
   background: #121217;
+  color: var(--text);
 }
 .message.outgoing {
   border-color: rgba(34,211,238,0.45);
@@ -611,6 +612,8 @@ function renderThread() {
     wrapper.style.fontFamily = 'inherit';
     wrapper.style.fontSize = 'inherit';
     wrapper.style.lineHeight = 'inherit';
+    // inherit text color so dark bubbles don't hide email text
+    wrapper.style.color = 'inherit';
     wrapper.innerHTML = sanitizeEmailHtml(message.body_html);
     root.appendChild(wrapper);
   });

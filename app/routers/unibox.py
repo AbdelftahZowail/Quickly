@@ -787,7 +787,9 @@ async def _build_conversation_detail(
                     "cc_emails": cc_emails,
                     "subject": subject_header or "(no subject)",
                     "snippet": msgrow.snippet or "",
-                    "message_id": message_id_header,
+                    # prefer the Message-Id header when available, otherwise fall
+                    # back to the stored row id so we don't return an empty string.
+                    "message_id": message_id_header or msgrow.message_id,
                     "in_reply_to": in_reply_to,
                     "body_text": plain_body,
                     "body_html": html_body,
@@ -961,6 +963,29 @@ async def list_conversations(
         "cursor": decoded_cursor,
     }
     conversation_cache_key = _conversation_list_cache_key(cache_params)
+
+    # if the client explicitly requested a refresh we should also kick off a
+    # quick incremental sync before returning any cached results so the database
+    # reflects as much recent Gmail activity as possible.  this mirrors the
+    # front-end behaviour (which calls /gmail/sync-now) but ensures the server
+    # will stay up‑to‑date even if callers forget to trigger the explicit sync.
+    if refresh:
+        try:
+            from app.gmail_sync import sync_all_gmail_inboxes, sync_gmail_inbox_by_email
+            if inbox_id is not None:
+                # sync only this inbox (using its email for lookup)
+                result = await db.execute(
+                    select(Inbox).where(Inbox.id == inbox_id)
+                )
+                ib = result.scalar_one_or_none()
+                if ib and ib.email:
+                    await sync_gmail_inbox_by_email(db, ib.email)
+                else:
+                    await sync_all_gmail_inboxes(db)
+            else:
+                await sync_all_gmail_inboxes(db)
+        except Exception:
+            log.exception("refresh sync failed")
 
     async def attach_extras(payload: dict, inbox_rows: list | None = None) -> dict:
         out = dict(payload)

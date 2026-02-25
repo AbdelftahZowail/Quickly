@@ -2,39 +2,51 @@
 {% block title %}Inboxes{% endblock %}
 {% block content %}
 
-<div class="card" style="max-width: 520px; margin-bottom: 2rem;">
-  <h2 style="margin-top: 0;">Add inbox</h2>
-  <form id="add-inbox-form">
-    <div class="form-group">
-      <label>Provider</label>
-      <select name="provider" id="add-provider">
-        <option value="resend">Resend</option>
-        <option value="smtp">SMTP</option>
-        <option value="gmail">Gmail OAuth</option>
-      </select>
-    </div>
-    <div class="form-group" id="email-group">
-      <label>Email *</label>
-      <input type="email" name="email" placeholder="sales@company.com">
-    </div>
-    <div class="form-group">
-      <label>Display name</label>
-      <input type="text" name="display_name" placeholder="Sales Team">
-    </div>
-    <div class="form-group">
-      <label>Max emails per day</label>
-      <input type="number" name="max_emails_per_day" value="50" min="1" max="1000">
-    </div>
-    <div class="form-group">
-      <label>Wait between emails (minutes)</label>
-      <input type="number" name="wait_minutes_between" value="5" min="1" max="120">
-    </div>
-    <button type="submit" class="btn" id="add-inbox-btn">Add inbox</button>
-    <div id="oauth-warning" style="display:none; margin-top: 0.75rem; padding: 0.75rem; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: 4px; color: var(--text);">
-      ⚠️ You have to enter your credentials in the <a href="/settings" style="color: var(--accent); text-decoration: underline;">settings</a>.
-    </div>
-  </form>
-  <div id="form-message" style="margin-top: 0.75rem;"></div>
+<!-- add button & header -->
+<h1 style="margin-bottom:1rem;">
+  Inboxes
+  <button id="open-add" class="btn" style="float:right;">Add Inbox</button>
+</h1>
+
+<!-- add modal (hidden by default) -->
+<div id="add-modal" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:1000; align-items:center; justify-content:center;">
+  <div class="card" style="max-width:520px; margin:2rem;">
+    <h2 style="margin-top:0;">Add inbox</h2>
+    <form id="add-inbox-form">
+      <div class="form-group">
+        <label>Provider</label>
+        <select name="provider" id="add-provider">
+          <option value="resend">Resend</option>
+          <option value="smtp">SMTP</option>
+          <option value="gmail">Gmail OAuth</option>
+        </select>
+      </div>
+      <div class="form-group" id="email-group">
+        <label>Email *</label>
+        <input type="email" name="email" placeholder="sales@company.com">
+      </div>
+      <div class="form-group">
+        <label>Display name</label>
+        <input type="text" name="display_name" placeholder="Sales Team">
+      </div>
+      <div class="form-group">
+        <label>Max emails per day</label>
+        <input type="number" name="max_emails_per_day" value="50" min="1" max="1000">
+      </div>
+      <div class="form-group">
+        <label>Wait between emails (minutes)</label>
+        <input type="number" name="wait_minutes_between" value="5" min="1" max="120">
+      </div>
+      <div style="display:flex; gap:0.5rem; margin-top:1rem;">
+        <button type="submit" class="btn" id="add-inbox-btn">Add inbox</button>
+        <button type="button" class="btn secondary" id="close-add">Cancel</button>
+      </div>
+      <div id="oauth-warning" style="display:none; margin-top: 0.75rem; padding: 0.75rem; background: rgba(239, 68, 68, 0.1); border: 1px solid var(--danger); border-radius: 4px; color: var(--text);">
+        ⚠️ You have to enter your credentials in the <a href="/settings" style="color: var(--accent); text-decoration: underline;">settings</a>.
+      </div>
+    </form>
+    <div id="form-message" style="margin-top: 0.75rem;"></div>
+  </div>
 </div>
 
 <h2>Inbox list</h2>
@@ -140,6 +152,26 @@ async function checkOAuthStatus() {
 
 checkOAuthStatus();
 
+// wire up modal open/close
+const openAddBtn = document.getElementById('open-add');
+const closeAddBtn = document.getElementById('close-add');
+const addModal = document.getElementById('add-modal');
+if (openAddBtn) {
+  openAddBtn.addEventListener('click', () => {
+    addModal.style.display = 'flex';
+    // reset form state
+    document.getElementById('add-inbox-form').reset();
+    addProviderSelect.value = 'resend';
+    updateFormForProvider();
+    document.getElementById('form-message').innerHTML = '';
+  });
+}
+if (closeAddBtn) {
+  closeAddBtn.addEventListener('click', () => {
+    addModal.style.display = 'none';
+  });
+}
+
 async function loadInboxes() {
   const listEl = document.getElementById('inbox-list');
   try {
@@ -149,7 +181,7 @@ async function loadInboxes() {
       listEl.innerHTML = '<p class="card">No inboxes yet. Add one above to use in campaigns.</p>';
       return;
     }
-    listEl.innerHTML = '<table><thead><tr><th>Email</th><th>Display name</th><th>Provider</th><th>Max/day</th><th>Wait (min)</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>';
+    listEl.innerHTML = '<table><thead><tr><th>Email</th><th>Display name</th><th>Provider</th><th>Max/day</th><th>Sent today</th><th>Wait (min)</th><th>Created</th><th></th></tr></thead><tbody></tbody></table>';
     const tbody = listEl.querySelector('tbody');
     inboxes.forEach(i => {
       const tr = document.createElement('tr');
@@ -158,6 +190,7 @@ async function loadInboxes() {
         <td>${escapeHtml(i.display_name || '—')}</td>
         <td><span class="badge">${escapeHtml(i.provider || 'resend')}</span></td>
         <td>${i.max_emails_per_day}</td>
+        <td>${(i.sent_today||0)} of ${i.max_emails_per_day}</td>
         <td>${i.wait_minutes_between || 5}</td>
         <td>${new Date(i.created_at).toLocaleDateString()}</td>
         <td>
@@ -214,6 +247,8 @@ document.getElementById('add-inbox-form').addEventListener('submit', async (e) =
       form.provider.value = 'resend';
       updateFormForProvider();
       loadInboxes();
+      // hide modal now that it's done
+      if (addModal) addModal.style.display = 'none';
     } else {
       const text = await res.text();
       msgEl.innerHTML = '<span style="color: var(--danger)">' + escapeHtml(text) + '</span>';

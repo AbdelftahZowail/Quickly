@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, exists
 
 from app.database import get_db
-from app.models import Inbox, CampaignInbox, QueueSlot
+from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog
 from app.schemas import InboxCreate, InboxUpdate, InboxResponse
 
 log = logging.getLogger("campaign_engine.routes")
@@ -15,8 +15,29 @@ router = APIRouter(prefix="/api/inboxes", tags=["inboxes"])
 
 @router.get("", response_model=list[InboxResponse])
 async def list_inboxes(db: AsyncSession = Depends(get_db)):
+    # fetch all inboxes first
     result = await db.execute(select(Inbox).order_by(Inbox.id))
-    return result.scalars().all()
+    inboxes = result.scalars().all()
+
+    # compute how many emails have been sent today per inbox by grouping
+    from sqlalchemy import func
+    from datetime import datetime, timedelta
+
+    today = datetime.utcnow().date()
+    start = datetime(today.year, today.month, today.day)
+    end = start + timedelta(days=1)
+
+    # count logs per inbox in period
+    count_res = await db.execute(
+        select(EmailLog.inbox_id, func.count(EmailLog.id))
+        .where(EmailLog.sent_at >= start, EmailLog.sent_at < end)
+        .group_by(EmailLog.inbox_id)
+    )
+    counts = {row[0]: row[1] for row in count_res.all()}
+
+    for i in inboxes:
+        i.sent_today = counts.get(i.id, 0)
+    return inboxes
 
 
 @router.post("", response_model=InboxResponse)
@@ -40,6 +61,22 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+
+    # attach today's sent count as above
+    from sqlalchemy import func
+    from datetime import datetime, timedelta
+    today = datetime.utcnow().date()
+    start = datetime(today.year, today.month, today.day)
+    end = start + timedelta(days=1)
+    count_res = await db.execute(
+        select(func.count(EmailLog.id))
+        .where(
+            EmailLog.inbox_id == inbox_id,
+            EmailLog.sent_at >= start,
+            EmailLog.sent_at < end,
+        )
+    )
+    inbox.sent_today = count_res.scalar() or 0
     return inbox
 
 

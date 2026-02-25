@@ -61,7 +61,6 @@ tr.drag-over td { border-top: 2px solid var(--accent); }
 
   let _campaigns = [];
   let _strategy  = 'priority';
-  let _inboxMap  = {};
 
   // Drag-and-drop
   let dragSrcIdx = null;
@@ -117,23 +116,29 @@ tr.drag-over td { border-top: 2px solid var(--accent); }
     const headExtra = isPriority
       ? '<th style="width:2rem;"></th><th style="width:2.5rem;color:var(--muted);font-size:0.8rem;">#</th>'
       : '';
-    listEl.innerHTML = `<table><thead><tr>${headExtra}<th>Name</th><th>Inboxes</th><th>Sending</th><th></th></tr></thead><tbody id="camp-tbody"></tbody></table>`;
+    listEl.innerHTML = `<table><thead><tr>${headExtra}<th>Name</th><th>Status</th><th>Progress</th><th>Replies</th><th></th></tr></thead><tbody id="camp-tbody"></tbody></table>`;
     const tbody = document.getElementById('camp-tbody');
     _campaigns.forEach((c, idx) => {
       const tr = document.createElement('tr');
       tr.dataset.idx = idx;
       tr.dataset.id  = c.id;
-      const ids        = c.inbox_ids || [];
-      const inboxLabel = ids.length === 0 ? '&mdash;'
-                       : ids.length === 1 ? escapeHtml(_inboxMap[ids[0]] || 'id ' + ids[0])
-                                          : ids.length + ' inboxes';
-      const days       = (c.sending_days || []).length;
       const pauseLabel = c.paused ? 'Resume' : 'Pause';
       const pauseClass = c.paused ? 'btn' : 'btn secondary';
       const nameHtml   = c.paused
         ? `<span style="color:var(--muted);">${escapeHtml(c.name)} <span class="badge" style="background:rgba(244,63,94,0.2);color:var(--danger);">PAUSED</span></span>`
         : `<a href="/campaigns/${c.id}">${escapeHtml(c.name)}</a>`;
       const safeName   = escapeHtml(c.name).replace(/'/g, "\\'");
+      const stats      = c.stats || {};
+      const totalLeads = stats.total_leads || 0;
+      const emailsSent = stats.emails_sent || 0;
+      const sequences  = stats.sequences || 1;
+      const expected   = totalLeads * sequences;
+      const percent    = expected > 0 ? Math.round((emailsSent / expected) * 100) : 0;
+      const replies    = stats.replies || 0;
+      const replyRate  = emailsSent > 0 ? Math.round((replies / emailsSent) * 100) : 0;
+      const progressBar = `<div style="width:8rem;background:#eee;border-radius:4px;overflow:hidden;display:inline-block;">
+                             <div style="background:#22d3ee;width:${percent}%;height:0.6rem;"></div>
+                           </div>`;
       const actions    = `<td style="display:flex;gap:0.4rem;flex-wrap:wrap;">
           <a href="/campaigns/${c.id}" class="btn secondary">View</a>
           <button class="${pauseClass}" onclick="togglePause(${c.id},${c.paused},'${safeName}')">${pauseLabel}</button>
@@ -166,15 +171,11 @@ tr.drag-over td { border-top: 2px solid var(--accent); }
   }
 
   async function load() {
-    const [campRes, inboxRes, stratRes] = await Promise.all([
+    const [campRes, stratRes] = await Promise.all([
       fetch('/api/campaigns'),
-      fetch('/api/inboxes'),
       fetch('/api/settings/scheduling-strategy').catch(() => ({ ok: false, json: async () => ({}) })),
     ]);
     _campaigns = await campRes.json();
-    const inboxes = await inboxRes.json();
-    _inboxMap = Object.fromEntries(inboxes.map(i => [i.id, i.email]));
-    const stratData = stratRes.ok ? await stratRes.json() : {};
     _strategy = stratData.scheduling_strategy || 'priority';
     saveBtn.style.display = 'none';
     savedMsg.style.display = 'none';

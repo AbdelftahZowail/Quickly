@@ -8,7 +8,17 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
-from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Lead, Inbox, EmailLog, CampaignInbox
+from app.models import (
+    Campaign,
+    Sequence,
+    CampaignLead,
+    QueueSlot,
+    Lead,
+    Inbox,
+    EmailLog,
+    CampaignInbox,
+    LeadReply,
+)
 from app.schemas import (
     CampaignCreate,
     CampaignUpdate,
@@ -25,7 +35,14 @@ log = logging.getLogger("campaign_engine.routes")
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 
 
-def _campaign_to_response(campaign: Campaign, inbox_ids: list[int]) -> CampaignResponse:
+def _campaign_to_response(
+    campaign: Campaign,
+    inbox_ids: list[int],
+    stats: dict | None = None,
+) -> CampaignResponse:
+    # ``stats`` is a map with keys matching the fields of CampaignStats
+    if stats is None:
+        stats = {}
     return CampaignResponse(
         id=campaign.id,
         name=campaign.name,
@@ -38,6 +55,7 @@ def _campaign_to_response(campaign: Campaign, inbox_ids: list[int]) -> CampaignR
         paused=campaign.paused if hasattr(campaign, 'paused') else False,
         priority=campaign.priority if hasattr(campaign, 'priority') else 0,
         created_at=campaign.created_at,
+        stats=stats,
     )
 
 
@@ -58,14 +76,67 @@ async def _get_inbox_ids_for_campaigns(db: AsyncSession, campaign_ids: list[int]
 
 @router.get("", response_model=list[CampaignResponse])
 async def list_campaigns(db: AsyncSession = Depends(get_db)):
+    # retrieve base objects
     result = await db.execute(select(Campaign).order_by(Campaign.priority, Campaign.id))
     campaigns = result.scalars().all()
     campaign_ids = [c.id for c in campaigns]
     inbox_map = await _get_inbox_ids_for_campaigns(db, campaign_ids)
+    # gather aggregate stats in a few grouped queries
+    stats_map: dict[int, dict] = {}
+    if campaign_ids:
+        # lead counts
+        res = await db.execute(
+            select(CampaignLead.campaign_id, func.count())
+            .where(CampaignLead.campaign_id.in_(campaign_ids))
+            .group_by(CampaignLead.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["total_leads"] = cnt
+        # email counts
+        res = await db.execute(
+            select(EmailLog.campaign_id, func.count())
+            .where(EmailLog.campaign_id.in_(campaign_ids))
+            .group_by(EmailLog.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["emails_sent"] = cnt
+        # reply counts
+        res = await db.execute(
+            select(LeadReply.campaign_id, func.count())
+            .where(LeadReply.campaign_id.in_(campaign_ids))
+            .group_by(LeadReply.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["replies"] = cnt
+        # sequence counts (for calculating potential total emails)
+        res = await db.execute(
+            select(Sequence.campaign_id, func.count())
+            .where(Sequence.campaign_id.in_(campaign_ids))
+            .group_by(Sequence.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["sequences"] = cnt
     return [
-        _campaign_to_response(c, inbox_map.get(c.id, []))
+        _campaign_to_response(c, inbox_map.get(c.id, []), stats_map.get(c.id))
         for c in campaigns
     ]
+
+
+# utility used by Settings.jsx before changing strategy – the front end can
+# ask for confirmation when there are active leads that would be
+# re-scheduled by a strategy switch.
+@router.get("/has-leads")
+async def campaigns_have_leads(db: AsyncSession = Depends(get_db)):
+    """Return whether any campaign currently contains enrolled leads.
+
+    The frontend periodically calls this when the scheduling strategy is
+    about to be changed so that the user can be warned before triggering a
+    potentially expensive global recalculation.
+    """
+    # counting rows is cheaper than loading objects
+    result = await db.execute(select(func.count(CampaignLead.id)))
+    count = result.scalar() or 0
+    return {"has_leads": bool(count)}
 
 
 @router.post("", response_model=CampaignResponse)
@@ -141,7 +212,37 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     if not campaign:
         raise HTTPException(404, "Campaign not found")
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
-    return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
+    # compute stats for single campaign
+    stats: dict = {}
+    # lead count
+    res = await db.execute(
+        select(func.count())
+        .select_from(CampaignLead)
+        .where(CampaignLead.campaign_id == campaign_id)
+    )
+    stats["total_leads"] = res.scalar() or 0
+    # emails
+    res = await db.execute(
+        select(func.count())
+        .select_from(EmailLog)
+        .where(EmailLog.campaign_id == campaign_id)
+    )
+    stats["emails_sent"] = res.scalar() or 0
+    # replies
+    res = await db.execute(
+        select(func.count())
+        .select_from(LeadReply)
+        .where(LeadReply.campaign_id == campaign_id)
+    )
+    stats["replies"] = res.scalar() or 0
+    # sequences
+    res = await db.execute(
+        select(func.count())
+        .select_from(Sequence)
+        .where(Sequence.campaign_id == campaign_id)
+    )
+    stats["sequences"] = res.scalar() or 0
+    return _campaign_to_response(campaign, inbox_map.get(campaign_id, []), stats)
 
 
 @router.delete("/{campaign_id}")

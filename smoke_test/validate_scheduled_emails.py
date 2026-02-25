@@ -9,6 +9,15 @@ This script checks:
 Usage:
     python validate_scheduled_emails.py
 """
+import os
+import sys
+
+# When running this validation helper directly its containing directory is placed
+# on the import path, meaning ``import app`` would fail.  Prepend the project
+# root so that sibling packages are resolvable.  This mirrors the change made in
+# other smoke_test utilities.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import asyncio
 import logging
 from datetime import datetime, date, time, timedelta

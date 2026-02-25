@@ -1,3 +1,14 @@
+import os
+import sys
+
+# when this helper is invoked directly (e.g. ``python smoke_test/populate_test_data.py``)
+# the interpreter adds the *smoke_test* directory to sys.path as entry 0, which means
+# sibling packages such as ``app`` are not visible.  The tests and other callers
+# execute the module with ``-m`` or from the project root, so this isn’t an issue
+# for normal usage, but being invoked as a script is convenient at the shell.  To
+# make that work we explicitly prepend the workspace root to sys.path here.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import asyncio
 import random
 from datetime import date, timedelta

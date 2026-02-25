@@ -1,7 +1,7 @@
 """Settings API routes for managing configuration."""
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -181,6 +181,7 @@ async def get_gmail_sync_settings(db: AsyncSession = Depends(get_db)):
 @router.post("/gmail-sync")
 async def save_gmail_sync_settings(
     config: GmailSyncConfig,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Persist Gmail push/poll sync settings."""
@@ -196,6 +197,24 @@ async def save_gmail_sync_settings(
             sync_interval_minutes=max(1, int(config.sync_interval_minutes or 5)),
         )
         await db.commit()
+        # if a push topic is configured we should renew watches immediately so
+        # incoming messages will trigger sync right away instead of waiting for
+        # the six‑hour renewal job. schedule this as a background task to avoid
+        # blocking the request.
+        from app.gmail_sync import renew_gmail_watch_for_all
+        from app.database import AsyncSessionLocal
+
+        async def _renew():
+            async with AsyncSessionLocal() as session:
+                try:
+                    await renew_gmail_watch_for_all(session)
+                    await session.commit()
+                except Exception:
+                    await session.rollback()
+                    log.exception("automatic watch renewal failed after settings update")
+
+        background_tasks.add_task(_renew)
+
         return {"ok": True, "message": "Gmail sync settings saved. Restart server to apply new interval."}
     except Exception as e:
         log.error("save_gmail_sync_settings failed: %s", e)
@@ -253,9 +272,20 @@ class _SchedulingStrategyPayload(_BaseModel):
 @router.post("/scheduling-strategy")
 async def set_scheduling_strategy_endpoint(
     payload: _SchedulingStrategyPayload,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Set the scheduling strategy used by *Recalculate All*.
+
+    Changing the strategy affects the way ``Recalculate All`` distributes
+    leads across campaigns.  Historically we would perform a full
+    recalculation synchronously, but this can take several seconds when the
+    database is large and it is unnecessary to block the request.  Instead
+    we now schedule the work in a background task and return immediately.
+
+    The frontend should warn the user if there are already leads enrolled in
+    any campaign prior to making this request; it can check by calling
+    ``GET /api/campaigns/has-leads`` and show a confirmation dialog.
 
     - **priority** – campaigns are processed in ascending ``priority`` order;
       use ``POST /api/campaigns/reorder`` to define that order.
@@ -264,7 +294,29 @@ async def set_scheduling_strategy_endpoint(
     """
     try:
         await set_scheduling_strategy(db, payload.scheduling_strategy)
+        # commit before kicking off background work so that any subsequent
+        # recalculation sees the new value.
         await db.commit()
+
+        # schedule recalculation by POSTing to the public endpoint
+        # `/api/calendar/recalculate-all`.  This mirrors the startup logic in
+        # ``app.main`` and ensures any middleware or side effects run through
+        # the normal request machinery.  We do not wait for the request to
+        # complete before returning to the caller.
+        from httpx import AsyncClient, ASGITransport
+        from app.main import app
+
+        async def _bg_recalc():
+            try:
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    resp = await client.post("/api/calendar/recalculate-all")
+                    resp.raise_for_status()
+            except Exception:
+                log.exception("background recalculation via endpoint failed")
+
+        background_tasks.add_task(_bg_recalc)
+
         return {"ok": True, "scheduling_strategy": payload.scheduling_strategy}
     except ValueError as e:
         raise HTTPException(400, str(e))

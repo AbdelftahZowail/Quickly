@@ -596,15 +596,33 @@ async def sync_gmail_history_for_account(
     current_history_id = start_history_id
     next_page_token = ""
     pages = 0
-    max_pages = 8
 
     try:
-        while pages < max_pages:
+        # history requests may page for a long time if the account is very active.
+        # the previous implementation capped the loop at 8 pages which could leave
+        # the local mirror stale in high‑volume environments.  Rather than hard
+        # limit we iterate until no token (or a very high safety cap) and log if
+        # we ever do hit a safety threshold.
+        while True:
             pages += 1
+            if pages > 50:
+                log.warning(
+                    "sync_gmail_history_for_account: too many history pages for inbox %s",
+                    inbox.id,
+                )
+                break
+
+            # Gmail requires each historyTypes value as a separate query
+            # parameter; a comma-separated list will trigger a 400 error (seen
+            # in production when push notifications arrive).  build the URL
+            # manually to ensure we repeat the key.
             history_url = (
                 f"{GMAIL_API_BASE}/history?"
                 f"startHistoryId={urllib.parse.quote(start_history_id)}"
-                "&historyTypes=messageAdded,messageDeleted,labelsAdded,labelsRemoved"
+                "&historyTypes=messageAdded"
+                "&historyTypes=messageDeleted"
+                "&historyTypes=labelAdded"
+                "&historyTypes=labelRemoved"
                 "&labelId=INBOX"
                 "&maxResults=500"
             )
@@ -619,6 +637,9 @@ async def sync_gmail_history_for_account(
                 history_item_id = str(item.get("id") or "").strip()
                 if history_item_id:
                     current_history_id = history_item_id
+
+                # messagesAdded events are the most common when a new message
+                # lands in the inbox.
                 for added in item.get("messagesAdded") or []:
                     message = added.get("message") or {}
                     message_id = str(message.get("id") or "").strip()
@@ -631,6 +652,24 @@ async def sync_gmail_history_for_account(
                     tid = message_candidates[message_id].get("thread_id")
                     if tid:
                         thread_ids.add(tid)
+
+                # occasionally Gmail reports that a message gains the INBOX label
+                # via the labelsAdded array rather than messagesAdded.  handle that
+                # case as well so we don't miss threads moved into inbox after
+                # initial delivery.
+                for lbl in item.get("labelsAdded") or []:
+                    message = lbl.get("message") or {}
+                    message_id = str(message.get("id") or "").strip()
+                    if not message_id:
+                        continue
+                    message_candidates[message_id] = {
+                        "thread_id": str(message.get("threadId") or "").strip(),
+                        "label_ids": list(message.get("labelIds") or []),
+                    }
+                    tid = message_candidates[message_id].get("thread_id")
+                    if tid:
+                        thread_ids.add(tid)
+
                 # TODO: could handle deletes/label changes here if desired
 
             next_page_token = str(payload.get("nextPageToken") or "").strip()

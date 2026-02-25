@@ -51,6 +51,8 @@ class InboxResponse(BaseModel):
     wait_minutes_between: int
     provider: str
     created_at: datetime
+    # how many emails have been sent from this inbox **today** (UTC)
+    sent_today: int = 0
 
     class Config:
         from_attributes = True
@@ -105,6 +107,26 @@ class CampaignUpdate(BaseModel):
     priority: Optional[int] = None  # Lower value = processed first in priority scheduling
 
 
+class CampaignStats(BaseModel):
+    """Aggregated metrics that help the frontend display progress/analytics.
+
+    The fields here are intentionally very basic today (lead count, emails
+    sent, replies, number of sequences) but they give a single place to grow
+    later when we want open rates, positive replies, click rate, etc.  They
+    default to zero when no data exists.  ``open_rate`` and ``click_rate``
+    are expressed as floats between 0.0 and 1.0 and currently always zero.
+    """
+    total_leads: int = 0
+    emails_sent: int = 0
+    replies: int = 0
+    sequences: int = 0
+    open_rate: float = 0.0
+    click_rate: float = 0.0
+
+    class Config:
+        from_attributes = True
+
+
 class CampaignResponse(BaseModel):
     id: int
     name: str
@@ -117,6 +139,10 @@ class CampaignResponse(BaseModel):
     paused: bool
     priority: int
     created_at: datetime
+
+    # new stats object; the frontend can always rely on ``stats`` being
+    # present and it initially contains zeros.
+    stats: CampaignStats = CampaignStats()
 
     class Config:
         from_attributes = True

@@ -29,6 +29,12 @@
   font-size: 0.88rem;
   transition: background 0.1s;
 }
+.email-row.header {
+  cursor: default;
+  font-weight: 600;
+  background: var(--surface);
+}
+.email-row.header:hover { background: var(--surface); }
 .email-row:hover { background: rgba(34,211,238,0.04); }
 .email-row.expanded { background: rgba(34,211,238,0.06); }
 
@@ -46,6 +52,12 @@
 .badge-status.sent { background: rgba(52,211,153,0.15); color: var(--success); }
 .badge-status.scheduled { background: rgba(34,211,238,0.15); color: var(--accent); }
 .badge-status.failed { background: rgba(244,63,94,0.15); color: var(--danger); }
+
+/* lead status badges used in summary row */
+.badge.active { background: rgba(52,211,153,0.2); color: var(--success); }
+.badge.unsubscribed { background: rgba(113,113,122,0.3); color: var(--muted); }
+.badge.bounced { background: rgba(244,63,94,0.2); color: var(--danger); }
+.badge.replied { background: rgba(34,211,238,0.2); color: var(--accent); }
 
 /* Detail panel */
 .detail-panel {
@@ -113,6 +125,7 @@
 <!-- Filters -->
 <div class="cal-toolbar">
   <select id="filter-campaign"><option value="">All campaigns</option></select>
+  <!-- header is added dynamically in script -->
   <select id="filter-status">
     <option value="">All statuses</option>
     <option value="sent">Sent</option>
@@ -155,6 +168,11 @@ async function safeFetch(url, fallback) {
 }
 
 async function loadData() {
+  // make sure buttons reset if something left them busy
+  const recalcBtn = document.getElementById('recalc-all-btn');
+  const validateBtn = document.getElementById('validate-queue-btn');
+  if (recalcBtn) { recalcBtn.disabled = false; recalcBtn.textContent = '⚡ Recalculate All Campaigns'; }
+  if (validateBtn) { validateBtn.disabled = false; validateBtn.textContent = '🔍 Validate Queue'; }
   const [sent, scheduled, stats, serverStatus, strategyData] = await Promise.all([
     safeFetch('/api/calendar/sent', []),
     safeFetch('/api/calendar/scheduled', []),
@@ -334,7 +352,7 @@ function buildRow(item, uid) {
   let html = `<div class="email-row${isExpanded ? ' expanded' : ''}" onclick="toggleRow('${uid}')">
     <div class="time-col">${time}</div>
     <div class="status-col"><span class="badge-status ${statusCls}">${statusLabel}</span></div>
-    <div class="lead-col" title="${escapeHtml(item.lead_email)}">${escapeHtml(item.lead_email)}</div>
+    <div class="lead-col" title="${escapeHtml(item.lead_email)}">${escapeHtml(item.lead_email)}${item.lead_status?` <span class=\"badge ${item.lead_status}\">${item.lead_status}</span>`:''}</div>
     <div class="subj-col" title="${escapeHtml(subject)}">${escapeHtml(subject)}</div>
     <div class="camp-col" title="${escapeHtml(item.campaign_name)}">${escapeHtml(item.campaign_name)}</div>
     <div class="inbox-col" title="${escapeHtml(inboxLabel)}">${escapeHtml(inboxLabel)}</div>
@@ -405,6 +423,15 @@ function buildRow(item, uid) {
 function render() {
   const f = getFilters();
   const el = document.getElementById('calendar-body');
+  // insert header row at top of calendar body if there are items
+  const headerHtml = `<div class="email-row header">
+        <div class="time-col">Time</div>
+        <div class="status-col">Status</div>
+        <div class="lead-col">Lead</div>
+        <div class="subj-col">Subject</div>
+        <div class="camp-col">Campaign</div>
+        <div class="inbox-col">Inbox</div>
+      </div>`;
   const today = new Date().toISOString().slice(0,10);
 
   // Split sent into past items
@@ -464,6 +491,10 @@ function render() {
     });
   }
 
+  // if we built any rows, stick the header at the top
+  if (html) {
+    html = headerHtml + html;
+  }
   el.innerHTML = html;
 }
 
