@@ -8,7 +8,7 @@ from app.database import get_db
 from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog
 from app.schemas import InboxCreate, InboxUpdate, InboxResponse
 
-log = logging.getLogger("campaign_engine.routes")
+log = logging.getLogger("quickly.routes")
 
 router = APIRouter(prefix="/api/inboxes", tags=["inboxes"])
 

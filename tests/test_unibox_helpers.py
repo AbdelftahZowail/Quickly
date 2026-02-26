@@ -155,6 +155,11 @@ async def test_list_conversations_from_db(session):
     session.add(msg)
     await session.flush()
 
+    # clear any conversation/server caches to force fresh DB read
+    from app.routers.unibox import _CONVERSATION_LIST_CACHE, _SERVER_CONTEXT_CACHE
+    _CONVERSATION_LIST_CACHE.clear()
+    _SERVER_CONTEXT_CACHE.clear()
+
     payload = await unibox.list_conversations(
         inbox_id=None,
         server_only=False,
@@ -181,6 +186,7 @@ async def test_list_conversations_from_db(session):
     # new fields expected by the modern UI
     assert "inbox_email" in conv
     assert "provider" in conv
+    assert conv["provider"] == inbox.provider
 
     # participant_email filter should include the thread when matching
     payload2 = await unibox.list_conversations(
@@ -200,6 +206,112 @@ async def test_list_conversations_from_db(session):
         db=session,
     )
     assert payload2.get("items")
+
+
+@pytest.mark.asyncio
+async def test_list_conversations_non_gmail_provider(session):
+    """Server‑only conversation for a non‑Gmail inbox should show that inbox's
+    provider rather than "server".
+    """
+    from app.routers import unibox
+    from app.models import Inbox, EmailLog, Lead, Campaign
+
+    # create a basic lead/campaign/log linked to an SMTP inbox
+    inbox = Inbox(email="smtpconv@i.com", provider="smtp")
+    session.add(inbox)
+    await session.flush()
+
+    lead = Lead(email="a@b.com")
+    campaign = Campaign(name="foo")
+    session.add_all([lead, campaign])
+    await session.flush()
+
+    log = EmailLog(
+        inbox_id=inbox.id,
+        lead_id=lead.id,
+        campaign_id=campaign.id,
+        subject="hello",
+        message_id="m",
+    )
+    session.add(log)
+    await session.flush()
+
+    # clear caches just in case
+    from app.routers.unibox import _CONVERSATION_LIST_CACHE, _SERVER_CONTEXT_CACHE
+    _CONVERSATION_LIST_CACHE.clear()
+    _SERVER_CONTEXT_CACHE.clear()
+
+    payload3 = await unibox.list_conversations(
+        inbox_id=None,
+        server_only=False,
+        has_lead=False,
+        participant_email=None,
+        q=None,
+        cursor=None,
+        page_size=40,
+        refresh=False,
+        include_inboxes=False,
+        include_detail=False,
+        detail_provider=None,
+        detail_inbox_id=None,
+        detail_thread_id=None,
+        db=session,
+    )
+    items = payload3.get("items")
+    assert items and len(items) >= 1
+    providers = {item["provider"] for item in items}
+    assert "smtp" in providers
+
+
+@pytest.mark.asyncio
+async def test_reply_uses_inbox_provider(session, monkeypatch):
+    from app.routers.unibox import reply_in_thread, UniboxReplyRequest
+
+    # create a non-gmail inbox and stub send_email so we can observe the args
+    from app.models import Inbox
+    inbox = Inbox(email="smtp@i.com", provider="smtp")
+    session.add(inbox)
+    await session.flush()
+
+    sent = {}
+    def fake_send_email(**kwargs):
+        sent.update(kwargs)
+        # simulate a successful send
+        class DummyResult:
+            message_id = "x"
+            thread_id = None
+        return DummyResult()
+    monkeypatch.setattr("app.routers.unibox.send_email", fake_send_email)
+
+    body = UniboxReplyRequest(
+        provider="smtp",
+        inbox_id=inbox.id,
+        thread_id="irrelevant",
+        to_email="foo@bar",
+        subject="hey",
+        body="body",
+        is_html=False,
+    )
+    # should not raise
+    await reply_in_thread(body, db=session)
+    assert sent.get("provider") == "smtp"
+    assert sent.get("from_email") == "smtp@i.com"
+    assert sent.get("subject") == "hey"
+
+    # and if an inbox without a provider is used we should get a 400
+    inbox2 = Inbox(email="noprov@i.com", provider="")
+    session.add(inbox2)
+    await session.flush()
+    body2 = UniboxReplyRequest(
+        inbox_id=inbox2.id,
+        thread_id="irrelevant",
+        to_email="foo@bar",
+        subject="hey",
+        body="body",
+    )
+    with pytest.raises(Exception) as excinfo:
+        await reply_in_thread(body2, db=session)
+    assert "no provider" in str(excinfo.value).lower()
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from app.settings_manager import settings
 from app.database import get_db
 from app.models import Inbox, GmailAccount
 
-log = logging.getLogger("campaign_engine.gmail_oauth")
+log = logging.getLogger("quickly.gmail_oauth")
 
 router = APIRouter(tags=["gmail-oauth"])
 

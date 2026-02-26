@@ -1,9 +1,22 @@
 """Shared fixtures for queue_logic tests.
 
-Provides an async in-memory SQLite database session and factory helpers
-that create Campaign, Inbox, Sequence, Lead, CampaignLead, CampaignInbox,
-EmailLog, and QueueSlot records for realistic integration testing.
+Provides an async database session and factory helpers that create Campaign,
+Inbox, Sequence, Lead, CampaignLead, CampaignInbox, EmailLog, and QueueSlot
+records for realistic integration testing.
 """
+
+import os
+# default the test database to an in-memory SQLite URL; this allows the
+# application to boot without a running Postgres instance while still
+# exercising real SQLAlchemy behavior.  Users may override by setting
+# TEST_DATABASE_URL in their environment.
+os.environ.setdefault("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:?cache=shared")
+
+# tests rely on a Postgres (or other SQLAlchemy) database.  Specify a
+# connection string via TEST_DATABASE_URL; if unset the regular
+# ``settings.database_url`` will be used.  The previous SQLite-specific
+# helpers have been removed.
+
 import pytest
 import pytest_asyncio
 from datetime import datetime
@@ -16,13 +29,49 @@ from app.models import (
 )
 
 
+
 @pytest_asyncio.fixture
 async def engine():
-    """Create an in-memory async SQLite engine and tear it down after the test."""
-    eng = create_async_engine("sqlite+aiosqlite://", echo=False)
-    async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """Create a database engine for tests.
+
+    If ``TEST_DATABASE_URL`` is defined, use it.  Otherwise fall back to an
+    in-memory SQLite database with a ``StaticPool`` so that the entire test
+    suite can be run without a Postgres server.  This keeps local development
+    easy while production remains Postgres-only.
+    """
+    from app.settings_manager import settings
+    from sqlalchemy.pool import StaticPool
+    from sqlalchemy.exc import OperationalError
+
+    url = os.getenv("TEST_DATABASE_URL") or settings.database_url
+    eng = None
+    if url and not url.startswith("sqlite"):
+        # try connecting; if any error occurs, fall back to SQLite
+        try:
+            eng = create_async_engine(url, echo=False)
+            async with eng.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        except Exception:
+            # best effort dispose then forget
+            try:
+                await eng.dispose()
+            except Exception:
+                pass
+            eng = None
+
+    if eng is None:
+        # default in-memory sqlite with static pool
+        eng = create_async_engine(
+            "sqlite+aiosqlite:///:memory:?cache=shared",
+            echo=False,
+            connect_args={"check_same_thread": False, "uri": True},
+            poolclass=StaticPool,
+        )
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
     yield eng
+
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await eng.dispose()

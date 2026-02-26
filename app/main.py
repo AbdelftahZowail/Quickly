@@ -11,7 +11,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
-logging.getLogger("campaign_engine").setLevel(logging.DEBUG)
+logging.getLogger("quickly").setLevel(logging.DEBUG)
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
                 resp = await client.post("/api/calendar/recalculate-all")
                 resp.raise_for_status()
         except Exception as e:
-            logging.getLogger("campaign_engine.routes").error(
+            logging.getLogger("quickly.routes").error(
                 "startup recalculation failed: %s", e
             )
 
@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown()
 
 
-app = FastAPI(title="Campaign Engine", lifespan=lifespan)
+app = FastAPI(title="Quickly", lifespan=lifespan)
 
 # enable CORS so the frontend (running on a different port) can talk to
 # the API.  The UI typically runs at http://localhost:5173 during

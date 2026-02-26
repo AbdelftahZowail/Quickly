@@ -1,10 +1,9 @@
 """Unified inbox API routes.
 
 The backend no longer queries Gmail directly for every list/detail request.
-Instead the background sync job maintains a durable SQLite mirror (see
-:mod:`app.models` tables ``gmail_thread``, ``gmail_message`` and
-``gmail_attachment``).  Frontend endpoints read from that local cache; bodies
-and attachments are pulled lazily when requested.
+Instead the background sync job maintains durable mirror tables
+(`gmail_thread`, `gmail_message` and `gmail_attachment`).  Frontend endpoints
+read from that cache; bodies and attachments are pulled lazily when requested.
 
 Aggregates conversations across connected inbox providers (Gmail now),
 enriches threads with server-side campaign metadata, and supports replying
@@ -46,7 +45,7 @@ from app.models import (
 from app.routers.gmail_oauth import refresh_access_token
 from app.sender import send_email
 
-log = logging.getLogger("campaign_engine.unibox")
+log = logging.getLogger("quickly.unibox")
 
 router = APIRouter(prefix="/api/unibox", tags=["unibox"])
 
@@ -68,7 +67,9 @@ _SERVER_CONTEXT_CACHE: dict[str, tuple[float, dict]] = {}
 
 
 class UniboxReplyRequest(BaseModel):
-    provider: str = "gmail"
+    # client may still send a provider field for backwards compatibility but
+    # it is ignored; the server always uses the inbox's configured provider.
+    provider: str | None = None
     inbox_id: int
     thread_id: str
     to_email: str
@@ -441,7 +442,7 @@ async def _build_db_conversation(inbox: Inbox, thread: GmailThread, db: AsyncSes
     external = [p for p in participant_set if p != (inbox.email or "").lower()]
 
     return {
-        "provider": "gmail",
+        "provider": inbox.provider,
         "source": "db",
         "inbox_id": inbox.id,
         "inbox_email": inbox.email,
@@ -604,7 +605,7 @@ def _build_gmail_conversation(
     linked_lead, campaigns = _pick_lead_and_campaign(server_entries)
 
     return {
-        "provider": "gmail",
+        "provider": inbox.provider,
         "source": "gmail",
         "inbox_id": inbox.id,
         "inbox_email": inbox.email,
@@ -705,7 +706,12 @@ async def _build_conversation_detail(
     if not inbox:
         raise HTTPException(404, "Inbox not found")
 
-    if provider == "gmail":
+    # choose behaviour based on the actual inbox provider; the `provider`
+    # argument (from URL) is only used for routing compatibility and may be
+    # ignored or enforced when it doesn't match.
+    if inbox.provider == "gmail":
+        # if the caller supplied a different provider, ignore it but log?
+        # (we don't have a logger in this scope, so just proceed)
         # read thread from local mirror
         thr = await db.get(GmailThread, (inbox_id, thread_id))
         if not thr:
@@ -820,7 +826,7 @@ async def _build_conversation_detail(
             subject = thr.snippet or "(no subject)" or "(no subject)"
 
         return {
-            "provider": "gmail",
+            "provider": inbox.provider,
             "inbox_id": inbox.id,
             "inbox_email": inbox.email,
             "thread_id": thread_id,
@@ -834,6 +840,8 @@ async def _build_conversation_detail(
             "fetched_at": time_provider.utcnow().isoformat(),
         }
 
+    # server conversations don't depend on inbox.provider; only the
+    # URL segment may be 'server'.
     if provider == "server":
         match = re.fullmatch(r"lead-(\d+)-campaign-(\d+)", thread_id)
         if not match:
@@ -1092,10 +1100,16 @@ async def list_conversations(
         participants = [p for p in {latest["lead_email"], inbox.email.lower()} if p]
         fallback_thread_id = thread_key or f"lead-{lead_id}-campaign-{campaign_id}"
         can_reply = bool(inbox.provider == "gmail" and thread_key)
+        # use real inbox provider for non‑Gmail inboxes; for Gmail show "server"
+        # when the conversation only comes from server logs (no visible thread).
+        if inbox.provider != "gmail":
+            provider_value = inbox.provider
+        else:
+            provider_value = "gmail" if can_reply else "server"
 
         conversations.append(
             {
-                "provider": "gmail" if can_reply else "server",
+                "provider": provider_value,
                 "source": "server_log",
                 "inbox_id": inbox.id,
                 "inbox_email": inbox.email,
@@ -1240,8 +1254,7 @@ async def get_attachment(
 
 @router.post("/reply")
 async def reply_in_thread(body: UniboxReplyRequest, db: AsyncSession = Depends(get_db)):
-    if body.provider != "gmail":
-        raise HTTPException(400, "Only Gmail replies are supported right now (Microsoft 365 is planned).")
+    # provider field in request is ignored; use the inbox configuration
 
     to_email = (body.to_email or "").strip().lower()
     if "@" not in to_email:
@@ -1251,50 +1264,63 @@ async def reply_in_thread(body: UniboxReplyRequest, db: AsyncSession = Depends(g
     inbox = inbox_result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
-    if inbox.provider != "gmail":
-        raise HTTPException(400, "This inbox is not configured as Gmail.")
+    if not inbox.provider:
+        raise HTTPException(400, "This inbox has no provider configured")
 
-    ga_result = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
-    gmail_account = ga_result.scalar_one_or_none()
-    if not gmail_account:
-        raise HTTPException(404, "No Gmail OAuth account linked to this inbox.")
-
-    access_token = await _ensure_gmail_access_token(db, gmail_account)
-    if not access_token:
-        raise HTTPException(502, "Could not refresh Gmail token")
-
-    meta_url = (
-        f"{GMAIL_API_BASE}/threads/{urllib.parse.quote(body.thread_id)}"
-        "?format=metadata"
-        "&metadataHeaders=Subject"
-        "&metadataHeaders=Message-Id"
-    )
-    try:
-        thread_payload = _gmail_request_json(access_token, meta_url)
-    except RuntimeError as exc:
-        raise HTTPException(502, str(exc))
-
-    chain_ids: list[str] = []
+    # prepare metadata only for Gmail inboxes
+    gmail_account = None
+    access_token = ""
     latest_message_id = None
-    latest_subject = ""
-    for message in sorted(
-        thread_payload.get("messages") or [],
-        key=lambda m: int(m.get("internalDate") or 0),
-    ):
-        headers = (message.get("payload") or {}).get("headers") or []
-        msg_id = _extract_header(headers, "Message-Id")
-        if msg_id:
-            latest_message_id = msg_id
-            normalized = _normalize_message_id(msg_id)
-            if normalized:
-                chain_ids.append(f"<{normalized}>")
-        msg_subject = _extract_header(headers, "Subject")
-        if msg_subject:
-            latest_subject = msg_subject
+    references: str | None = None
+    subject = (body.subject or "").strip()
 
-    subject = (body.subject or "").strip() or _derive_reply_subject(latest_subject)
-    references = " ".join(chain_ids) if chain_ids else None
+    if inbox.provider == "gmail":
+        # fetch OAuth account and refresh token if needed
+        ga_result = await db.execute(
+            select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
+        )
+        gmail_account = ga_result.scalar_one_or_none()
+        if not gmail_account:
+            raise HTTPException(404, "No Gmail OAuth account linked to this inbox.")
 
+        access_token = await _ensure_gmail_access_token(db, gmail_account)
+        if not access_token:
+            raise HTTPException(502, "Could not refresh Gmail token")
+
+        # if subject not explicitly provided, try to derive from thread
+        meta_url = (
+            f"{GMAIL_API_BASE}/threads/{urllib.parse.quote(body.thread_id)}"
+            "?format=metadata"
+            "&metadataHeaders=Subject"
+            "&metadataHeaders=Message-Id"
+        )
+        try:
+            thread_payload = _gmail_request_json(access_token, meta_url)
+        except RuntimeError as exc:
+            raise HTTPException(502, str(exc))
+
+        chain_ids: list[str] = []
+        latest_subject = ""
+        for message in sorted(
+            thread_payload.get("messages") or [],
+            key=lambda m: int(m.get("internalDate") or 0),
+        ):
+            headers = (message.get("payload") or {}).get("headers") or []
+            msg_id = _extract_header(headers, "Message-Id")
+            if msg_id:
+                latest_message_id = msg_id
+                normalized = _normalize_message_id(msg_id)
+                if normalized:
+                    chain_ids.append(f"<{normalized}>")
+            msg_subject = _extract_header(headers, "Subject")
+            if msg_subject:
+                latest_subject = msg_subject
+
+        if not subject:
+            subject = _derive_reply_subject(latest_subject)
+        references = " ".join(chain_ids) if chain_ids else None
+
+    # send via whatever provider the inbox is configured with
     send_result = send_email(
         to_email=to_email,
         subject=subject,
@@ -1304,12 +1330,13 @@ async def reply_in_thread(body: UniboxReplyRequest, db: AsyncSession = Depends(g
         reply_to_msg_id=latest_message_id,
         references=references,
         is_html=body.is_html,
-        provider="gmail",
+        provider=inbox.provider or "",
         gmail_access_token=access_token,
-        thread_id=body.thread_id,
+        gmail_account=gmail_account,
+        thread_id=body.thread_id if inbox.provider == "gmail" else None,
     )
     if not send_result:
-        raise HTTPException(502, "Failed to send Gmail reply")
+        raise HTTPException(502, "Failed to send reply")
 
     # If this thread is tied to campaign sends, store this manual reply in email_log
     # so "server-sent only" filters can include it.

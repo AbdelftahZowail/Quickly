@@ -528,7 +528,9 @@ function setReplyState(detail) {
   const composeEl = document.getElementById('reply-compose');
   statusEl.textContent = '';
 
-  if (!detail || !detail.can_reply || detail.provider !== 'gmail') {
+  // reply is allowed for any conversation that has can_reply true; the
+  // inbox provider determines how the backend sends it.
+  if (!detail || !detail.can_reply) {
     form.style.display = 'none';
     disabled.style.display = '';
     if (composeEl) composeEl.classList.remove('active');

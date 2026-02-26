@@ -18,7 +18,7 @@ from app.gmail_sync import (
 )
 from app.models import GmailSyncState, Inbox
 
-log = logging.getLogger("campaign_engine.gmail_sync_router")
+log = logging.getLogger("quickly.gmail_sync_router")
 
 router = APIRouter(tags=["gmail-sync"])
 

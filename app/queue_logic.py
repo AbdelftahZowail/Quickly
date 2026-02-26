@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, EmailLog, CampaignInbox
 
-log = logging.getLogger("campaign_engine.queue")
+log = logging.getLogger("quickly.queue")
 
 
 def _parse_time(s: str) -> time:

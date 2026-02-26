@@ -62,7 +62,7 @@ async def run_send_job():
         for inbox in inboxes:
             # For Gmail inboxes, pre-fetch and refresh the access token
             gmail_token = ""
-            inbox_provider = getattr(inbox, "provider", "") or ""
+            inbox_provider = getattr(inbox, "provider", "") or settings.email_provider or ""
             if inbox_provider == "gmail":
                 ga_result = await session.execute(
                     select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)

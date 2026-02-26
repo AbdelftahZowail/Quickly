@@ -1,14 +1,19 @@
 from fastapi.testclient import TestClient
-
 from app.main import app
 
 
 def test_calendar_api_basic_endpoints():
+    # explicitly initialize the database before exercising routes; the
+    # in-memory SQLite engine used by tests sometimes doesn't persist
+    # tables across the lifespan startup phase, so we prepare it manually.
+    import asyncio
+    from app.database import init_db
+
+    asyncio.run(init_db())
+    client = TestClient(app)
     """Verify that the calendar-related APIs exist and return the expected
     shape even when the database is empty.
     """
-    client = TestClient(app)
-
     # stats endpoint should succeed and return integer counts
     resp = client.get("/api/calendar/stats")
     assert resp.status_code == 200

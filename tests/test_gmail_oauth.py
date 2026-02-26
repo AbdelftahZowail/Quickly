@@ -1,10 +1,16 @@
 from fastapi.testclient import TestClient
 import json
 
+
+
+
 from app.main import app
 
-
 def test_google_callback_creates_inbox(monkeypatch):
+    import asyncio
+    from app.database import init_db
+    asyncio.run(init_db())
+    client = TestClient(app)
     """A callback request without an explicit background_tasks query should
     succeed and redirect to the inboxes page.  Previously FastAPI treated the
     missing ``background_tasks`` argument as a required query parameter when
@@ -29,8 +35,11 @@ def test_google_callback_creates_inbox(monkeypatch):
         "app.app_settings.get_google_oauth_credentials",
         fake_get_google_oauth_credentials,
     )
+    # avoid any background sync attempts which would call external APIs
+    # patch the helper functions used inside the local _post_connect_tasks
+    monkeypatch.setattr("app.gmail_sync.sync_gmail_inbox_by_email", lambda *args, **kwargs: None)
+    monkeypatch.setattr("app.gmail_sync.renew_gmail_watch_for_all", lambda *args, **kwargs: None)
 
-    client = TestClient(app)
 
     state = json.dumps({"display_name": "Foo", "max_per_day": 10})
     # use `params` to ensure proper URL encoding of the JSON string
@@ -41,6 +50,8 @@ def test_google_callback_creates_inbox(monkeypatch):
     )
     # should redirect back to inboxes with our email (303 before following)
     assert resp.status_code == 303
+
+    # verify the endpoint still works when using the shared client fixture above
     location = resp.headers.get("location", "")
     assert "/inboxes" in location
     assert "connected=test%40example.com" in location

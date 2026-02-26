@@ -10,7 +10,7 @@ export default function Home() {
 
   return (
     <div className="p-8">
-      <h1 className="text-3xl font-bold">Campaign Engine</h1>
+      <h1 className="text-3xl font-bold">Quickly</h1>
       <p className="mt-4 text-gray-600">Simple email campaigns: leads, sequences, and a smart queue. No login.</p>
       <div className="mt-8 grid grid-cols-1 md:grid-cols-3 gap-4">
         <Link to="/campaigns" className="card p-4 bg-white rounded shadow hover:bg-gray-50">

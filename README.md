@@ -1,4 +1,4 @@
-# Campaign Engine
+# Quickly
 
 This project previously used server-rendered HTML templates. A new modern frontend has been added using React and Tailwind CSS. See the **Frontend** section below for details.
 
@@ -16,29 +16,62 @@ Minimal email campaign tool for personal use: leads, campaigns with email sequen
 
 ## Quick Start
 
+This project now uses **PostgreSQL only** for its datastore.  Since the
+codebase is pre‑release and no real data exists, the SQLite support has been
+removed and all old migration code deleted – starting the server will create
+a clean Postgres schema.
+
+You need a Postgres server and a database (e.g. `quickly`).  Provide the
+connection URI either via the web UI settings after the first launch or by
+setting the `DATABASE_URL` environment variable before starting the server.
+
+### Running the test suite
+
+By default the test harness will use an **in‑memory SQLite database**.  This
+is controlled via `TEST_DATABASE_URL`, which is automatically set to
+`sqlite+aiosqlite:///:memory:?cache=shared` by the `conftest.py` fixture.  You
+may override this with a Postgres connection string if you want to exercise the
+full backend:
+
 ```bash
-cd "Campaign Engine 2"
+export TEST_DATABASE_URL="postgresql+asyncpg://user:pass@localhost/test_db"
+pytest
+```
+
+The suite will create/drop tables on every run, so point it at a disposable
+database.  SQLite is convenient for local development; Postgres gives a closer
+match to production but is not required.
+
+If you do use SQLite the project still requires `aiosqlite` (listed in
+`requirements.txt`) to support the fallback.  Production deployments may omit
+that dependency.
+
+```bash
+cd "Quickly"
 python -m venv .venv
 .venv\Scripts\activate   # Windows
 pip install -r requirements.txt
+# Example env var for local Postgres (replace user/password/host as needed):
+set DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/quickly
 uvicorn app.main:app --reload
 ```
+
 
 Open http://127.0.0.1:8000 for the web UI. Navigate between pages:
 - **Home** (`/`) - Dashboard and status
 - **Campaigns** (`/campaigns`) - Manage campaigns and sequences
 - **Inboxes** (`/inboxes`) - Configure sending addresses
 - **Calendar** (`/calendar`) - View sent and scheduled emails
-- **Settings** (`/settings`) - Configure email provider and app settings
+- **Settings** (`/settings`) - Configure app settings and defaults (individual inboxes determine their own send provider)
 
 **When do emails send?** The send job runs only while the server is running (`uvicorn app.main:app`). By default it runs every 1 minute (configurable in Settings). To confirm it's running: check the server console for log lines like `Send job running at ...` and `Send job finished: N email(s) sent`, or call **GET /api/status** to see `scheduler_running`, `last_send_job_run`, and `next_send_job_run`.
 
 ## Configuration
 
-**All settings are managed from the web UI:** Navigate to the **Settings** page (http://127.0.0.1:8000/settings) to configure:
+**All settings are managed from the web UI:** Navigate to the **Settings** page (http://127.0.0.1:8000/settings) to configure (including your `database_url` if you didn't set it via environment):
 
 - **General Settings**: Base URL, queue check interval
-- **Email Provider**: Choose between Resend, SMTP, or Gmail OAuth
+- **Email Provider**: Choose between Resend, SMTP, or Gmail OAuth  (this value is used as a default; each inbox has its own provider setting)
   - **Resend**: Enter your API key from [resend.com/api-keys](https://resend.com/api-keys)
   - **SMTP**: Configure host, port, username, password, TLS
   - **Gmail OAuth**: Enter Google Client ID and Secret from Google Cloud Console, then link Gmail accounts from the Inboxes page
@@ -46,7 +79,15 @@ Open http://127.0.0.1:8000 for the web UI. Navigate between pages:
 
 Settings are stored in the database and changes take effect immediately (no restart required).
 
-**Legacy `.env` file**: No longer used. The old environment variable approach has been replaced with database storage for easier management. See [SETTINGS_MIGRATION.md](SETTINGS_MIGRATION.md) for migration details.
+**Environment variables and `.env` files**: the application still reads a handful of
+settings from the environment at startup (primarily `DATABASE_URL`). A
+`.env` file in the project root will be loaded automatically via
+`python-dotenv`, so you can keep your connection string and other initial
+values there. On initial startup the values are written to the database;
+thereafter the web UI (or the settings API) is the normal way to make
+changes. **Test mode is managed from the Settings page and is stored in the
+database — environment variables are no longer required.** See
+[SETTINGS_MIGRATION.md](SETTINGS_MIGRATION.md) for migration details.
 
 ## Test Mode
 
@@ -125,12 +166,15 @@ mini bar for progress and reply rate for easier visual comparison.
 - `GET /api/calendar/stats` - Aggregate statistics (sent today, scheduled today, total leads, etc.)
 
 ### Settings
-- `GET /api/settings` - Get all settings
-- `PUT /api/settings` - Update settings (body: full settings object)
-- `GET /api/settings/test-mode` - Get test mode status
-- `POST /api/settings/test-mode` - Update test mode (body: `{enabled: boolean}`)
-- `GET /api/settings/google-oauth` - Get Google OAuth credentials
-- `POST /api/settings/google-oauth` - Update Google OAuth credentials (body: `{client_id, client_secret}`)
+Most configuration is now managed via environment variables (see `.env.example`).
+The web UI no longer allows editing provider credentials, API keys, SMTP details,
+or other sensitive values; those should be defined in your `.env` file or
+exported in the environment before starting the server.  Only the
+scheduling strategy is adjustable at runtime, and dark/light mode is purely a
+client‑side preference.
+
+- `GET /api/settings/scheduling-strategy` – retrieve current strategy
+- `POST /api/settings/scheduling-strategy` – update strategy (body `{scheduling_strategy}`)
 
 ### Gmail OAuth
 - `GET /api/gmail/status` - Gmail OAuth configuration status

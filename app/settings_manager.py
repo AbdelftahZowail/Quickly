@@ -2,12 +2,20 @@
 
 Replaces the old .env-based config system. Settings are loaded from the database
 at startup and cached in memory for fast synchronous access.
+
+Environment variables are still respected on startup (see README or
+SETUP_POSTGRES_WINDOWS.md). A `.env` file in the project root will be loaded by
+python-dotenv automatically.
 """
+from dotenv import load_dotenv
 import logging
 from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
-log = logging.getLogger("campaign_engine.settings")
+# load environment variables from .env file if present
+load_dotenv()
+
+log = logging.getLogger("quickly.settings")
 
 
 class Settings:
@@ -15,12 +23,25 @@ class Settings:
     
     def __init__(self):
         # Database
-        self.database_url: str = "sqlite+aiosqlite:///./campaign.db"
+        # By default the application connects to PostgreSQL.  Override via
+        # ``DATABASE_URL`` (or ``TEST_DATABASE_URL`` when running tests).
+        import os
+
+        # some defaults can be overridden via environment variables; any values
+        # stored in the database will supersede these once the app has started.
+        self.database_url: str = os.getenv(
+            "DATABASE_URL",
+            "postgresql+asyncpg://postgres:postgres@localhost/quickly",
+        )
         
-        # Base URL
-        self.base_url: str = "http://localhost:8000"
+        # Base URL (used by Google redirect calculation, links, etc.)
+        self.base_url: str = os.getenv("BASE_URL", "http://localhost:8000")
         
         # Email provider
+        # Historically this default was used by send_email when no provider was
+        # specified.  Today individual inbox records carry their own provider and
+        # callers should pass that value; the global setting is mostly kept for
+        # backwards compatibility and for display in the UI.
         self.email_provider: Literal["resend", "smtp", "gmail"] = "resend"
         
         # Resend API
@@ -34,17 +55,32 @@ class Settings:
         self.smtp_use_tls: bool = False
         
         # Google OAuth (also stored in AppSetting for backward compat)
-        self.google_client_id: str = ""
-        self.google_client_secret: str = ""
+        self.google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
+        self.google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
         
         # Background job interval
         self.queue_check_interval_minutes: int = 1
         
         # Test mode
-        self.test_mode: bool = False
+        # the default may be overridden by the TEST_MODE environment variable
+        # (true/1/yes for enabled).  The value is persisted in the database
+        # once the application initializes; DB entries always take
+        # precedence thereafter.
+        self.test_mode: bool = os.getenv("TEST_MODE", "false").lower() in (
+            "true",
+            "1",
+            "yes",
+        )
 
         # Time travel offset (integer days). 0 means real now.
-        self.time_offset_days: int = 0
+        # Can be overridden via the TIME_OFFSET_DAYS environment variable when
+        # the application first starts (useful for tests or quick manual
+        # adjustments).  The live value is stored in the database and usually
+        # controlled via the simulate_queue_2_days script or the web UI.
+        try:
+            self.time_offset_days: int = int(os.getenv("TIME_OFFSET_DAYS", "0"))
+        except ValueError:
+            self.time_offset_days = 0
     
     @property
     def google_redirect_uri(self) -> str:

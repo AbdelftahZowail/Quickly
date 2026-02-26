@@ -546,11 +546,18 @@ class EmailScheduleValidator:
         self.result.total_capacity = total_capacity
         self.result.total_empty_slots = total_capacity - total_used
         
-        log.info(
-            f"Queue efficiency: {total_used}/{total_capacity} slots used "
-            f"({((total_used/total_capacity)*100):.1f}% utilization), "
-            f"{self.result.total_empty_slots} empty slots"
-        )
+        # avoid division by zero when there is no capacity at all
+        if total_capacity > 0:
+            pct = (total_used / total_capacity) * 100
+            log.info(
+                f"Queue efficiency: {total_used}/{total_capacity} slots used "
+                f"({pct:.1f}% utilization), "
+                f"{self.result.total_empty_slots} empty slots"
+            )
+        else:
+            log.info(
+                "Queue efficiency: no capacity (empty inboxes or no scheduled slots)"
+            )
     
     # ========================================================================
     # ADD NEW VALIDATION CHECKS BELOW

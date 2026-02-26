@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting
 
-log = logging.getLogger("campaign_engine.app_settings")
+log = logging.getLogger("quickly.app_settings")
 
 # Canonical keys ---------------------------------------------------------------
 GOOGLE_CLIENT_ID_KEY = "google_client_id"

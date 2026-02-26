@@ -25,7 +25,7 @@ from app import time as time_provider
 from app.models import GmailAccount
 from app.routers.gmail_oauth import refresh_access_token  # needed for token refresh when sending via gmail
 
-log = logging.getLogger("campaign_engine.sender")
+log = logging.getLogger("quickly.sender")
 
 
 @dataclass
@@ -443,11 +443,15 @@ def send_email(
     thread_id: Optional[str] = None,
 ) -> Optional[SendResult]:
     """
-    Send one email. Route based on provider:
+    Send one email. The caller **must** specify a provider, typically the one
+    configured on the sending inbox. The global EMAIL_PROVIDER setting is no
+    longer consulted; it was previously used as a fallback but that behaviour
+    caused confusion when an inbox had a different provider.
+
+    Route based on provider:
       - "gmail"  → Gmail API with OAuth token
       - "resend" → Resend SDK (if API key set)
       - "smtp"   → SMTP
-    Falls back to the global EMAIL_PROVIDER setting if provider is empty.
 
     Returns a SendResult with message_id (RFC 822) and thread_id (Gmail only),
     or None on failure.
@@ -457,8 +461,10 @@ def send_email(
         still gets logged to DB / email_log as if it was delivered).
       - Resend/SMTP: redirects recipient to delivered+{tag}@resend.dev.
     """
-    # Determine effective provider
-    effective = provider or settings.email_provider
+    # Determine effective provider; require it be passed explicitly
+    effective = provider
+    if not effective:
+        raise ValueError("send_email() requires a provider")
 
     if settings.test_mode and effective == "gmail":
         # Simulate a successful send without hitting Gmail API

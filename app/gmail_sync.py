@@ -1,9 +1,9 @@
 """Gmail reply synchronization and mailbox mirroring.
 
-This module is responsible for maintaining the local SQLite mirror of
-threads/messages/attachments described in the unibox design.  It implements
-initial and incremental history syncs, lazy body/attachment fetching, and
-the reply-detection logic used by campaigns.
+This module maintains a durable mirror of threads/messages/attachments in
+the main database as described in the unibox design.  It implements initial
+and incremental history syncs, lazy body/attachment fetching, and the
+reply-detection logic used by campaigns.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ from app.routers.unibox import (
 )
 
 
-log = logging.getLogger("campaign_engine.gmail_sync")
+log = logging.getLogger("quickly.gmail_sync")
 
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 

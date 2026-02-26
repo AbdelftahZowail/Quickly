@@ -62,7 +62,7 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
     # campaigns so that capacity is redistributed correctly.
     if status_changed:
         from app.routers.calendar import recalculate_all_campaigns
-        log = __import__("logging").getLogger("campaign_engine.routes")
+        log = __import__("logging").getLogger("quickly.routes")
         log.info(
             "Lead %s status changed (%s -> %s); triggering full recalculation",
             lead_id,
@@ -95,7 +95,7 @@ async def delete_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
     # move earlier
     if campaign_ids:
         from app.routers.calendar import recalculate_all_campaigns
-        log = __import__("logging").getLogger("campaign_engine.routes")
+        log = __import__("logging").getLogger("quickly.routes")
         log.info(
             "Lead %s deleted (campaigns=%s); triggering full recalculation",
             lead_id,

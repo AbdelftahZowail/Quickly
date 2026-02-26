@@ -14,7 +14,7 @@ from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, r
 from app.app_settings import get_scheduling_strategy
 from smoke_test.validate_scheduled_emails import EmailScheduleValidator
 
-log = logging.getLogger("campaign_engine.calendar")
+log = logging.getLogger("quickly.calendar")
 
 router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 

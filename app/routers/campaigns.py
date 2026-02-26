@@ -30,7 +30,7 @@ from app.schemas import (
 )
 from app.queue_logic import reserve_slots_for_new_leads_bulk, recalculate_queue_after_sequence_change_for_leads
 
-log = logging.getLogger("campaign_engine.routes")
+log = logging.getLogger("quickly.routes")
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
 

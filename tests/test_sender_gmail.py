@@ -77,7 +77,8 @@ def test_send_via_gmail_happy_path(monkeypatch):
     assert gmail_account.access_token == "foo"
 
 
-def test_send_email_wrapper_prefers_gmail(monkeypatch):
+def test_send_email_with_explicit_provider(monkeypatch):
+    # when a provider is supplied the wrapper should use it unchanged
     monkeypatch.setattr("app.sender.build", dummy_build)
     gmail_account = SimpleNamespace(access_token="foo", refresh_token="bar", token_expiry=None)
     out = send_email(
@@ -90,6 +91,17 @@ def test_send_email_wrapper_prefers_gmail(monkeypatch):
     )
     assert isinstance(out, SendResult)
     assert out.thread_id == "t123"
+
+
+def test_send_email_requires_provider():
+    with pytest.raises(ValueError):
+        send_email(
+            to_email="no@prov",
+            subject="s",
+            body="b",
+            from_email="c@d",
+            provider="",  # empty string should be rejected
+        )
 
 
 def test_send_via_gmail_logs_errors(monkeypatch):
