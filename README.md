@@ -217,7 +217,6 @@ During development the React app provides the following routes:
 - `/campaigns/add` – form to create a campaign
 - `/campaigns/:id` – campaign details (sequences, leads, etc.; under construction)
 - `/inboxes` – manage sending inboxes with add/edit/delete, including Gmail OAuth flow
-- `/unibox` – (placeholder)
 - `/calendar` – (placeholder)
 - `/settings` – (placeholder)
 

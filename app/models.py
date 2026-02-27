@@ -162,15 +162,6 @@ class AppSetting(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
-class UniboxCache(Base):
-    """Persistent cache for unibox list + thread detail payloads."""
-    __tablename__ = "unibox_cache"
-    cache_key = Column(String(1024), primary_key=True, nullable=False)
-    payload = Column(JSON, nullable=False)
-    created_at = Column(DateTime, default=_utcnow)
-    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
-
-
 class GmailAccount(Base):
     """Stores Gmail/G Suite OAuth 2.0 tokens linked to an Inbox."""
     __tablename__ = "gmail_account"

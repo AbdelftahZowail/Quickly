@@ -43,68 +43,6 @@ class GmailSyncConfig(BaseModel):
 
 
 
-
-
-
-
-
-
-@router.get("/gmail-sync")
-async def get_gmail_sync_settings(db: AsyncSession = Depends(get_db)):
-    """Return Gmail push/poll sync settings."""
-    cfg = await get_gmail_sync_config(db)
-    return {
-        "push_topic": cfg.get("push_topic") or "",
-        "push_topic_configured": cfg.get("push_topic_configured", False),
-        "webhook_token": _mask_secret(cfg.get("webhook_token") or ""),
-        "webhook_token_configured": cfg.get("webhook_token_configured", False),
-        "sync_interval_minutes": cfg.get("sync_interval_minutes", 5),
-    }
-
-
-@router.post("/gmail-sync")
-async def save_gmail_sync_settings(
-    config: GmailSyncConfig,
-    background_tasks: BackgroundTasks,
-    db: AsyncSession = Depends(get_db),
-):
-    """Persist Gmail push/poll sync settings."""
-    try:
-        token_value = config.webhook_token or ""
-        if "***" in token_value:
-            existing_cfg = await get_gmail_sync_config(db)
-            token_value = existing_cfg.get("webhook_token") or ""
-        await save_gmail_sync_config(
-            db,
-            push_topic=config.push_topic or "",
-            webhook_token=token_value,
-            sync_interval_minutes=max(1, int(config.sync_interval_minutes or 5)),
-        )
-        await db.commit()
-        # if a push topic is configured we should renew watches immediately so
-        # incoming messages will trigger sync right away instead of waiting for
-        # the six‑hour renewal job. schedule this as a background task to avoid
-        # blocking the request.
-        from app.gmail_sync import renew_gmail_watch_for_all
-        from app.database import AsyncSessionLocal
-
-        async def _renew():
-            async with AsyncSessionLocal() as session:
-                try:
-                    await renew_gmail_watch_for_all(session)
-                    await session.commit()
-                except Exception:
-                    await session.rollback()
-                    log.exception("automatic watch renewal failed after settings update")
-
-        background_tasks.add_task(_renew)
-
-        return {"ok": True, "message": "Gmail sync settings saved. Restart server to apply new interval."}
-    except Exception as e:
-        log.error("save_gmail_sync_settings failed: %s", e)
-        raise HTTPException(500, f"Failed to save Gmail sync settings: {e}")
-
-
 # Time offset helpers ---------------------------------------------------------
 @router.get('/time-offset')
 async def get_time_offset():

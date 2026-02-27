@@ -34,8 +34,6 @@ def test_google_callback_creates_inbox(monkeypatch):
         )
         # avoid any background sync attempts which would call external APIs
         # patch the helper functions used inside the local _post_connect_tasks
-        monkeypatch.setattr("app.gmail_sync.sync_gmail_inbox_by_email", lambda *args, **kwargs: None)
-        monkeypatch.setattr("app.gmail_sync.renew_gmail_watch_for_all", lambda *args, **kwargs: None)
 
         state = json.dumps({"display_name": "Foo", "max_per_day": 10})
         # use `params` to ensure proper URL encoding of the JSON string

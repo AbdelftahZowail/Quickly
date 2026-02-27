@@ -21,12 +21,8 @@ from app.database import init_db
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
-from app.routers import gmail_sync as gmail_sync_router
 from app.routers import calendar as calendar_router
 from app.routers import settings as settings_router
-from app.routers import unibox as unibox_router
-from app.gmail_sync import run_gmail_reply_sync_job, run_gmail_watch_renew_job
-from app.app_settings import get_gmail_sync_config
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 
 
@@ -35,35 +31,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     scheduler = AsyncIOScheduler()
     interval_minutes = max(1, settings.queue_check_interval_minutes)
-    gmail_sync_interval_minutes = 5
-    from app.database import AsyncSessionLocal
-    async with AsyncSessionLocal() as session:
-        try:
-            sync_cfg = await get_gmail_sync_config(session)
-            gmail_sync_interval_minutes = max(1, int(sync_cfg.get("sync_interval_minutes") or 5))
-        except Exception:
-            gmail_sync_interval_minutes = 5
     scheduler.add_job(
         run_send_job,
         "cron",
         minute=f"*/{interval_minutes}",
         second=0,
         id="send_queue",
-    )
-    scheduler.add_job(
-        run_gmail_reply_sync_job,
-        "cron",
-        minute=f"*/{gmail_sync_interval_minutes}",
-        second=20,
-        id="gmail_reply_sync",
-    )
-    scheduler.add_job(
-        run_gmail_watch_renew_job,
-        "cron",
-        hour="*/6",
-        minute=15,
-        second=0,
-        id="gmail_watch_renew",
     )
     scheduler.start()
     app.state.scheduler = scheduler
@@ -117,10 +90,8 @@ app.include_router(leads.router)
 app.include_router(campaigns.router)
 app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
-app.include_router(gmail_sync_router.router)
 app.include_router(calendar_router.router)
 app.include_router(settings_router.router)
-app.include_router(unibox_router.router)
 
 # Web UI
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -157,10 +128,6 @@ async def campaign_detail_page(request: Request, campaign_id: int):
 async def inboxes_page(request: Request):
     return templates.TemplateResponse("inboxes.html", {"request": request, "active": "inboxes"})
 
-
-@app.get("/unibox", response_class=HTMLResponse)
-async def unibox_page(request: Request):
-    return templates.TemplateResponse("unibox.html", {"request": request, "active": "unibox"})
 
 
 @app.get("/calendar", response_class=HTMLResponse)

@@ -309,24 +309,6 @@ async def google_callback(
     # schedule a background synchronization of the new inbox and ensure any
     # existing push watches are registered.  use a separate session so the
     # request commit isn't tied to the long‑running work.
-    from app.gmail_sync import sync_gmail_inbox_by_email, renew_gmail_watch_for_all
-    from app.database import AsyncSessionLocal
-
-    async def _post_connect_tasks(email_addr: str):
-        async with AsyncSessionLocal() as session:
-            try:
-                # immediate sync for the newly added inbox
-                await sync_gmail_inbox_by_email(session, email_addr)
-                # renew watches so that push notifications begin flowing without
-                # waiting for the periodic job (config must have a topic set).
-                await renew_gmail_watch_for_all(session)
-                await session.commit()
-                log.info("background sync/watch-renew completed for %s", email_addr)
-            except Exception:
-                await session.rollback()
-                log.exception("background task after Gmail connect failed")
-
-    background_tasks.add_task(_post_connect_tasks, email)
 
     # Redirect to the front‑end inboxes page with success (use base_url if configured)
     target = settings.base_url.rstrip('/') + "/inboxes?connected=" + urllib.parse.quote(email)
