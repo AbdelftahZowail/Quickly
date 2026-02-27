@@ -23,7 +23,9 @@ from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
 from app.routers import calendar as calendar_router
 from app.routers import settings as settings_router
+from app.routers import unibox as unibox_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
+from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 
 
 @asynccontextmanager
@@ -31,12 +33,32 @@ async def lifespan(app: FastAPI):
     await init_db()
     scheduler = AsyncIOScheduler()
     interval_minutes = max(1, settings.queue_check_interval_minutes)
+    unibox_interval_minutes = 5
+
+    from app.database import AsyncSessionLocal
+    from app.app_settings import get_gmail_sync_config
+
+    async with AsyncSessionLocal() as db:
+        try:
+            sync_cfg = await get_gmail_sync_config(db)
+            unibox_interval_minutes = max(1, int(sync_cfg.get("sync_interval_minutes", 5)))
+        except Exception:
+            logging.getLogger("quickly").exception("Failed loading unibox sync config; using default interval")
+            unibox_interval_minutes = 5
+
     scheduler.add_job(
         run_send_job,
         "cron",
         minute=f"*/{interval_minutes}",
         second=0,
         id="send_queue",
+    )
+    scheduler.add_job(
+        run_unibox_sync_job,
+        "cron",
+        minute=f"*/{unibox_interval_minutes}",
+        second=10,
+        id="unibox_sync",
     )
     scheduler.start()
     app.state.scheduler = scheduler
@@ -63,6 +85,7 @@ async def lifespan(app: FastAPI):
 
     # fire-and-forget; lifetime of task tied to event loop
     asyncio.create_task(kickoff())
+    asyncio.create_task(queue_sync_for_all_inboxes(reason="startup"))
 
     yield
     scheduler.shutdown()
@@ -92,6 +115,7 @@ app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
 app.include_router(calendar_router.router)
 app.include_router(settings_router.router)
+app.include_router(unibox_router.router)
 
 # Web UI
 BASE_DIR = Path(__file__).resolve().parent.parent

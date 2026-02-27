@@ -33,6 +33,7 @@ class SendResult:
     """Returned by send_email with IDs needed for threading."""
     message_id: str            # RFC 822 Message-ID (e.g. <xxx@domain>)
     thread_id: Optional[str] = None  # Gmail threadId (only for Gmail provider)
+    gmail_message_id: Optional[str] = None  # Gmail API message id when available
 
     def __bool__(self):
         return bool(self.message_id)
@@ -394,7 +395,11 @@ def _send_via_gmail(
             gmail_thread_id,
             real_message_id,
         )
-        return SendResult(message_id=real_message_id, thread_id=gmail_thread_id)
+        return SendResult(
+            message_id=real_message_id,
+            thread_id=gmail_thread_id,
+            gmail_message_id=gmail_msg_id,
+        )
     except HttpError as e:
         err_body = ""
         try:
