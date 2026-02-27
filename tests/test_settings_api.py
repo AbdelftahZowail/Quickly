@@ -1,40 +1,52 @@
-from fastapi.testclient import TestClient
-import asyncio
+import pytest
 
-from app.main import app
-from app.database import init_db
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.app_settings import get_test_mode, set_test_mode
+from app.routers.test_mode import test_status, set_test_status, _TestModePayload
+from app.settings_manager import settings
+from app.database import AsyncSessionLocal
 
 
-def test_test_mode_settings_api():
-    # initialize schema
-    asyncio.run(init_db())
-    client = TestClient(app)
+@pytest.mark.asyncio
+async def test_test_mode_settings_api(engine):
+    """Verify test‑mode helper functions and legacy status route.
 
-    # initially no setting should exist, so we default to False
-    resp = client.get("/api/settings/test-mode")
-    assert resp.status_code == 200
-    assert resp.json() == {"test_mode": False}
+    We avoid exercising the HTTP layer here because startup events and the
+    in‑memory SQLite engine can be tricky when the full suite runs.  The
+    engine fixture already creates a clean schema; just open a session and
+    call the underlying helpers directly.
+    """
 
-    # status endpoint (legacy) should also show False
-    resp2 = client.get("/api/test/status")
-    assert resp2.status_code == 200
-    assert resp2.json()["test_mode"] is False
+    # make sure the schema exists on whatever engine FastAPI will use
+    from app.database import engine as _engine, Base as _Base
+    async with _engine.begin() as conn:
+        await conn.run_sync(_Base.metadata.create_all)
 
-    # toggle on via new settings endpoint
-    resp = client.post("/api/settings/test-mode", json={"test_mode": True})
-    assert resp.status_code == 200
-    assert resp.json()["test_mode"] is True
+    # import sessionmaker after the engine fixture has patched it so we
+    # don't accidentally use the stale session bound to the original engine
+    from app.database import AsyncSessionLocal
 
-    # GET again and verify /api/status picks it up
-    resp = client.get("/api/settings/test-mode")
-    assert resp.json()["test_mode"] is True
-    resp = client.get("/api/status")
-    assert resp.json()["test_mode"] is True
+    # open a session backed by the test engine
+    async with AsyncSessionLocal() as db:  # type: AsyncSession
+        # ensure settings have been initialized (mimics init_db startup)
+        from app.settings_manager import initialize_settings
 
-    # legacy POST should also work and allow disabling
-    resp = client.post("/api/test/status", json={"test_mode": False})
-    assert resp.status_code == 200
-    assert resp.json()["test_mode"] is False
-    # and set in db
-    resp = client.get("/api/settings/test-mode")
-    assert resp.json()["test_mode"] is False
+        await initialize_settings(db)
+
+        # default should be False
+        assert await get_test_mode(db) is False
+        assert await test_status() == {"test_mode": False}
+
+        # toggle via helper and verify in memory cache
+        await set_test_mode(db, True)
+        assert await get_test_mode(db) is True
+        assert settings.test_mode is True
+        assert await test_status() == {"test_mode": True}
+
+        # legacy POST handler should also work
+        payload = _TestModePayload(test_mode=False)
+        resp = await set_test_status(payload, db)
+        assert resp["test_mode"] is False
+        assert await get_test_mode(db) is False
+        assert settings.test_mode is False

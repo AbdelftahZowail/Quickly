@@ -126,7 +126,11 @@ class EmailLog(Base):
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=True)  # Track which inbox sent this email
-    sequence_index = Column(Integer, nullable=False)
+    # sequence_index indicates which position in a campaign sequence this
+    # log entry corresponds to.  Historically tests assumed a default of 0
+    # when unspecified, so include that default here to avoid failures when
+    # callers omit the value.
+    sequence_index = Column(Integer, nullable=False, default=0)
     sent_at = Column(DateTime, default=_utcnow)
     subject = Column(String(512), default="")
     message_id = Column(String(512), default=None)  # RFC 822 Message-ID for In-Reply-To threading

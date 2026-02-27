@@ -26,6 +26,7 @@ from app.database import Base
 from app.models import (
     Campaign, Inbox, Sequence, Lead, CampaignLead,
     CampaignInbox, QueueSlot, EmailLog, LeadReply,
+    AppSetting,
 )
 
 
@@ -69,6 +70,18 @@ async def engine():
         )
         async with eng.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+
+    # ensure the global app.database engine matches the test engine so
+    # requests via FastAPI use the same database connection state.  Without
+    # this, two independent engines would each open their own in-memory
+    # database and dropping tables in one would not affect the other, which
+    # was the cause of intermittent ``no such table`` errors when running
+    # the full suite.
+    from app import database as _adb
+    _adb.engine = eng
+    _adb.AsyncSessionLocal = async_sessionmaker(
+        eng, class_=AsyncSession, expire_on_commit=False, autocommit=False, autoflush=False
+    )
 
     yield eng
 
