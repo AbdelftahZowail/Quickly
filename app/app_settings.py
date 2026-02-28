@@ -21,6 +21,10 @@ GMAIL_PUSH_TOPIC_KEY = "gmail_push_topic"
 GMAIL_PUSH_WEBHOOK_TOKEN_KEY = "gmail_push_webhook_token"
 GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY = "gmail_reply_sync_interval_minutes"
 
+# webhook configuration for email events (limits, token issues, etc.)
+EMAIL_EVENTS_WEBHOOK_URL_KEY = "email_events_webhook_url"
+EMAIL_EVENTS_WEBHOOK_TOKEN_KEY = "email_events_webhook_token"
+
 
 # Generic helpers --------------------------------------------------------------
 
@@ -76,6 +80,34 @@ async def get_test_mode(db: AsyncSession) -> bool:
     """Return whether test mode is enabled."""
     value = await get_setting(db, TEST_MODE_KEY)
     return value and value.lower() in ("true", "1", "yes")
+
+
+# email events webhook helpers -------------------------------------------------
+async def get_email_event_webhook_config(db: AsyncSession) -> dict:
+    """Return configuration for the optional outbound webhook triggered on
+    hard limit or token expiration events.
+
+    The returned dictionary mirrors the structure our frontend uses for the
+    Gmail sync config so it can be rendered and edited in the same settings UI
+    if desired.
+    """
+    url = await get_setting(db, EMAIL_EVENTS_WEBHOOK_URL_KEY) or ""
+    token = await get_setting(db, EMAIL_EVENTS_WEBHOOK_TOKEN_KEY) or ""
+    return {
+        "webhook_url": url,
+        "webhook_url_configured": bool(url),
+        "webhook_token": token,
+        "webhook_token_configured": bool(token),
+    }
+
+
+async def save_email_event_webhook_config(
+    db: AsyncSession, webhook_url: str, webhook_token: str
+) -> None:
+    """Persist outbound webhook configuration for email events."""
+    await put_setting(db, EMAIL_EVENTS_WEBHOOK_URL_KEY, webhook_url.strip())
+    await put_setting(db, EMAIL_EVENTS_WEBHOOK_TOKEN_KEY, webhook_token.strip())
+    await db.flush()
 
 
 async def set_test_mode(db: AsyncSession, enabled: bool) -> None:

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import time as time_provider
 from app.app_settings import get_gmail_sync_config, get_google_oauth_credentials
+from app.webhooks import maybe_fire_email_event
 from app.database import AsyncSessionLocal
 from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox
 from app.routers.gmail_oauth import refresh_access_token
@@ -462,6 +463,15 @@ async def _ensure_access_token(db: AsyncSession, account: GmailAccount) -> str:
         client_id, client_secret = await get_google_oauth_credentials(db)
         refreshed = refresh_access_token(account, client_id, client_secret)
         if not refreshed:
+            # notify webhook; callers will usually catch the exception
+            try:
+                await maybe_fire_email_event(
+                    db,
+                    "token_expired",
+                    {"inbox_id": account.inbox_id, "at": now_utc.isoformat()},
+                )
+            except Exception:
+                log.exception("failed firing token_expired webhook")
             raise RuntimeError(f"Could not refresh Gmail access token for inbox_id={account.inbox_id}")
         await db.flush()
     return account.access_token

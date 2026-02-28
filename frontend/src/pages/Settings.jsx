@@ -13,16 +13,27 @@ export default function Settings() {
   const confirm = useConfirm();
   const [strategy, setStrategy] = useState('priority');
   const [testMode, setTestMode] = useState(false);
+  const [webhookUrl, setWebhookUrl] = useState('');
+  const [webhookToken, setWebhookToken] = useState('');
+  const [webhookUrlConfigured, setWebhookUrlConfigured] = useState(false);
+  const [webhookTokenConfigured, setWebhookTokenConfigured] = useState(false);
 
 
   const loadStrategy = async () => {
     try {
-      const [data, tm] = await Promise.all([
+      const [data, tm, webhook] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
+        api.get('/settings/email-webhook'),
       ]);
       setStrategy(data.scheduling_strategy || 'priority');
       setTestMode(tm.test_mode || false);
+      if (webhook) {
+        setWebhookUrl(webhook.webhook_url || '');
+        setWebhookToken(webhook.webhook_token || '');
+        setWebhookUrlConfigured(!!webhook.webhook_url);
+        setWebhookTokenConfigured(!!webhook.webhook_token);
+      }
     } catch {};
   };
 
@@ -67,6 +78,32 @@ export default function Settings() {
     }
   };
 
+  const submitWebhookConfig = async () => {
+    try {
+      const payload = {
+        webhook_url: webhookUrl,
+        webhook_token: webhookToken,
+      };
+      const resp = await api.post('/settings/email-webhook', payload);
+      setWebhookUrl(resp.webhook_url || '');
+      setWebhookToken(resp.webhook_token || '');
+      setWebhookUrlConfigured(resp.webhook_url_configured || false);
+      setWebhookTokenConfigured(resp.webhook_token_configured || false);
+      notify({ type: 'success', message: 'Webhook settings saved' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
+  const testWebhook = async () => {
+    try {
+      await api.post('/settings/email-webhook/test');
+      notify({ type: 'success', message: 'Test event sent (check your endpoint)' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
 
 
 
@@ -96,6 +133,55 @@ export default function Settings() {
           />
           <span className="text-sm">Enabled</span>
         </label>
+      </Card>
+
+      {/* webhook settings */}
+      <Card className="mt-6">
+        <h2 className="text-lg font-semibold mb-2">Email Events Webhook</h2>
+        <p className="text-xs text-gray-500 mb-2">
+          Configure an outbound webhook which will receive notifications when a
+          send job hits a hard limit or a Gmail token expires. Leave blank to
+          disable.
+        </p>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm font-medium">Webhook URL</label>
+            <input
+              type="text"
+              className="mt-1 block w-full border rounded p-1"
+              value={webhookUrl}
+              onChange={e => setWebhookUrl(e.target.value)}
+            />
+            {webhookUrlConfigured && (
+              <span className="text-xs text-green-600">configured</span>
+            )}
+          </div>
+          <div>
+            <label className="block text-sm font-medium">Bearer Token</label>
+            <input
+              type="text"
+              className="mt-1 block w-full border rounded p-1"
+              value={webhookToken}
+              onChange={e => setWebhookToken(e.target.value)}
+            />
+            {webhookTokenConfigured && (
+              <span className="text-xs text-green-600">configured</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={submitWebhookConfig}>
+              Save Webhook Settings
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={testWebhook}
+              disabled={!webhookUrlConfigured}
+            >
+              Test Webhook
+            </Button>
+          </div>
+        </div>
       </Card>
 
       {/* scheduling strategy */}
