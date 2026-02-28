@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,49 @@ from app.routers.gmail_oauth import refresh_access_token
 log = logging.getLogger("quickly.unibox")
 
 GMAIL_API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
+FULL_SYNC_PROGRESS_COMMIT_INTERVAL = 5
+INITIAL_SYNC_WINDOW_DAYS = 7
+BACKFILL_WINDOW_DAYS = 7
+RECENT_RECOVERY_WINDOW_HOURS = 24
+THREAD_HYDRATION_COMMIT_INTERVAL = 3
+GMAIL_METADATA_HEADERS = [
+    "From",
+    "To",
+    "Subject",
+    "Date",
+    "Message-Id",
+    "In-Reply-To",
+    "References",
+]
+
+
+def _parse_message_limit_from_env(env_name: str, *, default_raw: str, minimum: int) -> int | None:
+    raw_value = (os.getenv(env_name, default_raw) or "").strip()
+    try:
+        parsed = int(raw_value)
+    except ValueError:
+        parsed = int(default_raw)
+    if parsed <= 0:
+        return None
+    return max(minimum, parsed)
+
+
+# 0 (default) means unlimited for the window so we do not silently skip messages.
+INITIAL_SYNC_MAX_MESSAGES = _parse_message_limit_from_env(
+    "UNIBOX_INITIAL_SYNC_MAX_MESSAGES",
+    default_raw="0",
+    minimum=50,
+)
+BACKFILL_SYNC_MAX_MESSAGES = _parse_message_limit_from_env(
+    "UNIBOX_BACKFILL_SYNC_MAX_MESSAGES",
+    default_raw="0",
+    minimum=50,
+)
+RECENT_RECOVERY_MAX_MESSAGES = _parse_message_limit_from_env(
+    "UNIBOX_RECENT_RECOVERY_MAX_MESSAGES",
+    default_raw="120",
+    minimum=20,
+)
 
 
 class GmailAPIError(RuntimeError):
@@ -73,6 +117,15 @@ class UniboxEventBroker:
 
 
 unibox_events = UniboxEventBroker()
+
+_sync_lock = asyncio.Lock()
+_inflight_inbox_syncs: set[int] = set()
+
+_initial_list_sync_lock = asyncio.Lock()
+_inflight_initial_list_syncs: set[int] = set()
+
+_thread_hydration_lock = asyncio.Lock()
+_inflight_hydration_inboxes: set[int] = set()
 
 
 def _parse_headers(headers_json: str) -> list[dict[str, str]]:
@@ -218,12 +271,23 @@ def _gmail_get_profile(access_token: str) -> dict[str, Any]:
     return _gmail_request_json("GET", f"{GMAIL_API_ROOT}/profile", access_token)
 
 
-def _gmail_list_all_message_ids(access_token: str) -> list[str]:
+def _gmail_list_message_ids(
+    access_token: str,
+    *,
+    query: str | None = None,
+    max_messages: int | None = None,
+    include_spam_trash: bool = True,
+) -> list[str]:
     out: list[str] = []
     page_token: str | None = None
 
     while True:
-        params: dict[str, Any] = {"maxResults": 500}
+        params: dict[str, Any] = {
+            "maxResults": 500,
+            "includeSpamTrash": "true" if include_spam_trash else "false",
+        }
+        if query:
+            params["q"] = query
         if page_token:
             params["pageToken"] = page_token
         payload = _gmail_request_json("GET", f"{GMAIL_API_ROOT}/messages", access_token, params=params)
@@ -231,6 +295,8 @@ def _gmail_list_all_message_ids(access_token: str) -> list[str]:
         for item in payload.get("messages", []) or []:
             if isinstance(item, dict) and item.get("id"):
                 out.append(str(item["id"]))
+                if max_messages and len(out) >= max_messages:
+                    return out
 
         page_token = payload.get("nextPageToken")
         if not page_token:
@@ -239,11 +305,52 @@ def _gmail_list_all_message_ids(access_token: str) -> list[str]:
     return out
 
 
-def _gmail_get_message(access_token: str, gmail_message_id: str) -> dict[str, Any]:
-    params = {"format": "full"}
+def _gmail_list_all_message_ids(access_token: str, *, max_messages: int | None = None) -> list[str]:
+    return _gmail_list_message_ids(access_token, max_messages=max_messages)
+
+
+def _gmail_list_message_ids_in_window(
+    access_token: str,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    max_messages: int | None = None,
+) -> list[str]:
+    start_unix = int(start_dt.timestamp())
+    end_unix = int(end_dt.timestamp())
+    query = f"after:{start_unix} before:{end_unix}"
+    return _gmail_list_message_ids(access_token, query=query, max_messages=max_messages)
+
+
+def _gmail_get_message(
+    access_token: str,
+    gmail_message_id: str,
+    *,
+    payload_format: str = "full",
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"format": payload_format}
+    if payload_format == "metadata":
+        params["metadataHeaders"] = GMAIL_METADATA_HEADERS
     return _gmail_request_json(
         "GET",
         f"{GMAIL_API_ROOT}/messages/{gmail_message_id}",
+        access_token,
+        params=params,
+    )
+
+
+def _gmail_get_thread(
+    access_token: str,
+    thread_id: str,
+    *,
+    payload_format: str = "full",
+) -> dict[str, Any]:
+    params: dict[str, Any] = {"format": payload_format}
+    if payload_format == "metadata":
+        params["metadataHeaders"] = GMAIL_METADATA_HEADERS
+    return _gmail_request_json(
+        "GET",
+        f"{GMAIL_API_ROOT}/threads/{thread_id}",
         access_token,
         params=params,
     )
@@ -404,6 +511,7 @@ async def _upsert_message_from_gmail(
     *,
     inbox_id: int,
     gmail_message: dict[str, Any],
+    include_body: bool = True,
 ) -> tuple[GmailMessage, bool]:
     gmail_msg_id = str(gmail_message.get("id", ""))
     thread_id = str(gmail_message.get("threadId", ""))
@@ -419,7 +527,10 @@ async def _upsert_message_from_gmail(
     headers = payload.get("headers", []) or []
     headers_json = json.dumps(headers)
     label_ids_json = json.dumps(labels)
-    body_plain, body_html = _extract_bodies(payload)
+    body_plain = ""
+    body_html = ""
+    if include_body:
+        body_plain, body_html = _extract_bodies(payload)
 
     await _upsert_thread(
         db,
@@ -447,7 +558,7 @@ async def _upsert_message_from_gmail(
             snippet=snippet,
             headers_json=headers_json,
             label_ids_json=label_ids_json,
-            body_fetched=bool(body_plain or body_html),
+            body_fetched=include_body,
             body_plain=body_plain,
             body_html=body_html,
         )
@@ -459,9 +570,10 @@ async def _upsert_message_from_gmail(
         row.snippet = snippet
         row.headers_json = headers_json
         row.label_ids_json = label_ids_json
-        row.body_fetched = bool(body_plain or body_html)
-        row.body_plain = body_plain
-        row.body_html = body_html
+        if include_body:
+            row.body_fetched = True
+            row.body_plain = body_plain
+            row.body_html = body_html
 
     await db.flush()
     return row, created
@@ -481,6 +593,19 @@ async def upsert_sent_message(
     is_html: bool,
 ) -> GmailMessage:
     now_ms = _now_epoch_ms()
+    # Keep optimistic sent messages in final visual position immediately.
+    # If local clock/time-offset is behind Gmail timestamps, force monotonic
+    # order by pinning this message after the latest known thread message.
+    last_internal_res = await db.execute(
+        select(func.max(GmailMessage.internal_date)).where(
+            GmailMessage.inbox_id == inbox_id,
+            GmailMessage.thread_id == thread_id,
+        )
+    )
+    last_internal_date = last_internal_res.scalar_one()
+    if last_internal_date is not None and now_ms <= int(last_internal_date):
+        now_ms = int(last_internal_date) + 1
+
     snippet = _body_snippet("" if is_html else body, body if is_html else "", fallback=body)
     headers = [
         {"name": "From", "value": from_email},
@@ -753,13 +878,249 @@ async def get_thread_messages(
     }
 
 
-async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[int, str]]:
+async def _set_initial_list_sync_state(inbox_id: int, in_progress: bool) -> None:
+    async with _initial_list_sync_lock:
+        if in_progress:
+            _inflight_initial_list_syncs.add(inbox_id)
+        else:
+            _inflight_initial_list_syncs.discard(inbox_id)
+        inflight_count = len(_inflight_initial_list_syncs)
+
+    await unibox_events.publish(
+        {
+            "type": "unibox.sync.status",
+            "phase": "initial-list",
+            "inbox_id": inbox_id,
+            "in_progress": in_progress,
+            "inflight_count": inflight_count,
+            "timestamp": _dt_to_iso(time_provider.utcnow()),
+        }
+    )
+
+
+async def get_unibox_sync_status(*, inbox_id: int | None = None) -> dict[str, Any]:
+    async with _initial_list_sync_lock:
+        inflight_ids = sorted(_inflight_initial_list_syncs)
+    if inbox_id is not None:
+        inflight_ids = [value for value in inflight_ids if value == inbox_id]
+    return {
+        "initial_list_sync_in_progress": bool(inflight_ids),
+        "inflight_inbox_ids": inflight_ids,
+    }
+
+
+async def _thread_requires_body_hydration(db: AsyncSession, *, inbox_id: int, thread_id: str) -> bool:
+    total_stmt = (
+        select(func.count())
+        .select_from(GmailMessage)
+        .where(
+            GmailMessage.inbox_id == inbox_id,
+            GmailMessage.thread_id == thread_id,
+        )
+    )
+    total_messages = int((await db.execute(total_stmt)).scalar_one() or 0)
+    if total_messages == 0:
+        return True
+
+    missing_stmt = (
+        select(func.count())
+        .select_from(GmailMessage)
+        .where(
+            GmailMessage.inbox_id == inbox_id,
+            GmailMessage.thread_id == thread_id,
+            GmailMessage.body_fetched.is_(False),
+        )
+    )
+    missing_messages = int((await db.execute(missing_stmt)).scalar_one() or 0)
+    return missing_messages > 0
+
+
+async def _hydrate_thread_from_gmail(
+    db: AsyncSession,
+    *,
+    inbox_id: int,
+    thread_id: str,
+    access_token: str,
+) -> bool:
+    payload = await asyncio.to_thread(
+        _gmail_get_thread,
+        access_token,
+        thread_id,
+        payload_format="full",
+    )
+
+    raw_messages = payload.get("messages", []) or []
+    hydrated_any = False
+    for item in raw_messages:
+        if not isinstance(item, dict):
+            continue
+        try:
+            await _upsert_message_from_gmail(
+                db,
+                inbox_id=inbox_id,
+                gmail_message=item,
+                include_body=True,
+            )
+            hydrated_any = True
+        except ValueError:
+            continue
+    return hydrated_any
+
+
+async def hydrate_thread_on_demand(
+    db: AsyncSession,
+    *,
+    thread_id: str,
+    inbox_id: int,
+) -> bool:
+    if not await _thread_requires_body_hydration(db, inbox_id=inbox_id, thread_id=thread_id):
+        return False
+
+    account_res = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox_id))
+    account = account_res.scalar_one_or_none()
+    if account is None:
+        return False
+
+    try:
+        access_token = await _ensure_access_token(db, account)
+        hydrated = await _hydrate_thread_from_gmail(
+            db,
+            inbox_id=inbox_id,
+            thread_id=thread_id,
+            access_token=access_token,
+        )
+    except Exception:
+        log.exception("On-demand thread hydration failed inbox_id=%s thread_id=%s", inbox_id, thread_id)
+        return False
+
+    if not hydrated:
+        return False
+
+    await db.flush()
+    return True
+
+
+async def hydrate_pending_threads_for_inbox(
+    inbox_id: int,
+    *,
+    thread_ids: list[str] | None = None,
+    reason: str = "initial-thread-hydration",
+) -> int:
+    if not await _acquire_hydration_inflight(inbox_id):
+        return 0
+
+    touched: set[tuple[int, str]] = set()
+    try:
+        async with AsyncSessionLocal() as db:
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider == "gmail"))
+            inbox = inbox_res.scalar_one_or_none()
+            if not inbox:
+                await db.rollback()
+                return 0
+
+            account_res = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox_id))
+            account = account_res.scalar_one_or_none()
+            if account is None:
+                await db.rollback()
+                return 0
+
+            access_token = await _ensure_access_token(db, account)
+
+            candidate_ids = [str(item) for item in (thread_ids or []) if str(item).strip()]
+            if not candidate_ids:
+                pending_stmt = (
+                    select(GmailMessage.thread_id)
+                    .where(
+                        GmailMessage.inbox_id == inbox_id,
+                        GmailMessage.body_fetched.is_(False),
+                    )
+                    .group_by(GmailMessage.thread_id)
+                    .order_by(desc(func.max(GmailMessage.internal_date)))
+                )
+                pending_rows = (await db.execute(pending_stmt)).all()
+                candidate_ids = [str(row[0]) for row in pending_rows if row and row[0]]
+
+            if not candidate_ids:
+                await db.rollback()
+                return 0
+
+            # Preserve order while removing duplicates.
+            ordered_ids = list(dict.fromkeys(candidate_ids))
+
+            for idx, thread_id in enumerate(ordered_ids, start=1):
+                if not await _thread_requires_body_hydration(db, inbox_id=inbox_id, thread_id=thread_id):
+                    continue
+                try:
+                    hydrated = await _hydrate_thread_from_gmail(
+                        db,
+                        inbox_id=inbox_id,
+                        thread_id=thread_id,
+                        access_token=access_token,
+                    )
+                except Exception:
+                    log.exception(
+                        "Background thread hydration failed inbox_id=%s thread_id=%s",
+                        inbox_id,
+                        thread_id,
+                    )
+                    continue
+
+                if hydrated:
+                    touched.add((inbox_id, thread_id))
+
+                if idx % THREAD_HYDRATION_COMMIT_INTERVAL == 0:
+                    await db.commit()
+
+            await db.commit()
+    except Exception:
+        log.exception("Background hydration runner failed inbox_id=%s", inbox_id)
+        return 0
+    finally:
+        await _release_hydration_inflight(inbox_id)
+
+    for i_id, thread_id in touched:
+        await unibox_events.publish(
+            {
+                "type": "unibox.thread.updated",
+                "reason": reason,
+                "inbox_id": i_id,
+                "thread_id": thread_id,
+                "timestamp": _dt_to_iso(time_provider.utcnow()),
+            }
+        )
+    return len(touched)
+
+
+async def queue_thread_hydration_for_inbox(
+    inbox_id: int,
+    *,
+    thread_ids: list[str] | None = None,
+    reason: str = "initial-thread-hydration",
+) -> None:
+    queued_thread_ids = list(dict.fromkeys([str(item) for item in (thread_ids or []) if str(item).strip()]))
+
+    async def _runner() -> None:
+        await hydrate_pending_threads_for_inbox(
+            inbox_id,
+            thread_ids=queued_thread_ids or None,
+            reason=reason,
+        )
+
+    asyncio.create_task(_runner())
+
+
+async def _sync_inbox(
+    db: AsyncSession,
+    inbox: Inbox,
+    reason: str,
+) -> tuple[set[tuple[int, str]], set[str]]:
     touched_threads: set[tuple[int, str]] = set()
+    hydrate_after_commit_thread_ids: set[str] = set()
 
     account_res = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
     account = account_res.scalar_one_or_none()
     if account is None:
-        return touched_threads
+        return touched_threads, hydrate_after_commit_thread_ids
 
     state = await _get_or_create_sync_state(db, inbox.id)
     access_token = await _ensure_access_token(db, account)
@@ -781,20 +1142,73 @@ async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[
             else:
                 raise
 
+    full_sync_thread_ids: set[str] = set()
     if do_full_sync:
-        message_ids = await asyncio.to_thread(_gmail_list_all_message_ids, access_token)
-        for msg_id in message_ids:
-            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
-            row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
-            touched_threads.add((inbox.id, row.thread_id))
-        state.anchor_history_id = profile_history_id
-        state.latest_history_id = profile_history_id
-        state.last_history_id = profile_history_id
+        await _set_initial_list_sync_state(inbox.id, True)
+        try:
+            # Initial sync stage 1: fetch metadata only so list can render quickly.
+            sync_end = time_provider.utcnow()
+            sync_start = sync_end - timedelta(days=INITIAL_SYNC_WINDOW_DAYS)
+            message_ids = await asyncio.to_thread(
+                _gmail_list_message_ids_in_window,
+                access_token,
+                start_dt=sync_start,
+                end_dt=sync_end,
+                max_messages=INITIAL_SYNC_MAX_MESSAGES,
+            )
+            state.anchor_history_id = profile_history_id
+            state.latest_history_id = profile_history_id
+            state.last_history_id = profile_history_id
+
+            total_messages = len(message_ids)
+            oldest_synced_ms: int | None = None
+            for idx, msg_id in enumerate(message_ids, start=1):
+                payload = await asyncio.to_thread(
+                    _gmail_get_message,
+                    access_token,
+                    msg_id,
+                    payload_format="metadata",
+                )
+                row, _created = await _upsert_message_from_gmail(
+                    db,
+                    inbox_id=inbox.id,
+                    gmail_message=payload,
+                    include_body=False,
+                )
+                touched_threads.add((inbox.id, row.thread_id))
+                full_sync_thread_ids.add(row.thread_id)
+                if row.internal_date is not None:
+                    oldest_synced_ms = (
+                        row.internal_date if oldest_synced_ms is None else min(oldest_synced_ms, row.internal_date)
+                    )
+
+                if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+                    state.last_sync_at = time_provider.utcnow()
+                    await db.commit()
+                    log.info(
+                        "Unibox initial list sync progress inbox_id=%s processed=%s/%s",
+                        inbox.id,
+                        idx,
+                        total_messages,
+                    )
+            if oldest_synced_ms is not None:
+                if state.oldest_internal_date is None or oldest_synced_ms < state.oldest_internal_date:
+                    state.oldest_internal_date = oldest_synced_ms
+            elif state.oldest_internal_date is None:
+                state.oldest_internal_date = int(sync_start.timestamp() * 1000)
+        finally:
+            await _set_initial_list_sync_state(inbox.id, False)
+
+        if full_sync_thread_ids:
+            hydrate_after_commit_thread_ids = set(full_sync_thread_ids)
     elif delta is not None:
         for msg_id in delta.added_ids:
             payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
             row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
             touched_threads.add((inbox.id, row.thread_id))
+            if row.internal_date is not None:
+                if state.oldest_internal_date is None or row.internal_date < state.oldest_internal_date:
+                    state.oldest_internal_date = row.internal_date
 
         for msg_id in delta.deleted_ids:
             deleted_thread_id = await _delete_message(db, inbox.id, msg_id)
@@ -809,6 +1223,27 @@ async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[
         if newest_history:
             state.latest_history_id = newest_history
             state.last_history_id = newest_history
+
+    # Safety net for drift/races: probe a window and import any missing ids
+    # that history delta did not include.
+    if reason == "manual" and not do_full_sync:
+        # Manual sync should reconcile the full initial window (7 days) so
+        # users can recover any previously skipped messages in that range.
+        recovered_threads = await _recover_recent_missing_messages(
+            db,
+            inbox_id=inbox.id,
+            access_token=access_token,
+            window_hours=INITIAL_SYNC_WINDOW_DAYS * 24,
+            max_messages=INITIAL_SYNC_MAX_MESSAGES,
+        )
+        touched_threads.update(recovered_threads)
+    elif reason == "push" and not do_full_sync:
+        recovered_threads = await _recover_recent_missing_messages(
+            db,
+            inbox_id=inbox.id,
+            access_token=access_token,
+        )
+        touched_threads.update(recovered_threads)
 
     cfg = await get_gmail_sync_config(db)
     topic = (cfg.get("push_topic") or "").strip()
@@ -844,18 +1279,200 @@ async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[
         len(touched_threads),
         do_full_sync,
     )
+    return touched_threads, hydrate_after_commit_thread_ids
+
+
+async def _backfill_older_window(
+    db: AsyncSession,
+    inbox: Inbox,
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+) -> tuple[set[tuple[int, str]], dict[str, Any]]:
+    touched_threads: set[tuple[int, str]] = set()
+    account_res = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
+    account = account_res.scalar_one_or_none()
+    if account is None:
+        return touched_threads, {"messages_synced": 0, "range_start": None, "range_end": None}
+
+    state = await _get_or_create_sync_state(db, inbox.id)
+    access_token = await _ensure_access_token(db, account)
+
+    end_dt = _epoch_ms_to_dt(state.oldest_internal_date) if state.oldest_internal_date else time_provider.utcnow()
+    if end_dt is None:
+        end_dt = time_provider.utcnow()
+    start_dt = end_dt - timedelta(days=max(1, int(window_days)))
+
+    message_ids = await asyncio.to_thread(
+        _gmail_list_message_ids_in_window,
+        access_token,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        max_messages=BACKFILL_SYNC_MAX_MESSAGES,
+    )
+
+    oldest_synced_ms: int | None = None
+    total_messages = len(message_ids)
+    for idx, msg_id in enumerate(message_ids, start=1):
+        payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
+        touched_threads.add((inbox.id, row.thread_id))
+        if row.internal_date is not None:
+            oldest_synced_ms = row.internal_date if oldest_synced_ms is None else min(oldest_synced_ms, row.internal_date)
+
+        if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+            state.last_sync_at = time_provider.utcnow()
+            await db.commit()
+            log.info(
+                "Unibox backfill progress inbox_id=%s processed=%s/%s",
+                inbox.id,
+                idx,
+                total_messages,
+            )
+
+    if oldest_synced_ms is not None:
+        if state.oldest_internal_date is None or oldest_synced_ms < state.oldest_internal_date:
+            state.oldest_internal_date = oldest_synced_ms
+    else:
+        state.oldest_internal_date = int(start_dt.timestamp() * 1000)
+
+    state.last_sync_at = time_provider.utcnow()
+    await db.flush()
+    meta = {
+        "messages_synced": total_messages,
+        "range_start": _dt_to_iso(start_dt),
+        "range_end": _dt_to_iso(end_dt),
+    }
+    log.info(
+        "Unibox backfill inbox_id=%s messages_synced=%s range_start=%s range_end=%s",
+        inbox.id,
+        total_messages,
+        meta["range_start"],
+        meta["range_end"],
+    )
+    return touched_threads, meta
+
+
+async def _recover_recent_missing_messages(
+    db: AsyncSession,
+    *,
+    inbox_id: int,
+    access_token: str,
+    window_hours: int = RECENT_RECOVERY_WINDOW_HOURS,
+    max_messages: int | None = RECENT_RECOVERY_MAX_MESSAGES,
+) -> set[tuple[int, str]]:
+    end_dt = time_provider.utcnow()
+    start_dt = end_dt - timedelta(hours=max(1, int(window_hours)))
+    recent_ids = await asyncio.to_thread(
+        _gmail_list_message_ids_in_window,
+        access_token,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        max_messages=max_messages,
+    )
+    if not recent_ids:
+        return set()
+
+    existing_rows = await db.execute(
+        select(GmailMessage.message_id).where(
+            GmailMessage.inbox_id == inbox_id,
+            GmailMessage.message_id.in_(recent_ids),
+        )
+    )
+    existing_ids = {str(row[0]) for row in existing_rows.all()}
+    missing_ids = [msg_id for msg_id in recent_ids if msg_id not in existing_ids]
+    if not missing_ids:
+        return set()
+
+    touched_threads: set[tuple[int, str]] = set()
+    for msg_id in missing_ids:
+        payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox_id, gmail_message=payload)
+        touched_threads.add((inbox_id, row.thread_id))
+
+    log.info(
+        "Unibox recent recovery inbox_id=%s recovered_messages=%s window_hours=%s",
+        inbox_id,
+        len(missing_ids),
+        window_hours,
+    )
     return touched_threads
 
 
-_sync_lock = asyncio.Lock()
-_inflight_inbox_syncs: set[int] = set()
-
-
-async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
+async def _acquire_inflight(inbox_id: int) -> bool:
     async with _sync_lock:
         if inbox_id in _inflight_inbox_syncs:
             return False
         _inflight_inbox_syncs.add(inbox_id)
+        return True
+
+
+async def _release_inflight(inbox_id: int) -> None:
+    async with _sync_lock:
+        _inflight_inbox_syncs.discard(inbox_id)
+
+
+async def _acquire_hydration_inflight(inbox_id: int) -> bool:
+    async with _thread_hydration_lock:
+        if inbox_id in _inflight_hydration_inboxes:
+            return False
+        _inflight_hydration_inboxes.add(inbox_id)
+        return True
+
+
+async def _release_hydration_inflight(inbox_id: int) -> None:
+    async with _thread_hydration_lock:
+        _inflight_hydration_inboxes.discard(inbox_id)
+
+
+async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
+    if not await _acquire_inflight(inbox_id):
+        return False
+
+    touched: set[tuple[int, str]] = set()
+    hydrate_thread_ids: set[str] = set()
+    try:
+        async with AsyncSessionLocal() as db:
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider == "gmail"))
+            inbox = inbox_res.scalar_one_or_none()
+            if not inbox:
+                await db.rollback()
+                return False
+            touched, hydrate_thread_ids = await _sync_inbox(db, inbox, reason)
+            await db.commit()
+    except Exception:
+        log.exception("Failed unibox sync for inbox_id=%s reason=%s", inbox_id, reason)
+        return False
+    finally:
+        await _release_inflight(inbox_id)
+
+    if hydrate_thread_ids:
+        await queue_thread_hydration_for_inbox(
+            inbox_id,
+            thread_ids=sorted(hydrate_thread_ids),
+            reason="initial-thread-hydration",
+        )
+
+    for i_id, thread_id in touched:
+        await unibox_events.publish(
+            {
+                "type": "unibox.thread.updated",
+                "reason": reason,
+                "inbox_id": i_id,
+                "thread_id": thread_id,
+                "timestamp": _dt_to_iso(time_provider.utcnow()),
+            }
+        )
+    return True
+
+
+async def backfill_single_inbox(
+    inbox_id: int,
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+    reason: str = "manual-backfill",
+) -> bool:
+    if not await _acquire_inflight(inbox_id):
+        return False
 
     touched: set[tuple[int, str]] = set()
     try:
@@ -865,14 +1482,13 @@ async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
             if not inbox:
                 await db.rollback()
                 return False
-            touched = await _sync_inbox(db, inbox, reason)
+            touched, _meta = await _backfill_older_window(db, inbox, window_days=window_days)
             await db.commit()
     except Exception:
-        log.exception("Failed unibox sync for inbox_id=%s reason=%s", inbox_id, reason)
+        log.exception("Failed unibox backfill for inbox_id=%s reason=%s", inbox_id, reason)
         return False
     finally:
-        async with _sync_lock:
-            _inflight_inbox_syncs.discard(inbox_id)
+        await _release_inflight(inbox_id)
 
     for i_id, thread_id in touched:
         await unibox_events.publish(
@@ -915,6 +1531,33 @@ async def queue_sync_for_inbox(inbox_id: int, reason: str = "push") -> None:
 async def queue_sync_for_all_inboxes(reason: str = "startup") -> None:
     async def _runner() -> None:
         await sync_all_inboxes(reason=reason)
+
+    asyncio.create_task(_runner())
+
+
+async def queue_backfill_for_inbox(
+    inbox_id: int,
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+    reason: str = "manual-backfill",
+) -> None:
+    async def _runner() -> None:
+        await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)
+
+    asyncio.create_task(_runner())
+
+
+async def queue_backfill_for_all_inboxes(
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+    reason: str = "manual-backfill",
+) -> None:
+    async def _runner() -> None:
+        async with AsyncSessionLocal() as db:
+            rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+            inbox_ids = [row[0] for row in rows.all()]
+        for inbox_id in inbox_ids:
+            await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)
 
     asyncio.create_task(_runner())
 

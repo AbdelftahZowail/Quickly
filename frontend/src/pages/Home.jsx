@@ -25,6 +25,10 @@ export default function Home() {
           <strong>Calendar</strong>
           <p className="mt-2 text-sm text-gray-500">View all sent and scheduled emails across campaigns.</p>
         </Link>
+        <Link to="/mailbox" className="card p-4 bg-white rounded shadow hover:bg-gray-50">
+          <strong>Unibox</strong>
+          <p className="mt-2 text-sm text-gray-500">Review synced Gmail threads and send replies from one place.</p>
+        </Link>
       </div>
       {status && (
         <div className="mt-8 p-4 bg-gray-100 rounded">

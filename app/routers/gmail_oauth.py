@@ -305,6 +305,8 @@ async def google_callback(
 
     await db.flush()
     log.info("Gmail OAuth connected: %s (inbox_id=%s)", email, inbox.id)
+    from app.unibox import queue_sync_for_inbox
+    background_tasks.add_task(queue_sync_for_inbox, inbox.id, "oauth-connect")
 
     # schedule a background synchronization of the new inbox and ensure any
     # existing push watches are registered.  use a separate session so the
@@ -419,3 +421,4 @@ def refresh_access_token(
     except Exception as e:
         log.error("Failed to refresh Gmail token for %s: %s", gmail_account.google_email, e)
         return None
+
