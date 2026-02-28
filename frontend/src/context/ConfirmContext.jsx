@@ -1,6 +1,6 @@
 import { createContext, useContext, useState, useCallback } from 'react';
 import { useDarkMode } from './DarkModeContext';
-import Button from '../components/ui/Button';
+import { Button } from '../components/ui/Button';
 
 const ConfirmContext = createContext(null);
 
@@ -34,10 +34,10 @@ export function ConfirmProvider({ children }) {
           >
             <p className="mb-4 break-words text-gray-900 dark:text-gray-100" style={{ color: 'inherit' }}>{dialog.message}</p>
             <div className="flex justify-end gap-2">
-              <Button variant="secondary" size="sm" onClick={() => handleResult(false)}>
+              <Button variant="outline" size="sm" onClick={() => handleResult(false)}>
                 Cancel
               </Button>
-              <Button variant="primary" size="sm" onClick={() => handleResult(true)}>
+              <Button variant="default" size="sm" onClick={() => handleResult(true)}>
                 OK
               </Button>
             </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api';
-import Button from '../components/ui/Button';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 
@@ -129,15 +130,16 @@ export default function Inboxes() {
       {/* header with add button */}
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Inboxes</h1>
-        <Button variant="primary" onClick={() => { setForm(initialForm); setMessage(null); setShowAdd(true); }}>
+        <Button variant="default" onClick={() => { setForm(initialForm); setMessage(null); setShowAdd(true); }}>
           Add Inbox
         </Button>
       </div>
 
       <h2 className="text-xl font-semibold mb-2">Inbox list</h2>
-      {inboxes.length === 0 && <p className="bg-white p-4 rounded shadow">No inboxes yet. Click "Add Inbox" to create one.</p>}
+      {inboxes.length === 0 && <Card>No inboxes yet. Click "Add Inbox" to create one.</Card>}
       {inboxes.length > 0 && (
-        <table className="w-full table-auto border-collapse bg-white rounded shadow">
+        <Card className="overflow-auto">
+          <table className="w-full table-auto border-collapse">
           <thead>
             <tr>
               <th className="px-4 py-2">Email</th>
@@ -165,13 +167,14 @@ export default function Inboxes() {
                 <td className="px-4 py-2">{i.wait_minutes_between || 5}</td>
                 <td className="px-4 py-2">{new Date(i.created_at).toLocaleDateString()}</td>
                 <td className="px-4 py-2 flex gap-2">
-                  <Button variant="secondary" size="sm" onClick={() => openEdit(i)}>Edit</Button>
+                  <Button variant="outline" size="sm" onClick={() => openEdit(i)}>Edit</Button>
                   <Button variant="danger" size="sm" onClick={() => deleteInbox(i.id, i.email)}>Delete</Button>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        </Card>
       )}
 
       {/* add modal */}
@@ -221,10 +224,10 @@ export default function Inboxes() {
                 </>
               )}
               <div className="flex gap-2">
-                <Button type="submit" disabled={!canSubmit()} variant="primary">
+                <Button type="submit" disabled={!canSubmit()} variant="default">
                   {form.provider === 'gmail' ? 'Connect with Google' : 'Add inbox'}
                 </Button>
-                <Button type="button" variant="secondary" onClick={() => { setShowAdd(false); setMessage(null); }}>
+                <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); }}>
                   Cancel
                 </Button>
               </div>
@@ -246,11 +249,11 @@ export default function Inboxes() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700">Display name</label>
-                <input type="text" name="display_name" value={editing.display_name || ''} onChange={e => setEditing(e => ({ ...e, display_name: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md" />
+                <input type="text" name="display_name" value={editing.display_name || ''} onChange={e => setEditing(prev => ({ ...prev, display_name: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700">Provider</label>
-                <select name="provider" value={editing.provider || 'resend'} onChange={e => setEditing(e => ({ ...e, provider: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md">
+                <select name="provider" value={editing.provider || 'resend'} onChange={e => setEditing(prev => ({ ...prev, provider: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md">
                   <option value="resend">Resend</option>
                   <option value="smtp">SMTP</option>
                   <option value="gmail">Gmail OAuth</option>
@@ -263,15 +266,15 @@ export default function Inboxes() {
               )}
               <div>
                 <label className="block text-sm font-medium text-gray-700">Max emails per day</label>
-                <input type="number" name="max_emails_per_day" value={editing.max_emails_per_day} onChange={e => setEditing(e => ({ ...e, max_emails_per_day: +e.target.value }))} min={1} max={1000} className="mt-1 block w-full border-gray-300 rounded-md" />
+                <input type="number" name="max_emails_per_day" value={editing.max_emails_per_day} onChange={e => setEditing(prev => ({ ...prev, max_emails_per_day: +e.target.value }))} min={1} max={1000} className="mt-1 block w-full border-gray-300 rounded-md" />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700">Wait between emails (minutes)</label>
-                <input type="number" name="wait_minutes_between" value={editing.wait_minutes_between || 5} onChange={e => setEditing(e => ({ ...e, wait_minutes_between: +e.target.value }))} min={1} max={120} className="mt-1 block w-full border-gray-300 rounded-md" />
+                <input type="number" name="wait_minutes_between" value={editing.wait_minutes_between || 5} onChange={e => setEditing(prev => ({ ...prev, wait_minutes_between: +e.target.value }))} min={1} max={120} className="mt-1 block w-full border-gray-300 rounded-md" />
               </div>
               <div className="flex gap-2">
-                <button type="submit" className="px-4 py-2 bg-teal-500 text-white rounded">Save</button>
-                <button type="button" onClick={closeEdit} className="px-4 py-2 bg-gray-200 rounded">Cancel</button>
+                <Button type="submit" size="sm" variant="default">Save</Button>
+                <Button type="button" size="sm" variant="outline" onClick={closeEdit}>Cancel</Button>
               </div>
             </form>
           </div>

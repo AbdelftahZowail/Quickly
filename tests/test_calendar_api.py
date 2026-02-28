@@ -1,3 +1,5 @@
+import pytest
+
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -38,3 +40,39 @@ def test_calendar_api_basic_endpoints():
         data = resp.json()
         assert data.get("ok") is True
         assert "total_slots_checked" in data
+
+
+@pytest.mark.asyncio
+async def test_calendar_sent_includes_opens_clicks(session):
+    """When logs have associated opens/clicks we should return them without
+    triggering lazy-loading errors.
+
+    Previously the route performed a simple join and then accessed
+    ``el.opens``/``el.clicks`` in the response comprehension, causing a
+    MissingGreenlet exception under AsyncSession.  This regression test
+    builds a minimal record set and validates the JSON structure produced
+    by the endpoint.
+    """
+    from app.models import EmailOpen, EmailClick
+    from tests.conftest import make_campaign, make_lead, make_email_log
+
+    # create a campaign/lead and log entry
+    campaign = await make_campaign(session)
+    lead = await make_lead(session)
+    log = await make_email_log(session, lead.id, campaign.id)
+
+    # attach an open & click
+    op = EmailOpen(email_log_id=log.id, ip_address="1.2.3.4")
+    clk = EmailClick(email_log_id=log.id, ip_address="5.6.7.8")
+    session.add_all([op, clk])
+    await session.flush()
+
+    with TestClient(app) as client:
+        resp = client.get("/api/calendar/sent")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        assert data, "expected at least one log"
+        entry = data[0]
+        assert entry["opens"][0]["ip"] == "1.2.3.4"
+        assert entry["clicks"][0]["ip"] == "5.6.7.8"

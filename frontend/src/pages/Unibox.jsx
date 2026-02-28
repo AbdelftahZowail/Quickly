@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
 import DOMPurify from 'dompurify';
-import Button from '../components/ui/Button';
 import EmailContent from '../components/EmailContent';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
 
 const PAGE_SIZE = 25;
@@ -403,12 +404,12 @@ export default function Unibox() {
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 flex-1 min-h-0">
-        <section className="card xl:col-span-1 flex flex-col min-h-0 overflow-hidden">
+        <Card className="xl:col-span-1 flex flex-col min-h-0 overflow-hidden">
           <div className="flex items-center justify-between border-b border-gray-200 pb-3 mb-3">
             <h2 className="font-semibold">Conversations</h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">{total} total</span>
-              <Button variant="secondary" size="sm" onClick={triggerSync} disabled={syncing}>
+              <Button variant="outline" size="sm" onClick={triggerSync} disabled={syncing}>
                 {syncing ? 'Syncing...' : 'Sync now'}
               </Button>
             </div>
@@ -448,14 +449,14 @@ export default function Unibox() {
             })}
             {/* show older button at bottom of scrollable list */}
             <div className="flex justify-center py-2">
-              <Button variant="secondary" size="sm" onClick={triggerLoadOlder} disabled={loadingOlder}>
+              <Button variant="outline" size="sm" onClick={triggerLoadOlder} disabled={loadingOlder}>
                 {loadingOlder ? 'Loading older...' : 'Show older'}
               </Button>
             </div>
           </div>
-        </section>
+        </Card>
 
-        <section className="card xl:col-span-2 flex flex-col min-h-0 overflow-hidden">
+        <Card className="xl:col-span-2 flex flex-col min-h-0 overflow-hidden">
           {!selectedThread && !threadLoading && (
             <div className="text-gray-500 text-sm flex-1">Select a conversation to view messages and reply.</div>
           )}
@@ -519,14 +520,14 @@ export default function Unibox() {
                       <div className="mt-3 flex items-center justify-end gap-2">
                         <Button
                           type="button"
-                          variant="secondary"
+                          variant="outline"
                           size="sm"
                           className="rounded-full px-3 py-1.5"
                           onClick={() => setReplyOpen(false)}
                         >
                           Cancel
                         </Button>
-                        <Button type="submit" variant="primary" size="sm" disabled={sending} className="rounded-full px-4 py-1.5">
+                        <Button type="submit" variant="default" size="sm" disabled={sending} className="rounded-full px-4 py-1.5">
                           {sending ? 'Sending...' : 'Send reply'}
                         </Button>
                       </div>
@@ -541,7 +542,7 @@ export default function Unibox() {
                 </p>
                 <Button
                   type="button"
-                  variant={replyOpen ? 'secondary' : 'primary'}
+                  variant={replyOpen ? 'outline' : 'default'}
                   size="sm"
                   className="rounded-full px-4 py-2 shadow-sm"
                   onClick={() => setReplyOpen((open) => !open)}
@@ -551,7 +552,7 @@ export default function Unibox() {
               </div>
             </>
           )}
-        </section>
+        </Card>
       </div>
     </div>
   );

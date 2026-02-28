@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 from app.database import Base
 from app.models import (
     Campaign, Inbox, Sequence, Lead, CampaignLead,
-    CampaignInbox, QueueSlot, EmailLog, LeadReply,
+    CampaignInbox, QueueSlot, EmailLog, EmailClick, LeadReply,
     AppSetting,
 )
 
@@ -226,6 +226,22 @@ async def make_email_log(
     session.add(log)
     await session.flush()
     return log
+
+
+async def make_email_click(
+    session: AsyncSession,
+    email_log_id: int,
+    ip_address: str = "1.2.3.4",
+    clicked_at: datetime | None = None,
+) -> EmailClick:
+    click = EmailClick(
+        email_log_id=email_log_id,
+        ip_address=ip_address,
+        clicked_at=clicked_at or datetime.utcnow(),
+    )
+    session.add(click)
+    await session.flush()
+    return click
 
 
 async def make_queue_slot(

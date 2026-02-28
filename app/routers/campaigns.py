@@ -100,6 +100,22 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["emails_sent"] = cnt
+        # open counts
+        res = await db.execute(
+            select(EmailLog.campaign_id, func.count())
+            .where(EmailLog.campaign_id.in_(campaign_ids), EmailLog.opened == True)
+            .group_by(EmailLog.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["open_rate"] = cnt  # temporarily store count
+        # click counts
+        res = await db.execute(
+            select(EmailLog.campaign_id, func.count())
+            .where(EmailLog.campaign_id.in_(campaign_ids), EmailLog.clicked == True)
+            .group_by(EmailLog.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["click_rate"] = cnt  # temporarily store count
         # reply counts
         res = await db.execute(
             select(LeadReply.campaign_id, func.count())
@@ -116,6 +132,18 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["sequences"] = cnt
+    # convert raw counts stored in open_rate/click_rate keys into fractions
+    for cid, stats in stats_map.items():
+        sent = stats.get("emails_sent", 0) or 0
+        if sent > 0:
+            if "open_rate" in stats:
+                stats["open_rate"] = stats["open_rate"] / sent
+            if "click_rate" in stats:
+                stats["click_rate"] = stats["click_rate"] / sent
+        else:
+            stats["open_rate"] = stats.get("open_rate", 0)
+            stats["click_rate"] = stats.get("click_rate", 0)
+
     return [
         _campaign_to_response(c, inbox_map.get(c.id, []), stats_map.get(c.id))
         for c in campaigns
@@ -251,9 +279,37 @@ async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
-    # Cascade handles sequences, campaign_leads (and their queue_slots), campaign_inboxes, etc.
+    # gather lead IDs so we can decide whether any should also be removed
+    cl_res = await db.execute(
+        select(CampaignLead.lead_id).where(CampaignLead.campaign_id == campaign_id)
+    )
+    lead_ids = [r[0] for r in cl_res.all()]
+
+    # Cascade handles sequences, campaign_leads (and their queue_slots),
+    # campaign_inboxes, etc.  after flushing we can inspect which of the
+    # previously-associated leads are now orphans and delete them as well.
     await db.delete(campaign)
     await db.flush()
+
+    orphan_ids: list[int] = []
+    if lead_ids:
+        # any remaining CampaignLead rows for these leads? if not, the lead
+        # belonged exclusively to the deleted campaign and can be removed.
+        res2 = await db.execute(
+            select(CampaignLead.lead_id)
+            .where(CampaignLead.lead_id.in_(lead_ids))
+            .group_by(CampaignLead.lead_id)
+        )
+        remaining = {r[0] for r in res2.all()}
+        orphan_ids = [lid for lid in lead_ids if lid not in remaining]
+
+    if orphan_ids:
+        # mirror the logic in delete_lead to clean up associated logs/replies
+        await db.execute(delete(EmailLog).where(EmailLog.lead_id.in_(orphan_ids)))
+        await db.execute(delete(LeadReply).where(LeadReply.lead_id.in_(orphan_ids)))
+        await db.execute(delete(Lead).where(Lead.id.in_(orphan_ids)))
+        log.info("delete_campaign: also removed %s orphan leads", len(orphan_ids))
+
     log.info("delete_campaign: deleted campaign %s (%s)", campaign_id, campaign.name)
     return {"ok": True}
 

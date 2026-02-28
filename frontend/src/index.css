@@ -27,10 +27,6 @@ button {
   @apply inline-flex items-center justify-center font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2;
 }
 
-button.btn-primary { @apply bg-teal-500 text-white hover:bg-teal-600 focus:ring-teal-500; }
-button.btn-secondary { @apply bg-gray-100 text-gray-800 hover:bg-gray-200 focus:ring-gray-500; }
-button.btn-danger { @apply bg-red-500 text-white hover:bg-red-600 focus:ring-red-500; }
-button.btn-link { @apply text-teal-500 hover:underline bg-transparent p-0; }
 
 a { @apply text-teal-500 hover:underline; }
 
@@ -44,9 +40,7 @@ table th, table td { @apply px-2 py-1 border border-gray-200 text-left; }
 table tr:nth-child(even){ @apply bg-gray-50; }
 
 /* custom utilities */
-.card {
-  @apply bg-white rounded shadow p-4;
-}
+/* .card utility removed in favor of Card component */
 
 /* drag-and-drop helpers for campaign priority ordering */
 tr.dragging { opacity: 0.35; }

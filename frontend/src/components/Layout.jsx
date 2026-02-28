@@ -1,4 +1,4 @@
-import Sidebar from './Sidebar';
+import Sidebar from './ui/Sidebar';
 import TestModeBanner from './TestModeBanner';
 import { NotificationProvider } from '../context/NotificationContext';
 import { LoadingProvider } from '../context/LoadingContext';
@@ -13,7 +13,7 @@ export default function Layout({ children }) {
           <ConfirmProvider>
             <div className="flex min-h-screen">
               <Sidebar />
-              <div className="flex-1 ml-36 bg-gray-100 text-gray-900">
+              <div className="flex-1 ml-44 bg-gray-50 text-gray-900">
                 <TestModeBanner />
                 {children}
               </div>

@@ -135,9 +135,25 @@ class EmailLog(Base):
     subject = Column(String(512), default="")
     message_id = Column(String(512), default=None)  # RFC 822 Message-ID for In-Reply-To threading
     thread_id = Column(String(512), default=None)   # Gmail threadId for thread continuity
+    opened = Column(Boolean, default=False, nullable=False)
+    clicked = Column(Boolean, default=False, nullable=False)
     lead = relationship("Lead", back_populates="email_logs")
     campaign = relationship("Campaign", back_populates="email_logs")
     inbox = relationship("Inbox")
+    # ensure clicks/opens are removed when a log is deleted rather than
+    # nullifying the FK (which would cause integrity errors since the
+    # column is non-nullable).  our campaign deletion path cascades into
+    # EmailLog, so we must also cascade these sub-objects.
+    opens = relationship(
+        "EmailOpen",
+        back_populates="email_log",
+        cascade="all, delete-orphan",
+    )
+    clicks = relationship(
+        "EmailClick",
+        back_populates="email_log",
+        cascade="all, delete-orphan",
+    )
 
 
 class LeadReply(Base):
@@ -148,6 +164,35 @@ class LeadReply(Base):
     replied_at = Column(DateTime, default=_utcnow)
     lead = relationship("Lead", back_populates="replies")
     campaign = relationship("Campaign", back_populates="replies")
+
+
+class EmailOpen(Base):
+    __tablename__ = "email_open"
+    id = Column(Integer, primary_key=True, index=True)
+    # cascade at the database level too so that orphan rows are removed even
+    # if someone issues a DELETE directly via SQL.  SQLite ignores ondelete
+    # but Postgres will enforce it.
+    email_log_id = Column(
+        Integer,
+        ForeignKey("email_log.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ip_address = Column(String(45), nullable=True)  # IPv4/IPv6
+    opened_at = Column(DateTime, default=_utcnow)
+    email_log = relationship("EmailLog", back_populates="opens")
+
+
+class EmailClick(Base):
+    __tablename__ = "email_click"
+    id = Column(Integer, primary_key=True, index=True)
+    email_log_id = Column(
+        Integer,
+        ForeignKey("email_log.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    ip_address = Column(String(45), nullable=True)
+    clicked_at = Column(DateTime, default=_utcnow)
+    email_log = relationship("EmailLog", back_populates="clicks")
 
 
 class AppSetting(Base):

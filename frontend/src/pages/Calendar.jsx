@@ -3,6 +3,8 @@ import { api } from '../api';
 import { useLoading } from '../context/LoadingContext';
 import { useNotify } from '../context/NotificationContext';
 import { useConfirm } from '../context/ConfirmContext';
+import { Card } from '../components/ui/Card';
+import { Button } from '../components/ui/Button';
 
 const DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
@@ -289,7 +291,7 @@ export default function Calendar() {
   return (
     <div className="p-8">
       <h1 className="text-2xl font-bold">Calendar</h1>
-      <div className="card flex flex-wrap justify-between items-center mb-4 p-2">
+      <Card className="flex flex-wrap justify-between items-center mb-4 p-2">
         <div className="flex flex-wrap gap-4 items-center">
           <div>
             <span className="text-sm text-gray-500">Test Mode:</span> <span className={serverStatus.test_mode?'text-red-600':'text-green-600'}>{serverStatus.test_mode?'ON':'OFF'}</span>
@@ -309,9 +311,9 @@ export default function Calendar() {
         </div>
         <div className="flex items-center gap-2">
           <span className="text-xs text-gray-500">Auto-refresh: 30s</span>
-          <button className="btn secondary text-xs" onClick={loadData}>↻ Refresh Now</button>
+          <Button size="sm" variant="outline" onClick={loadData}>↻ Refresh Now</Button>
         </div>
-      </div>
+      </Card>
       <div className="stats-row mb-4">
         <div className="stat-card"><div className="num" id="stat-sent">{stats.total_sent||0}</div><div className="lbl">Total sent</div></div>
         <div className="stat-card"><div className="num" id="stat-sched">{stats.total_scheduled||0}</div><div className="lbl">Scheduled</div></div>
@@ -328,27 +330,29 @@ export default function Calendar() {
           <option value="scheduled">Scheduled</option>
         </select>
         <input type="text" value={searchFilter} onChange={e=>setSearchFilter(e.target.value)} placeholder="Search lead, subject…" className="border rounded p-1 text-sm" style={{maxWidth:'240px'}} />
-        <button className="btn secondary text-xs" onClick={clearFilters}>Clear</button>
-        <button
+        <Button size="sm" variant="outline" onClick={clearFilters}>Clear</Button>
+        <Button
           id="validate-queue-btn"
-          className="btn secondary text-xs"
+          size="sm"
+          variant="outline"
           onClick={validateQueue}
           disabled={validateState.busy}
         >
           {validateState.text}
-        </button>
-        <button
+        </Button>
+        <Button
           id="recalc-all-btn"
-          className="btn secondary text-xs"
+          size="sm"
+          variant="outline"
           onClick={recalculateAll}
           disabled={recalcState.busy}
         >
           {recalcState.text}
-        </button>
+        </Button>
       </div>
-      <div className="card p-4" id="calendar-body">
+      <Card className="p-4" id="calendar-body">
         {renderSection()}
-      </div>
+      </Card>
     </div>
   );
 }

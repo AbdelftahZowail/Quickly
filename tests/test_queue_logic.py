@@ -12,7 +12,7 @@ from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
 import inspect
 
-from app.models import QueueSlot, EmailLog, CampaignLead
+from app.models import QueueSlot, EmailLog, EmailClick, CampaignLead, Lead
 from app.queue_logic import (
     _parse_time,
     _estimated_send_time,
@@ -30,7 +30,7 @@ from app.queue_logic import (
 )
 # import API route helpers so we can invoke them directly and verify they
 # implicitly trigger queue recalculation
-from app.routers.campaigns import update_campaign, create_sequence, delete_sequence, reorder_campaigns, CampaignReorder
+from app.routers.campaigns import update_campaign, create_sequence, delete_sequence, reorder_campaigns, CampaignReorder, delete_campaign
 from app.routers.leads import update_lead, delete_lead
 from app.routers.inbox import update_inbox
 from app.schemas import CampaignUpdate, LeadUpdate, InboxUpdate, SequenceCreate
@@ -42,6 +42,7 @@ from tests.conftest import (
     make_campaign_lead,
     make_campaign_inbox,
     make_email_log,
+    make_email_click,
     make_queue_slot,
 )
 
@@ -1289,6 +1290,29 @@ class TestApiRecalculationTriggers:
         )
         assert cnt3.scalar() == 1
 
+    async def test_delete_campaign_also_removes_exclusive_leads(self, session):
+        campaign = await make_campaign(session)
+        lead = await make_lead(session)
+        await make_campaign_lead(session, campaign.id, lead.id)
+        # ensure lead exists before deletion
+        res1 = await session.execute(select(Lead).where(Lead.id == lead.id))
+        assert res1.scalar_one_or_none() is not None
+        await delete_campaign(campaign.id, db=session)
+        # lead should have been cleaned up too
+        res2 = await session.execute(select(Lead).where(Lead.id == lead.id))
+        assert res2.scalar_one_or_none() is None
+
+    async def test_delete_campaign_retains_shared_lead(self, session):
+        camp1 = await make_campaign(session)
+        camp2 = await make_campaign(session)
+        lead = await make_lead(session)
+        await make_campaign_lead(session, camp1.id, lead.id)
+        await make_campaign_lead(session, camp2.id, lead.id)
+        await delete_campaign(camp1.id, db=session)
+        # lead still exists because it's tied to camp2
+        res3 = await session.execute(select(Lead).where(Lead.id == lead.id))
+        assert res3.scalar_one_or_none() is not None
+
     async def test_lead_status_change_removes_slots_and_rebalances(self, session):
         inbox = await make_inbox(session, max_emails_per_day=50, wait_minutes_between=5)
         campaign = await make_campaign(session)
@@ -1424,6 +1448,22 @@ class TestApiRecalculationTriggers:
         slot_a2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_a.id))
         slot_b2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_b.id))
         assert slot_b2.scalars().one().scheduled_date.date() < slot_a2.scalars().one().scheduled_date.date()
+
+    async def test_delete_campaign_cascades_email_clicks(self, session):
+        # reproduce the bug where deleting a campaign left orphaned click rows
+        campaign = await make_campaign(session)
+        lead = await make_lead(session)
+        log = await make_email_log(session, lead.id, campaign.id)
+        # attach a click record to the log
+        await make_email_click(session, log.id)
+        count = await session.execute(select(func.count(EmailClick.id)))
+        assert count.scalar() == 1
+        # calling the router directly mimics the API path seen in the error
+        await delete_campaign(campaign.id, db=session)
+        # once the campaign (and therefore log) is removed, clicks should
+        # have been deleted as well rather than nulled out
+        count2 = await session.execute(select(func.count(EmailClick.id)))
+        assert count2.scalar() == 0
 
 
 class TestCampaignStats:

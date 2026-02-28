@@ -3,6 +3,8 @@ import { api } from '../api';
 import { useDarkMode } from '../context/DarkModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
 
 
 export default function Settings() {
@@ -74,13 +76,13 @@ export default function Settings() {
     <div className="p-8">
       <h1 className="text-2xl font-bold mb-4">Settings</h1>
       <div className="flex items-center gap-2 mb-6">
-        <button type="button" className="btn secondary text-sm" onClick={toggleDarkMode}>
+        <Button size="sm" variant="outline" onClick={toggleDarkMode}>
           {darkMode ? 'Light Mode' : 'Dark Mode'}
-        </button>
+        </Button>
         <span className="text-sm text-gray-500">(UI preference only)</span>
       </div>
       {/* test mode */}
-      <div className="card p-4 mt-6">
+      <Card className="mt-6">
         <h2 className="text-lg font-semibold mb-2">Test Mode</h2>
         <p className="text-xs text-gray-500 mb-2">
           When enabled, emails are redirected or simulated; disable to send
@@ -94,10 +96,10 @@ export default function Settings() {
           />
           <span className="text-sm">Enabled</span>
         </label>
-      </div>
+      </Card>
 
       {/* scheduling strategy */}
-      <div className="card p-4 mt-6">
+      <Card className="mt-6">
         <h2 className="text-lg font-semibold mb-2">Scheduling Strategy</h2>
         <p className="text-xs text-gray-500 mb-2">Controls how ⚡ Recalculate All Campaigns distributes emails across campaigns.</p>
         <div className="space-y-3">
@@ -120,7 +122,7 @@ export default function Settings() {
             </span>
           </label>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
