@@ -10,7 +10,7 @@ from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, 
 from app.routers import unibox as unibox_router
 from app.routers.unibox import UniboxLoadMoreRequest, UniboxSendRequest
 from app.sender import SendResult
-from app.unibox import get_thread_messages, upsert_sent_message
+from app.unibox import _upsert_message_from_gmail, get_thread_messages, upsert_sent_message
 
 
 def _ms(dt: datetime) -> int:
@@ -318,4 +318,149 @@ async def test_upsert_sent_message_stays_at_thread_bottom_when_local_time_is_beh
     payload = await get_thread_messages(session, thread_id="thr-order", inbox_id=inbox.id)
     ids = [m["message_id"] for m in payload["messages"]]
     assert ids[-1] == "m-sent"
+
+
+@pytest.mark.asyncio
+async def test_metadata_upsert_does_not_clobber_existing_downloaded_body(session):
+    inbox = Inbox(email="keep-body@example.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    msg_time = _ms(datetime(2026, 2, 1, 12, 0, 0))
+    session.add(GmailThread(inbox_id=inbox.id, thread_id="thr-keep", snippet="old", last_internal_date=msg_time))
+    session.add(
+        GmailMessage(
+            inbox_id=inbox.id,
+            message_id="m-keep",
+            thread_id="thr-keep",
+            internal_date=msg_time,
+            snippet="old snippet",
+            headers_json=json.dumps([{"name": "Subject", "value": "Keep"}]),
+            label_ids_json=json.dumps(["INBOX"]),
+            body_fetched=True,
+            body_plain="already downloaded",
+            body_html="",
+        )
+    )
+    await session.flush()
+
+    metadata_payload = {
+        "id": "m-keep",
+        "threadId": "thr-keep",
+        "internalDate": str(msg_time),
+        "snippet": "new metadata snippet",
+        "historyId": "h-1",
+        "labelIds": ["INBOX"],
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "Keep"},
+                {"name": "From", "value": "sender@example.com"},
+                {"name": "To", "value": "keep-body@example.com"},
+            ]
+        },
+    }
+    await _upsert_message_from_gmail(
+        session,
+        inbox_id=inbox.id,
+        gmail_message=metadata_payload,
+        include_body=False,
+    )
+
+    row = await session.execute(
+        select(GmailMessage).where(GmailMessage.inbox_id == inbox.id, GmailMessage.message_id == "m-keep")
+    )
+    msg = row.scalar_one()
+    assert msg.body_fetched is True
+    assert msg.body_plain == "already downloaded"
+
+
+@pytest.mark.asyncio
+async def test_get_unibox_thread_hydrates_on_demand_when_body_missing(session, monkeypatch):
+    inbox = Inbox(email="ondemand@example.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    session.add(
+        GmailAccount(
+            inbox_id=inbox.id,
+            google_email="ondemand@example.com",
+            access_token="token",
+            refresh_token="refresh",
+        )
+    )
+
+    msg_time = _ms(datetime(2026, 2, 3, 9, 0, 0))
+    session.add(
+        GmailThread(
+            inbox_id=inbox.id,
+            thread_id="thr-on-demand",
+            snippet="preview",
+            last_internal_date=msg_time,
+        )
+    )
+    session.add(
+        GmailMessage(
+            inbox_id=inbox.id,
+            message_id="m-on-demand",
+            thread_id="thr-on-demand",
+            internal_date=msg_time,
+            snippet="preview",
+            headers_json=json.dumps(
+                [
+                    {"name": "Subject", "value": "Need body"},
+                    {"name": "From", "value": "sender@example.com"},
+                    {"name": "To", "value": "ondemand@example.com"},
+                ]
+            ),
+            label_ids_json=json.dumps(["INBOX"]),
+            body_fetched=False,
+            body_plain="",
+            body_html="",
+        )
+    )
+    await session.flush()
+
+    encoded_body = base64.urlsafe_b64encode(b"Hydrated body content").decode("ascii").rstrip("=")
+
+    def fake_get_thread(access_token: str, thread_id: str, *, payload_format: str = "full"):
+        assert access_token == "token"
+        assert thread_id == "thr-on-demand"
+        assert payload_format == "full"
+        return {
+            "id": "thr-on-demand",
+            "messages": [
+                {
+                    "id": "m-on-demand",
+                    "threadId": "thr-on-demand",
+                    "internalDate": str(msg_time),
+                    "snippet": "preview",
+                    "historyId": "h2",
+                    "labelIds": ["INBOX"],
+                    "payload": {
+                        "mimeType": "text/plain",
+                        "headers": [
+                            {"name": "Subject", "value": "Need body"},
+                            {"name": "From", "value": "sender@example.com"},
+                            {"name": "To", "value": "ondemand@example.com"},
+                        ],
+                        "body": {"data": encoded_body},
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr("app.unibox._gmail_get_thread", fake_get_thread)
+
+    payload = await unibox_router.get_unibox_thread("thr-on-demand", inbox_id=inbox.id, db=session)
+    assert payload["messages"][0]["body_plain"] == "Hydrated body content"
+
+    row = await session.execute(
+        select(GmailMessage).where(
+            GmailMessage.inbox_id == inbox.id,
+            GmailMessage.message_id == "m-on-demand",
+        )
+    )
+    msg = row.scalar_one()
+    assert msg.body_fetched is True
+    assert msg.body_plain == "Hydrated body content"
 

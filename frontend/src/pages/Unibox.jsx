@@ -101,6 +101,7 @@ export default function Unibox() {
   });
   const [sending, setSending] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [initialListSyncLoading, setInitialListSyncLoading] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [autoSyncAttempted, setAutoSyncAttempted] = useState(false);
   // view mode for each message is now determined automatically based on available content (html vs plain)
@@ -186,10 +187,22 @@ export default function Unibox() {
     }
   }, [setSearchParams]);
 
+  const loadSyncStatus = useCallback(async ({ silent = false } = {}) => {
+    try {
+      const status = await uniboxRequest('/unibox/status');
+      setInitialListSyncLoading(Boolean(status?.initial_list_sync_in_progress));
+    } catch (err) {
+      if (!silent) {
+        notify({ type: 'error', message: err.message || 'Failed to load sync status.' });
+      }
+    }
+  }, [notify]);
+
   useEffect(() => {
     // initial load, clear any previously held entries
     loadConversations({ page: 1 });
-  }, [loadConversations]);
+    loadSyncStatus({ silent: true });
+  }, [loadConversations, loadSyncStatus]);
 
   // monitor conversation list scrolling and load more pages lazily
   useEffect(() => {
@@ -240,13 +253,14 @@ export default function Unibox() {
         notify({ type: 'error', message: 'No Gmail inboxes available for sync.' });
       } else {
         notify({ type: 'success', message: `Sync queued for ${res.queued} inbox(es).` });
+        await loadSyncStatus({ silent: true });
       }
     } catch (err) {
       notify({ type: 'error', message: err.message || 'Failed to start sync.' });
     } finally {
       setSyncing(false);
     }
-  }, [notify]);
+  }, [loadSyncStatus, notify]);
 
   const triggerLoadOlder = useCallback(async () => {
     setLoadingOlder(true);
@@ -284,6 +298,15 @@ export default function Unibox() {
   }, [autoSyncAttempted, conversations.length, listError, listLoading, triggerSync]);
 
   useEffect(() => {
+    if (!initialListSyncLoading) return undefined;
+    const timer = setInterval(() => {
+      loadConversations({ page: 1, silent: true });
+      loadSyncStatus({ silent: true });
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [initialListSyncLoading, loadConversations, loadSyncStatus]);
+
+  useEffect(() => {
     const source = new EventSource('/unibox/events');
 
     const onUpdate = () => {
@@ -297,20 +320,38 @@ export default function Unibox() {
       }, 1000);
     };
 
+    const onSyncStatus = (evt) => {
+      try {
+        const data = JSON.parse(evt.data || '{}');
+        if (data?.phase === 'initial-list') {
+          setInitialListSyncLoading(Boolean(data?.in_progress));
+          if (data?.in_progress) {
+            loadConversations({ page: 1, silent: true });
+          }
+        } else {
+          loadSyncStatus({ silent: true });
+        }
+      } catch {
+        loadSyncStatus({ silent: true });
+      }
+    };
+
     source.addEventListener('unibox.thread.updated', onUpdate);
+    source.addEventListener('unibox.sync.status', onSyncStatus);
     source.onerror = () => {
       // Keep the EventSource open so the browser can reconnect automatically.
     };
 
     return () => {
       source.removeEventListener('unibox.thread.updated', onUpdate);
+      source.removeEventListener('unibox.sync.status', onSyncStatus);
       source.close();
       if (sseRefreshTimerRef.current) {
         clearTimeout(sseRefreshTimerRef.current);
         sseRefreshTimerRef.current = null;
       }
     };
-  }, [loadConversations, loadThread, selectedThread?.inbox_id, selectedThread?.thread_id]);
+  }, [loadConversations, loadSyncStatus, loadThread, selectedThread?.inbox_id, selectedThread?.thread_id]);
 
   useEffect(() => {
     if (!replyOpen || !threadScrollRef.current) return;
@@ -374,6 +415,11 @@ export default function Unibox() {
           </div>
 
           {listLoading && <p className="text-sm text-gray-500">Loading conversations...</p>}
+          {initialListSyncLoading && (
+            <p className="text-sm text-teal-700">
+              Initial sync is loading conversation list...
+            </p>
+          )}
           {listError && <p className="text-sm text-red-600">{listError}</p>}
           {!listLoading && !listError && conversations.length === 0 && (
             <p className="text-sm text-gray-500">

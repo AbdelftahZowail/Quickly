@@ -20,7 +20,9 @@ from app.sender import SendResult, send_email
 from app.unibox import (
     BACKFILL_WINDOW_DAYS,
     decode_push_message_data,
+    get_unibox_sync_status,
     get_thread_messages,
+    hydrate_thread_on_demand,
     list_unibox_conversations,
     queue_backfill_for_all_inboxes,
     queue_backfill_for_inbox,
@@ -78,6 +80,11 @@ async def get_unibox(
     db: AsyncSession = Depends(get_db),
 ):
     return await list_unibox_conversations(db, page=page, page_size=page_size)
+
+
+@router.get("/status")
+async def get_unibox_status(inbox_id: int | None = Query(default=None, ge=1)):
+    return await get_unibox_sync_status(inbox_id=inbox_id)
 
 
 @router.post("/sync")
@@ -142,6 +149,21 @@ async def get_unibox_thread(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload is None:
         raise HTTPException(status_code=404, detail="Thread not found")
+
+    hydrated = await hydrate_thread_on_demand(
+        db,
+        thread_id=payload["thread_id"],
+        inbox_id=int(payload["inbox_id"]),
+    )
+    if hydrated:
+        await db.commit()
+        payload = await get_thread_messages(
+            db,
+            thread_id=payload["thread_id"],
+            inbox_id=int(payload["inbox_id"]),
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
     return payload
 
 
