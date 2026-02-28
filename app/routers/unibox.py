@@ -18,9 +18,15 @@ from app.database import get_db
 from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox
 from app.sender import SendResult, send_email
 from app.unibox import (
+    BACKFILL_WINDOW_DAYS,
     decode_push_message_data,
+    get_unibox_sync_status,
     get_thread_messages,
+    hydrate_thread_on_demand,
     list_unibox_conversations,
+    queue_backfill_for_all_inboxes,
+    queue_backfill_for_inbox,
+    queue_sync_for_all_inboxes,
     queue_sync_for_inbox,
     unibox_events,
     upsert_sent_message,
@@ -40,6 +46,15 @@ class UniboxSendRequest(BaseModel):
     in_reply_to: str | None = None
     references: str | None = None
     is_html: bool = False
+
+
+class UniboxSyncRequest(BaseModel):
+    inbox_id: int | None = Field(default=None, gt=0)
+
+
+class UniboxLoadMoreRequest(BaseModel):
+    inbox_id: int | None = Field(default=None, gt=0)
+    window_days: int = Field(default=BACKFILL_WINDOW_DAYS, ge=1, le=60)
 
 
 def _extract_message_id_from_headers(headers_json: str) -> str | None:
@@ -67,6 +82,61 @@ async def get_unibox(
     return await list_unibox_conversations(db, page=page, page_size=page_size)
 
 
+@router.get("/status")
+async def get_unibox_status(inbox_id: int | None = Query(default=None, ge=1)):
+    return await get_unibox_sync_status(inbox_id=inbox_id)
+
+
+@router.post("/sync")
+async def trigger_unibox_sync(data: UniboxSyncRequest, db: AsyncSession = Depends(get_db)):
+    if data.inbox_id:
+        inbox_row = await db.execute(
+            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider == "gmail")
+        )
+        inbox_id = inbox_row.scalar_one_or_none()
+        if not inbox_id:
+            raise HTTPException(status_code=404, detail="Gmail inbox not found")
+        await queue_sync_for_inbox(inbox_id, reason="manual")
+        return {"ok": True, "queued": 1, "inbox_ids": [inbox_id]}
+
+    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+    inbox_ids = [int(row[0]) for row in inbox_rows.all()]
+    if not inbox_ids:
+        return {"ok": True, "queued": 0, "inbox_ids": []}
+
+    await queue_sync_for_all_inboxes(reason="manual")
+    return {"ok": True, "queued": len(inbox_ids), "inbox_ids": inbox_ids}
+
+
+@router.post("/load-more")
+async def trigger_unibox_load_more(data: UniboxLoadMoreRequest, db: AsyncSession = Depends(get_db)):
+    window_days = max(1, int(data.window_days))
+    if data.inbox_id:
+        inbox_row = await db.execute(
+            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider == "gmail")
+        )
+        inbox_id = inbox_row.scalar_one_or_none()
+        if not inbox_id:
+            raise HTTPException(status_code=404, detail="Gmail inbox not found")
+        await queue_backfill_for_inbox(
+            inbox_id,
+            window_days=window_days,
+            reason="manual-backfill",
+        )
+        return {"ok": True, "queued": 1, "inbox_ids": [inbox_id], "window_days": window_days}
+
+    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+    inbox_ids = [int(row[0]) for row in inbox_rows.all()]
+    if not inbox_ids:
+        return {"ok": True, "queued": 0, "inbox_ids": [], "window_days": window_days}
+
+    await queue_backfill_for_all_inboxes(
+        window_days=window_days,
+        reason="manual-backfill",
+    )
+    return {"ok": True, "queued": len(inbox_ids), "inbox_ids": inbox_ids, "window_days": window_days}
+
+
 @router.get("/threads/{thread_id}")
 async def get_unibox_thread(
     thread_id: str,
@@ -79,6 +149,21 @@ async def get_unibox_thread(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if payload is None:
         raise HTTPException(status_code=404, detail="Thread not found")
+
+    hydrated = await hydrate_thread_on_demand(
+        db,
+        thread_id=payload["thread_id"],
+        inbox_id=int(payload["inbox_id"]),
+    )
+    if hydrated:
+        await db.commit()
+        payload = await get_thread_messages(
+            db,
+            thread_id=payload["thread_id"],
+            inbox_id=int(payload["inbox_id"]),
+        )
+        if payload is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
     return payload
 
 
@@ -222,7 +307,6 @@ async def gmail_push_webhook(
 
     payload = decode_push_message_data(str(raw_data))
     gmail_email = str(payload.get("emailAddress", "")).strip().lower()
-    history_id = str(payload.get("historyId", "")).strip()
     if not gmail_email:
         return {"ok": True, "ignored": True}
 
@@ -241,13 +325,10 @@ async def gmail_push_webhook(
         if not account:
             return {"ok": True, "ignored": True}
 
-    if history_id:
-        state_row = await db.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == account.inbox_id))
-        state = state_row.scalar_one_or_none()
-        if state:
-            state.latest_history_id = history_id
-            state.last_history_id = history_id
-
+    # Do not advance sync checkpoints from push payload historyId.
+    # The payload historyId represents "latest known" state at notification time;
+    # if we overwrite our own checkpoint first, the subsequent history delta query
+    # can skip the very changes that triggered this push.
     await db.commit()
     await queue_sync_for_inbox(account.inbox_id, reason="push")
     return {"ok": True}
