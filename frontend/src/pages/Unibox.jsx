@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Button from '../components/ui/Button';
 import { useNotify } from '../context/NotificationContext';
 
@@ -65,21 +65,32 @@ export default function Unibox() {
   const [syncing, setSyncing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [autoSyncAttempted, setAutoSyncAttempted] = useState(false);
+  const listRequestInFlightRef = useRef(false);
+  const sseRefreshTimerRef = useRef(null);
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / PAGE_SIZE)), [total]);
 
-  const loadConversations = useCallback(async () => {
-    setListLoading(true);
-    setListError('');
+  const loadConversations = useCallback(async ({ silent = false } = {}) => {
+    if (listRequestInFlightRef.current) return;
+    listRequestInFlightRef.current = true;
+    if (!silent) {
+      setListLoading(true);
+      setListError('');
+    }
     try {
       const data = await uniboxRequest(`/unibox?page=${page}&page_size=${PAGE_SIZE}`);
       const items = data?.items || [];
       setConversations(items);
       setTotal(data?.total || 0);
     } catch (err) {
-      setListError(err.message || 'Failed to load conversations');
+      if (!silent) {
+        setListError(err.message || 'Failed to load conversations');
+      }
     } finally {
-      setListLoading(false);
+      if (!silent) {
+        setListLoading(false);
+      }
+      listRequestInFlightRef.current = false;
     }
   }, [page]);
 
@@ -170,33 +181,31 @@ export default function Unibox() {
   }, [autoSyncAttempted, conversations.length, listError, listLoading, triggerSync]);
 
   useEffect(() => {
-    const timer = setInterval(() => {
-      loadConversations();
-      if (selectedThread?.thread_id && selectedThread?.inbox_id) {
-        loadThread(selectedThread.thread_id, selectedThread.inbox_id);
-      }
-    }, 12000);
-    return () => clearInterval(timer);
-  }, [loadConversations, loadThread, selectedThread?.inbox_id, selectedThread?.thread_id]);
-
-  useEffect(() => {
     const source = new EventSource('/unibox/events');
 
     const onUpdate = () => {
-      loadConversations();
-      if (selectedThread?.thread_id && selectedThread?.inbox_id) {
-        loadThread(selectedThread.thread_id, selectedThread.inbox_id);
-      }
+      if (sseRefreshTimerRef.current) return;
+      sseRefreshTimerRef.current = setTimeout(() => {
+        sseRefreshTimerRef.current = null;
+        loadConversations({ silent: true });
+        if (selectedThread?.thread_id && selectedThread?.inbox_id) {
+          loadThread(selectedThread.thread_id, selectedThread.inbox_id);
+        }
+      }, 1000);
     };
 
     source.addEventListener('unibox.thread.updated', onUpdate);
     source.onerror = () => {
-      source.close();
+      // Keep the EventSource open so the browser can reconnect automatically.
     };
 
     return () => {
       source.removeEventListener('unibox.thread.updated', onUpdate);
       source.close();
+      if (sseRefreshTimerRef.current) {
+        clearTimeout(sseRefreshTimerRef.current);
+        sseRefreshTimerRef.current = null;
+      }
     };
   }, [loadConversations, loadThread, selectedThread?.inbox_id, selectedThread?.thread_id]);
 
@@ -225,7 +234,7 @@ export default function Unibox() {
       notify({ type: 'success', message: 'Reply sent.' });
       setCompose(c => ({ ...c, body: '' }));
       await loadThread(selectedThread.thread_id, selectedThread.inbox_id);
-      await loadConversations();
+      await loadConversations({ silent: true });
     } catch (err) {
       notify({ type: 'error', message: err.message || 'Failed to send reply.' });
     } finally {

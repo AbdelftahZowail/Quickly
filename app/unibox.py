@@ -30,6 +30,7 @@ GMAIL_API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
 FULL_SYNC_PROGRESS_COMMIT_INTERVAL = 5
 INITIAL_SYNC_WINDOW_DAYS = 7
 BACKFILL_WINDOW_DAYS = 7
+RECENT_RECOVERY_WINDOW_HOURS = 24
 try:
     INITIAL_SYNC_MAX_MESSAGES = max(50, int(os.getenv("UNIBOX_INITIAL_SYNC_MAX_MESSAGES", "200")))
 except ValueError:
@@ -38,6 +39,10 @@ try:
     BACKFILL_SYNC_MAX_MESSAGES = max(50, int(os.getenv("UNIBOX_BACKFILL_SYNC_MAX_MESSAGES", "200")))
 except ValueError:
     BACKFILL_SYNC_MAX_MESSAGES = 200
+try:
+    RECENT_RECOVERY_MAX_MESSAGES = max(20, int(os.getenv("UNIBOX_RECENT_RECOVERY_MAX_MESSAGES", "120")))
+except ValueError:
+    RECENT_RECOVERY_MAX_MESSAGES = 120
 
 
 class GmailAPIError(RuntimeError):
@@ -519,6 +524,19 @@ async def upsert_sent_message(
     is_html: bool,
 ) -> GmailMessage:
     now_ms = _now_epoch_ms()
+    # Keep optimistic sent messages in final visual position immediately.
+    # If local clock/time-offset is behind Gmail timestamps, force monotonic
+    # order by pinning this message after the latest known thread message.
+    last_internal_res = await db.execute(
+        select(func.max(GmailMessage.internal_date)).where(
+            GmailMessage.inbox_id == inbox_id,
+            GmailMessage.thread_id == thread_id,
+        )
+    )
+    last_internal_date = last_internal_res.scalar_one()
+    if last_internal_date is not None and now_ms <= int(last_internal_date):
+        now_ms = int(last_internal_date) + 1
+
     snippet = _body_snippet("" if is_html else body, body if is_html else "", fallback=body)
     headers = [
         {"name": "From", "value": from_email},
@@ -881,6 +899,17 @@ async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[
             state.latest_history_id = newest_history
             state.last_history_id = newest_history
 
+    # Safety net for drift/races: during push/manual syncs, probe a recent
+    # window and import any missing message ids that delta history did not
+    # include (for example if checkpoints were previously advanced incorrectly).
+    if reason in {"push", "manual"} and not do_full_sync:
+        recovered_threads = await _recover_recent_missing_messages(
+            db,
+            inbox_id=inbox.id,
+            access_token=access_token,
+        )
+        touched_threads.update(recovered_threads)
+
     cfg = await get_gmail_sync_config(db)
     topic = (cfg.get("push_topic") or "").strip()
     renew_watch = (
@@ -986,6 +1015,52 @@ async def _backfill_older_window(
         meta["range_end"],
     )
     return touched_threads, meta
+
+
+async def _recover_recent_missing_messages(
+    db: AsyncSession,
+    *,
+    inbox_id: int,
+    access_token: str,
+    window_hours: int = RECENT_RECOVERY_WINDOW_HOURS,
+    max_messages: int = RECENT_RECOVERY_MAX_MESSAGES,
+) -> set[tuple[int, str]]:
+    end_dt = time_provider.utcnow()
+    start_dt = end_dt - timedelta(hours=max(1, int(window_hours)))
+    recent_ids = await asyncio.to_thread(
+        _gmail_list_message_ids_in_window,
+        access_token,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        max_messages=max_messages,
+    )
+    if not recent_ids:
+        return set()
+
+    existing_rows = await db.execute(
+        select(GmailMessage.message_id).where(
+            GmailMessage.inbox_id == inbox_id,
+            GmailMessage.message_id.in_(recent_ids),
+        )
+    )
+    existing_ids = {str(row[0]) for row in existing_rows.all()}
+    missing_ids = [msg_id for msg_id in recent_ids if msg_id not in existing_ids]
+    if not missing_ids:
+        return set()
+
+    touched_threads: set[tuple[int, str]] = set()
+    for msg_id in missing_ids:
+        payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox_id, gmail_message=payload)
+        touched_threads.add((inbox_id, row.thread_id))
+
+    log.info(
+        "Unibox recent recovery inbox_id=%s recovered_messages=%s window_hours=%s",
+        inbox_id,
+        len(missing_ids),
+        window_hours,
+    )
+    return touched_threads
 
 
 _sync_lock = asyncio.Lock()

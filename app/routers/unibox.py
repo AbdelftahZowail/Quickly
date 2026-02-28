@@ -285,7 +285,6 @@ async def gmail_push_webhook(
 
     payload = decode_push_message_data(str(raw_data))
     gmail_email = str(payload.get("emailAddress", "")).strip().lower()
-    history_id = str(payload.get("historyId", "")).strip()
     if not gmail_email:
         return {"ok": True, "ignored": True}
 
@@ -304,13 +303,10 @@ async def gmail_push_webhook(
         if not account:
             return {"ok": True, "ignored": True}
 
-    if history_id:
-        state_row = await db.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == account.inbox_id))
-        state = state_row.scalar_one_or_none()
-        if state:
-            state.latest_history_id = history_id
-            state.last_history_id = history_id
-
+    # Do not advance sync checkpoints from push payload historyId.
+    # The payload historyId represents "latest known" state at notification time;
+    # if we overwrite our own checkpoint first, the subsequent history delta query
+    # can skip the very changes that triggered this push.
     await db.commit()
     await queue_sync_for_inbox(account.inbox_id, reason="push")
     return {"ok": True}

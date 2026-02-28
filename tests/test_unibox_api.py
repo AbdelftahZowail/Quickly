@@ -1,3 +1,4 @@
+import base64
 import json
 from datetime import datetime
 
@@ -5,10 +6,11 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.models import GmailAccount, GmailMessage, GmailThread, Inbox
+from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox
 from app.routers import unibox as unibox_router
 from app.routers.unibox import UniboxLoadMoreRequest, UniboxSendRequest
 from app.sender import SendResult
+from app.unibox import get_thread_messages, upsert_sent_message
 
 
 def _ms(dt: datetime) -> int:
@@ -217,4 +219,103 @@ async def test_unibox_load_more_queues_selected_inbox(session, monkeypatch):
     assert called["inbox_id"] == inbox.id
     assert called["window_days"] == 7
     assert called["reason"] == "manual-backfill"
+
+
+@pytest.mark.asyncio
+async def test_gmail_push_does_not_advance_history_checkpoint(session, monkeypatch):
+    inbox = Inbox(email="push-owner@example.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    session.add(
+        GmailAccount(
+            inbox_id=inbox.id,
+            google_email="push-owner@example.com",
+            access_token="token",
+            refresh_token="refresh",
+        )
+    )
+    session.add(
+        GmailSyncState(
+            inbox_id=inbox.id,
+            anchor_history_id="100",
+            latest_history_id="100",
+            last_history_id="100",
+        )
+    )
+    await session.flush()
+
+    called: dict[str, int | str] = {}
+
+    async def fake_queue_sync_for_inbox(inbox_id: int, reason: str = "push"):
+        called["inbox_id"] = inbox_id
+        called["reason"] = reason
+
+    monkeypatch.setattr("app.routers.unibox.queue_sync_for_inbox", fake_queue_sync_for_inbox)
+
+    payload = {"emailAddress": "push-owner@example.com", "historyId": "200"}
+    raw = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii").rstrip("=")
+
+    class DummyRequest:
+        async def json(self):
+            return {"message": {"data": raw}}
+
+    res = await unibox_router.gmail_push_webhook(request=DummyRequest(), db=session)
+    assert res["ok"] is True
+    assert called["inbox_id"] == inbox.id
+    assert called["reason"] == "push"
+
+    state_row = await session.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == inbox.id))
+    state = state_row.scalar_one()
+    assert state.latest_history_id == "100"
+    assert state.last_history_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_upsert_sent_message_stays_at_thread_bottom_when_local_time_is_behind(session, monkeypatch):
+    inbox = Inbox(email="order@example.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    session.add(
+        GmailThread(
+            inbox_id=inbox.id,
+            thread_id="thr-order",
+            snippet="older",
+            last_internal_date=5000,
+        )
+    )
+    session.add(
+        GmailMessage(
+            inbox_id=inbox.id,
+            message_id="m-old",
+            thread_id="thr-order",
+            internal_date=5000,
+            snippet="older",
+            headers_json=json.dumps([{"name": "Subject", "value": "Hi"}]),
+            label_ids_json=json.dumps(["INBOX"]),
+        )
+    )
+    await session.flush()
+
+    # Simulate local optimistic timestamp being behind the latest thread message.
+    monkeypatch.setattr("app.unibox._now_epoch_ms", lambda: 4000)
+
+    sent = await upsert_sent_message(
+        session,
+        inbox_id=inbox.id,
+        thread_id="thr-order",
+        gmail_message_id="m-sent",
+        rfc_message_id="<sent@example.com>",
+        subject="Re: Hi",
+        to_email="lead@example.com",
+        from_email="order@example.com",
+        body="Thanks",
+        is_html=False,
+    )
+    assert sent.internal_date == 5001
+
+    payload = await get_thread_messages(session, thread_id="thr-order", inbox_id=inbox.id)
+    ids = [m["message_id"] for m in payload["messages"]]
+    assert ids[-1] == "m-sent"
 
