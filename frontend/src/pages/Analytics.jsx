@@ -1,7 +1,19 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import Button from '../components/ui/Button';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
+// Recharts for charts
+import {
+  ResponsiveContainer,
+  AreaChart as ReAreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+  CartesianGrid,
+} from 'recharts';
 
 export default function Analytics() {
   const [campaigns, setCampaigns] = useState([]);
@@ -9,29 +21,47 @@ export default function Analytics() {
   const [currentChoice, setCurrentChoice] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
   const [error, setError] = useState(null);
-
-  // simple area chart for an array of percentage values
-  function AreaChart({ values, width = 600, height = 120 }) {
-    if (!values || values.length === 0) return null;
-    const step = values.length > 1 ? width / (values.length - 1) : width;
-    const pts = values.map((v, i) => {
-      const x = i * step;
-      const y = height - (v / 100) * height;
-      return `${x},${y}`;
-    });
-    const path = `M${pts.join(' L ')} L${width},${height} L0,${height} Z`;
-    return (
-      <svg width={width} height={height} className="mb-4">
-        <path d={path} fill="rgba(34, 211, 238, 0.3)" stroke="#22d3ee" strokeWidth="2" />
-      </svg>
-    );
-  }
+  // calendar sent data and filters
+  const [allSent, setAllSent] = useState([]);
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [serverToday, setServerToday] = useState(null);
+  // state for whether each series should be hidden
+  const [hideSeries, setHideSeries] = useState({
+    sent: false,
+    totalOpens: false,
+    uniqueOpens: false,
+    totalReplies: false,
+    totalClicks: false,
+    uniqueClicks: false,
+  });
+  // initialize hide flags for any series that are all zero; run only once when data arrives
+  const initializedRef = useRef(false);
 
   useEffect(() => {
     (async () => {
       try {
-        const data = await api.get('/campaigns');
-        setCampaigns(data);
+        const [camps, sent, offsetData] = await Promise.all([
+          api.get('/campaigns'),
+          api.get('/calendar/sent').catch(() => []),
+          api.get('/settings/time-offset').catch(() => ({ time_offset_days: 0 })),
+        ]);
+        setCampaigns(camps);
+        setAllSent(sent);
+        // compute server today using offset
+        const off = parseInt(offsetData.time_offset_days || 0, 10);
+        const t = new Date();
+        t.setDate(t.getDate() + off);
+        setServerToday(t);
+        if (!endDate) {
+          const iso = t.toISOString().slice(0,10);
+          setEndDate(iso);
+        }
+        if (!startDate) {
+          const past = new Date(t);
+          past.setDate(past.getDate() - 7);
+          setStartDate(past.toISOString().slice(0,10));
+        }
       } catch (e) {
         setError('Failed to load analytics');
       }
@@ -42,49 +72,179 @@ export default function Analytics() {
     ? campaigns.filter(c => selectedIds.includes(String(c.id)))
     : campaigns;
 
+  // compute aggregated stats for open/click rates (used to approximate uniques)
+  const totalSentForRates = filtered.reduce((acc,c)=>acc + ((c.stats?.emails_sent)||0),0);
+  const totalOpened = filtered.reduce((acc,c)=>acc + ((c.stats?.open_rate||0) * ((c.stats?.emails_sent)||0)),0);
+  const totalClicked = filtered.reduce((acc,c)=>acc + ((c.stats?.click_rate||0) * ((c.stats?.emails_sent)||0)),0);
+  const openRateAll = totalSentForRates>0 ? Math.round((totalOpened/totalSentForRates)*100) : 0;
+  const clickRateAll = totalSentForRates>0 ? Math.round((totalClicked/totalSentForRates)*100) : 0;
 
-  // summary metrics for the current filtered set
-  const summary = filtered.reduce(
-    (acc, c) => {
-      const stats = c.stats || {};
-      acc.leads += stats.total_leads || 0;
-      acc.sent += stats.emails_sent || 0;
-      acc.seq += stats.sequences || 1;
-      acc.replies += stats.replies || 0;
-      return acc;
-    },
-    { leads: 0, sent: 0, seq: 0, replies: 0 }
-  );
-  const expectedAll = summary.leads * summary.seq;
-  const progressAll = expectedAll > 0 ? Math.round((summary.sent / expectedAll) * 100) : 0;
-  const replyRateAll = summary.sent > 0 ? Math.round((summary.replies / summary.sent) * 100) : 0;
-
-  function Bar({ percent, label }) {
-    return (
-      <div className="mb-4">
-        <div className="text-sm mb-1">{label}: {percent}%</div>
-        <div className="bg-gray-200 h-3 rounded overflow-hidden">
-          <div className="bg-teal-500 h-3" style={{ width: `${percent}%` }} />
-        </div>
-      </div>
-    );
-  }
-
-  // area chart values (progress percentages for each campaign in filtered set)
-  const progressValues = filtered.map(c => {
-    const stats = c.stats || {};
-    const totalLeads = stats.total_leads || 0;
-    const sent = stats.emails_sent || 0;
-    const seq = stats.sequences || 1;
-    const expected = totalLeads * seq;
-    return expected > 0 ? Math.round((sent / expected) * 100) : 0;
+  // filtered sent events by campaign and date range
+  const filteredSent = allSent.filter(e => {
+    if (selectedIds.length && !selectedIds.includes(String(e.campaign_id))) return false;
+    if (startDate && e.sent_date < startDate) return false;
+    if (endDate && e.sent_date > endDate) return false;
+    return true;
   });
+
+  // build daily data
+  const dailyMap = {};
+  // set up containers for unique counts per day
+  const seenOpen = {};
+  const seenClick = {};
+  filteredSent.forEach(e => {
+    const d = e.sent_date || (e.sent_at ? e.sent_at.slice(0,10) : '');
+    if (!d) return;
+    if (!dailyMap[d]) {
+      dailyMap[d] = { date: d, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 };
+      seenOpen[d] = new Set();
+      seenClick[d] = new Set();
+    }
+    dailyMap[d].sent += 1;
+    if (e.lead_status === 'replied') dailyMap[d].totalReplies += 1;
+    if (e.opens && e.opens.length) {
+      dailyMap[d].totalOpens += e.opens.length;
+      e.opens.forEach(o => {
+        if (o && o.ip) seenOpen[d].add(o.ip);
+      });
+    }
+    if (e.clicks && e.clicks.length) {
+      dailyMap[d].totalClicks += e.clicks.length;
+      e.clicks.forEach(c => {
+        if (c && c.ip) seenClick[d].add(c.ip);
+      });
+    }
+  });
+  // derive unique counts
+  Object.keys(dailyMap).forEach(d => {
+    dailyMap[d].uniqueOpens = seenOpen[d].size;
+    dailyMap[d].uniqueClicks = seenClick[d].size;
+  });
+
+  const chartData = Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date));
+
+  // series metadata for chart and legend
+  const seriesList = [
+    { key: 'sent', name: 'Sent', stroke: 'rgba(59,130,246,0.8)', fill: 'rgba(59,130,246,0.4)' },
+    { key: 'totalOpens', name: 'Total Opens', stroke: 'rgba(234,179,8,0.8)', fill: 'rgba(234,179,8,0.4)' },
+    { key: 'uniqueOpens', name: 'Unique Opens', stroke: 'rgba(16,185,129,0.8)', fill: 'rgba(16,185,129,0.4)' },
+    { key: 'totalReplies', name: 'Total Replies', stroke: 'rgba(45,212,191,0.8)', fill: 'rgba(45,212,191,0.4)' },
+    { key: 'totalClicks', name: 'Total Clicks', stroke: 'rgba(234,88,12,0.8)', fill: 'rgba(234,88,12,0.4)' },
+    { key: 'uniqueClicks', name: 'Unique Clicks', stroke: 'rgba(236,72,153,0.8)', fill: 'rgba(236,72,153,0.4)' },
+  ];
+
+  // once chartData is computed, initialize hide state for any all-zero series (only first time)
+  useEffect(() => {
+    // only initialize once and only after we have real data rows;
+    // when chartData is empty `every` returns true which would hide
+    // every series by default.
+    if (!initializedRef.current && chartData.length > 0) {
+      const newHide = {};
+      seriesList.forEach(s => {
+        newHide[s.key] = chartData.every(d => d[s.key] === 0);
+      });
+      setHideSeries(prev => ({ ...prev, ...newHide }));
+      initializedRef.current = true;
+    }
+  }, [chartData]);
+
+  const toggleSeries = key => {
+    setHideSeries(prev => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  // calculate totals for selected range
+  const rangeSent = chartData.reduce((a,d)=>a+d.sent,0);
+  const rangeReplies = chartData.reduce((a,d)=>a+d.totalReplies,0);
+  const rangeClicks = chartData.reduce((a,d)=>a+d.totalClicks,0);
+  const replyRateRange = rangeSent > 0 ? Math.round((rangeReplies / rangeSent) * 100) : 0;
+  const clickRateRange = rangeSent > 0 ? Math.round((rangeClicks / rangeSent) * 100) : 0;
 
   return (
     <div className="p-8 space-y-6">
       <h1 className="text-2xl font-semibold mb-4">Campaign Analytics</h1>
       {error && <div className="text-red-600">{error}</div>}
-      <AreaChart values={progressValues} width={600} height={120} />
+      {/* filters & KPI cards */}
+      {serverToday && (
+        <div className="text-sm text-gray-500 mb-2">
+          Server date: {serverToday.toISOString().slice(0,10)}
+        </div>
+      )}
+      {/* KPI cards based on range */}
+      <div className="flex flex-wrap gap-4 mb-4">
+        <Card className="p-4">
+          <div className="text-sm text-gray-500">Total Sent</div>
+          <div className="text-2xl font-bold">{rangeSent}</div>
+        </Card>
+        <Card className="p-4">
+          <div className="text-sm text-gray-500">Reply Rate</div>
+          <div className="text-2xl font-bold">{replyRateRange}%</div>
+        </Card>
+        <Card className="p-4">
+          <div className="text-sm text-gray-500">Click Rate</div>
+          <div className="text-2xl font-bold">{clickRateRange}%</div>
+        </Card>
+      </div>
+      <div className="flex flex-col lg:flex-row items-center gap-4 mb-4">
+        <div className="flex items-center gap-2">
+          <label className="text-sm">
+            From <input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)} className="ml-1 border rounded p-1" />
+          </label>
+          <label className="text-sm">
+            To <input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)} className="ml-1 border rounded p-1" />
+          </label>
+        </div>
+        {/* legend now controls series visibility, toggles below chart instead of checkboxes */}
+        <div className="text-sm text-gray-500">Toggle series by clicking legend items below the chart.</div>
+      </div>
+
+      {/* timeline area chart */}
+      <div style={{ width: '100%', height: 260 }}>
+        {/* extra bottom space via margin so legend sits below tooltip area */}
+        <ResponsiveContainer>
+          <ReAreaChart data={chartData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+            <XAxis dataKey="date" />
+            <YAxis />
+            {/* ensure tooltip renders above legend/tools by using z-index */}
+            <Tooltip wrapperStyle={{ zIndex: 1000 }} />
+            <CartesianGrid strokeDasharray="3 3" />
+            {seriesList.map(s => (
+              <Area
+                key={s.key}
+                name={s.name}
+                type="monotone"
+                dataKey={s.key}
+                stroke={s.stroke}
+                fill={s.fill}
+                hide={hideSeries[s.key]}
+              />
+            ))}
+            <Legend
+              verticalAlign="bottom"
+              align="center"
+              wrapperStyle={{ marginTop: 16 }}
+              content={() => (
+                <div className="flex flex-wrap justify-center gap-4">
+                  {seriesList.map(s => {
+                    const inactive = hideSeries[s.key];
+                    return (
+                      <span
+                        key={s.key}
+                        onClick={() => toggleSeries(s.key)}
+                        className={`flex items-center cursor-pointer select-none ${inactive ? 'opacity-50' : ''}`}
+                      >
+                        <svg width="10" height="10" className="mr-1">
+                          <rect width="10" height="10" fill={s.stroke} />
+                        </svg>
+                        {s.name}
+                      </span>
+                    );
+                  })}
+                </div>
+              )}
+            />
+          </ReAreaChart>
+        </ResponsiveContainer>
+      </div>
       <div className="flex flex-col lg:flex-row items-start lg:items-center gap-4">
         <div className="flex-1">
           <label htmlFor="campaign-select" className="sr-only">Campaigns</label>
@@ -103,7 +263,7 @@ export default function Analytics() {
                 ))}
             </select>
             <Button
-              variant="secondary"
+              variant="outline"
               size="sm"
               onClick={() => {
                 if (currentChoice && !selectedIds.includes(currentChoice)) {
@@ -138,22 +298,20 @@ export default function Analytics() {
             </div>
           )}
         </div>
-        <div className="flex-1 space-y-2">
-          <Bar percent={progressAll} label="Progress" />
-          <Bar percent={replyRateAll} label="Reply rate" />
-        </div>
+        {/* reply-rate bar chart removed per request */}
+        <div className="flex-1 space-y-2"></div>
       </div>
 
       {filtered.length === 0 ? (
-        <div className="bg-white p-4 rounded shadow">
+        <Card>
           {campaigns.length === 0 ? (
             'No campaigns to analyze.'
           ) : (
             'No matching campaigns.'
           )}
-        </div>
+        </Card>
       ) : (
-        <div className="card overflow-auto">
+        <Card className="overflow-auto">
           <table className="w-full table-auto border-collapse">
             <thead>
               <tr>
@@ -215,7 +373,7 @@ export default function Analytics() {
               })}
             </tbody>
           </table>
-        </div>
+        </Card>
       )}
     </div>
   );

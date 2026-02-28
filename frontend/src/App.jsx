@@ -1,6 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './components/Layout';
-import Home from './pages/Home';
 import Campaigns from './pages/Campaigns';
 import AddCampaign from './pages/AddCampaign';
 import CampaignDetail from './pages/CampaignDetail';
@@ -14,7 +13,8 @@ export default function App() {
   return (
     <Layout>
       <Routes>
-        <Route path="/" element={<Home />} />
+        {/* analytics becomes the landing page under root */}
+        <Route path="/" element={<Analytics />} />
         <Route path="/campaigns" element={<Campaigns />} />
         <Route path="/campaigns/add" element={<AddCampaign />} />
         <Route path="/campaigns/:id" element={<CampaignDetail />} />

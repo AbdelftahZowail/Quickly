@@ -63,7 +63,30 @@ async def init_db():
     from app.settings_manager import initialize_settings
 
     async with engine.begin() as conn:
+        # create any completely missing tables
         await conn.run_sync(Base.metadata.create_all)
+
+        # extra boolean columns are only needed when migrating older
+        # Postgres databases; SQLite (used by the test suite) does not
+        # support the variant of ALTER TABLE used here, so guard by
+        # checking the dialect and swallowing any OperationalError.
+        from sqlalchemy import text
+        from sqlalchemy.exc import OperationalError
+
+        if "sqlite" not in engine.dialect.name:
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS email_log
+                        ADD COLUMN IF NOT EXISTS opened boolean NOT NULL default false,
+                        ADD COLUMN IF NOT EXISTS clicked boolean NOT NULL default false;
+                        """
+                    )
+                )
+            except OperationalError:
+                # ignore; columns may already exist or syntax unsupported
+                pass
 
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:

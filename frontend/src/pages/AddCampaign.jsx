@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api';
-import Input from '../components/ui/Input';
-import Button from '../components/ui/Button';
+import { Input } from '../components/ui/Input';
+import { Button } from '../components/ui/Button';
 
 export default function AddCampaign() {
   const [inboxes, setInboxes] = useState([]);
@@ -150,7 +150,7 @@ export default function AddCampaign() {
           </label>
         </div>
         <div className="flex gap-2">
-          <Button type="submit" variant="primary">Create campaign</Button>
+          <Button type="submit" variant="default">Create campaign</Button>
         </div>
       </form>
     </div>

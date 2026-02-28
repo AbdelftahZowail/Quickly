@@ -1,48 +1,44 @@
-import React from 'react';
-import classNames from 'classnames';
+import * as React from 'react';
+import { cva } from 'class-variance-authority';
+import { cn } from '../../utils/cn';
 
-/**
- * Simple button component with a couple of common variants/sizes.
- *
- * Props:
- *  - variant: "primary" | "secondary" | "danger" | "link" (default "primary")
- *  - size: "sm" | "md" | "lg" (default "md")
- *  - fullWidth: bool
- *  - as: tag to render ("button" or "a")
- *  - className: additional classes
- *  - ...other props passed through
- */
-export default function Button({
-  variant = 'primary',
-  size = 'md',
-  fullWidth = false,
-  as: Component = 'button',
-  className,
-  children,
-  ...props
-}) {
-  const base = 'btn';
-  const variantClass = {
-    primary: 'btn-primary',
-    secondary: 'btn-secondary',
-    danger: 'btn-danger',
-    link: 'btn-link',
-  }[variant];
+const buttonVariants = cva(
+  'inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none ring-offset-background',
+  {
+    variants: {
+      variant: {
+        default: 'bg-primary text-white hover:bg-primary/90',
+        destructive: 'bg-red-500 text-white hover:bg-red-600',
+        outline: 'border border-primary text-primary hover:bg-primary/10',
+        secondary: 'bg-gray-100 text-gray-800 hover:bg-gray-200',
+        ghost: 'bg-transparent hover:bg-primary/10 text-primary',
+        link: 'underline-offset-4 hover:underline text-primary',
+      },
+      size: {
+        default: 'h-10 px-4',
+        sm: 'h-8 px-3',
+        lg: 'h-11 px-8',
+      },
+    },
+    defaultVariants: {
+      variant: 'default',
+      size: 'default',
+    },
+  }
+);
 
-  const sizeClass = {
-    sm: 'text-sm px-2 py-1',
-    md: 'text-sm px-4 py-2',
-    lg: 'text-base px-4 py-2',
-  }[size];
+// props are forwarded to the underlying button element; variant/size are accepted
+const Button = React.forwardRef(
+  ({ className, variant, size, ...props }, ref) => {
+    return (
+      <button
+        className={cn(buttonVariants({ variant, size, class: className }))}
+        ref={ref}
+        {...props}
+      />
+    );
+  }
+);
+Button.displayName = 'Button';
 
-  const widthClass = fullWidth ? 'w-full justify-center' : '';
-
-  return (
-    <Component
-      className={classNames(base, variantClass, sizeClass, widthClass, className)}
-      {...props}
-    >
-      {children}
-    </Component>
-  );
-}
+export { Button, buttonVariants };

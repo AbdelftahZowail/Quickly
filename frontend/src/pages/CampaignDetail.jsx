@@ -3,7 +3,8 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNotify } from '../context/NotificationContext';
 import { useLoading } from '../context/LoadingContext';
 import { api } from '../api';
-import Button from '../components/ui/Button';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
 import { useConfirm } from '../context/ConfirmContext';
 
 export default function CampaignDetail() {
@@ -401,7 +402,7 @@ function Sequences({ sequences, campaignId, refresh }) {
                 <td>{s.subject || '(reply)'}</td>
                 <td className="truncate max-w-xs">{s.body}</td>
                 <td className="flex gap-2">
-                  <Button size="sm" variant="secondary" onClick={() => startEdit(s)}>Edit</Button>
+                  <Button size="sm" variant="outline" onClick={() => startEdit(s)}>Edit</Button>
                   <Button size="sm" variant="danger" onClick={() => deleteSeq(s)}>Delete</Button>
                 </td>
               </tr>
@@ -425,7 +426,7 @@ function Sequences({ sequences, campaignId, refresh }) {
             <label>Wait days</label>
             <input type="number" className="w-20 border rounded p-1" name="wait_days_after_previous" value={form.wait_days_after_previous} onChange={e => setForm(f => ({ ...f, wait_days_after_previous: +e.target.value }))} />
           </div>
-          <button className="px-3 py-1 bg-teal-500 text-white rounded">Add sequence</button>
+          <Button size="sm" variant="default">Add sequence</Button>
         </div>
       </form>
 
@@ -448,8 +449,8 @@ function Sequences({ sequences, campaignId, refresh }) {
                 <input type="number" className="w-20 border rounded p-1" value={editing.wait_days_after_previous} onChange={e => setEditing(ed => ({ ...ed, wait_days_after_previous: +e.target.value }))} />
               </div>
               <div className="flex gap-2">
-                <button className="px-3 py-1 bg-teal-500 text-white rounded">Save</button>
-                <button type="button" className="px-3 py-1 bg-gray-200 rounded" onClick={() => setEditing(null)}>Cancel</button>
+                <Button size="sm" variant="default">Save</Button>
+                <Button type="button" variant="outline" size="sm" onClick={() => setEditing(null)}>Cancel</Button>
               </div>
             </form>
           </div>
@@ -549,8 +550,8 @@ function Leads({ leads, campaignId, refresh, onFilter }) {
       )}
       <div className="bg-white p-4 rounded shadow">
         <div className="flex gap-2 mb-4">
-          <button onClick={() => setMode('single')} className={`px-3 py-1 rounded ${mode==='single'?'bg-teal-500 text-white':'bg-gray-200'}`}>Single lead</button>
-          <button onClick={() => setMode('bulk')} className={`px-3 py-1 rounded ${mode==='bulk'?'bg-teal-500 text-white':'bg-gray-200'}`}>Bulk paste</button>
+          <Button size="sm" variant={mode==='single'?'default':'outline'} onClick={() => setMode('single')}>Single lead</Button>
+          <Button size="sm" variant={mode==='bulk'?'default':'outline'} onClick={() => setMode('bulk')}>Bulk paste</Button>
         </div>
         {msg && <div className={msg.type==='error'?'text-red-600':'text-green-600'}>{msg.text}</div>}
         {mode === 'single' && (
@@ -567,7 +568,7 @@ function Leads({ leads, campaignId, refresh, onFilter }) {
               <label>Custom (JSON)</label>
               <textarea className="w-full border rounded p-1" rows={2} value={single.custom} onChange={e => setSingle(s => ({ ...s, custom: e.target.value }))} />
             </div>
-            <button className="px-3 py-1 bg-teal-500 text-white rounded">Add lead</button>
+            <Button size="sm" variant="default">Add lead</Button>
           </form>
         )}
         {mode === 'bulk' && (
@@ -576,7 +577,7 @@ function Leads({ leads, campaignId, refresh, onFilter }) {
               <label>Emails (one per line or comma-separated)</label>
               <textarea className="w-full border rounded p-1 font-mono" rows={4} value={bulk} onChange={e => setBulk(e.target.value)} />
             </div>
-            <button className="px-3 py-1 bg-teal-500 text-white rounded">Add leads</button>
+            <Button size="sm" variant="default">Add leads</Button>
           </form>
         )}
       </div>
@@ -671,7 +672,7 @@ function SettingsModal({ campaign, inboxes, onClose, onSave }) {
           </div>
           <div className="flex gap-2">
             <button className="px-3 py-1 bg-teal-500 text-white rounded">Save</button>
-            <button type="button" className="px-3 py-1 bg-gray-200 rounded" onClick={onClose}>Cancel</button>
+            <Button type="button" variant="outline" size="sm" onClick={onClose}>Cancel</Button>
           </div>
         </form>
       </div>

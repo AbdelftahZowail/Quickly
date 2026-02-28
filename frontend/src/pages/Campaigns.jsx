@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
-import Button from '../components/ui/Button';
+import { Button } from '../components/ui/Button';
+import { Card } from '../components/ui/Card';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 
@@ -112,7 +113,7 @@ export default function Campaigns() {
     <div className="p-8 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold mb-4">Campaigns</h1>
-        <Button as={Link} to="/analytics" variant="secondary" size="sm">
+        <Button as={Link} to="/analytics" variant="outline" size="sm">
           Analytics
         </Button>
       </div>
@@ -120,12 +121,12 @@ export default function Campaigns() {
       {banner}
 
       {campaigns.length === 0 && (
-        <div className="bg-white p-4 rounded shadow">No campaigns yet. <Link className="text-teal-500" to="/campaigns/add">Create campaign</Link>.</div>
+        <Card>No campaigns yet. <Link className="text-teal-500" to="/campaigns/add">Create campaign</Link>.</Card>
       )}
 
       {campaigns.length > 0 && (
         <>
-          <div className="card overflow-auto">
+          <Card className="overflow-auto">
             <table className="w-full table-auto border-collapse">
             <thead>
               <tr>
@@ -203,11 +204,11 @@ export default function Campaigns() {
                       {replies} ({replyRate}%)
                     </td>
                     <td className="py-2 gap-2">
-                      <Button as={Link} to={`/campaigns/${c.id}`} variant="secondary" size="sm">View</Button>
-                      <Button variant="secondary" size="sm" onClick={() => togglePause(c.id, c.paused, c.name)}>
+                      <Button as={Link} to={`/campaigns/${c.id}`} variant="outline" size="sm">View</Button>
+                      <Button variant="outline" size="sm" onClick={() => togglePause(c.id, c.paused, c.name)}>
                         {c.paused ? 'Resume' : 'Pause'}
                       </Button>
-                      <Button variant="secondary" size="sm" onClick={() => duplicateCampaign(c.id, c.name)}>Duplicate</Button>
+                      <Button variant="outline" size="sm" onClick={() => duplicateCampaign(c.id, c.name)}>Duplicate</Button>
                       <Button variant="danger" size="sm" onClick={() => deleteCampaign(c.id, c.name)}>Delete</Button>
                     </td>
                   </tr>
@@ -215,12 +216,12 @@ export default function Campaigns() {
               })}
             </tbody>
           </table>
-          </div>
+          </Card>
 
           {isPriority && orderChanged && (
             <div className="mt-4 flex items-center gap-4">
               <Button
-                variant="primary"
+                variant="default"
                 size="md"
                 onClick={saveOrder}
               >
@@ -233,7 +234,7 @@ export default function Campaigns() {
       )}
 
       <div className="mt-4">
-        <Button as={Link} to="/campaigns/add" variant="primary">Create campaign</Button>
+        <Button as={Link} to="/campaigns/add" variant="default">Create campaign</Button>
       </div>
     </div>
   );

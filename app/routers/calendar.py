@@ -3,12 +3,13 @@ import logging
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import aliased, selectinload
 from pathlib import Path
 
 from app.database import get_db
 from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
+    EmailOpen, EmailClick,
 )
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app.app_settings import get_scheduling_strategy
@@ -26,6 +27,14 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
     SeqAlias = aliased(Sequence)
     result = await db.execute(
         select(EmailLog, Lead, Campaign, SeqAlias)
+        # eager-load opens and clicks so we don't trigger a lazy load
+        # (async sessions don't support lazy-loading outside of a
+        # greenlet context; the MissingGreenlet error was occurring
+        # when the comprehension tried to access ``el.opens``).
+        .options(
+            selectinload(EmailLog.opens),
+            selectinload(EmailLog.clicks),
+        )
         .join(Lead, EmailLog.lead_id == Lead.id)
         .join(Campaign, EmailLog.campaign_id == Campaign.id)
         .outerjoin(
@@ -59,6 +68,11 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
             "campaign_hours_end": campaign.sending_hours_end or "17:00",
             "campaign_wait_minutes": campaign.wait_minutes_between or 5,
             "campaign_stop_on_reply": campaign.stop_on_reply,
+            # include open/click events (ip + timestamp)
+            "opens": [ {"ip": o.ip_address, "at": o.opened_at.isoformat()} for o in el.opens ],
+            "clicks": [ {"ip": c.ip_address, "at": c.clicked_at.isoformat()} for c in el.clicks ],
+            "opened": bool(el.opens),
+            "clicked": bool(el.clicks),
         }
         for el, lead, campaign, seq in rows
     ]
@@ -114,6 +128,37 @@ async def global_scheduled(db: AsyncSession = Depends(get_db)):
         for slot, cl, campaign, lead, inbox, seq in rows
     ]
 
+
+
+@router.post("/sent/{log_id}/open")
+async def log_open(log_id: int, payload: dict, db: AsyncSession = Depends(get_db)):
+    """Record an open event against a specific EmailLog entry.
+
+    Payload may include an optional `ip` field.
+    """
+    # create open row and mark flag
+    op = EmailOpen(email_log_id=log_id, ip_address=payload.get("ip"))
+    db.add(op)
+    await db.flush()
+    await db.execute(
+        select(EmailLog).where(EmailLog.id == log_id)
+    )
+    await db.execute(
+        EmailLog.__table__.update().where(EmailLog.id == log_id).values(opened=True)
+    )
+    await db.commit()
+    return {"ok": True}
+
+@router.post("/sent/{log_id}/click")
+async def log_click(log_id: int, payload: dict, db: AsyncSession = Depends(get_db)):
+    """Record a click event against a specific EmailLog entry."""
+    clk = EmailClick(email_log_id=log_id, ip_address=payload.get("ip"))
+    db.add(clk)
+    await db.execute(
+        EmailLog.__table__.update().where(EmailLog.id == log_id).values(clicked=True)
+    )
+    await db.commit()
+    return {"ok": True}
 
 @router.get("/stats")
 async def global_stats(db: AsyncSession = Depends(get_db)):

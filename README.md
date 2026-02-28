@@ -57,12 +57,14 @@ uvicorn app.main:app --reload
 ```
 
 
-Open http://127.0.0.1:8000 for the web UI. Navigate between pages:
-- **Home** (`/`) - Dashboard and status
+Open http://127.0.0.1:8000 for the web UI. The **Analytics** page now serves as the default landing page; other pages are available via the sidebar links (home is still accessible by clicking the logo):
+- **Analytics** (`/`) - Landing dashboard with aggregated metrics
 - **Campaigns** (`/campaigns`) - Manage campaigns and sequences
 - **Inboxes** (`/inboxes`) - Configure sending addresses
 - **Calendar** (`/calendar`) - View sent and scheduled emails
 - **Settings** (`/settings`) - Configure app settings and defaults (individual inboxes determine their own send provider)
+
+> Click the logo in the sidebar to return to the analytics/home dashboard.
 
 **When do emails send?** The send job runs only while the server is running (`uvicorn app.main:app`). By default it runs every 1 minute (configurable in Settings). To confirm it's running: check the server console for log lines like `Send job running at ...` and `Send job finished: N email(s) sent`, or call **GET /api/status** to see `scheduler_running`, `last_send_job_run`, and `next_send_job_run`.
 
