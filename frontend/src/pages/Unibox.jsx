@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams, Link } from 'react-router-dom';
+import DOMPurify from 'dompurify';
 import Button from '../components/ui/Button';
+import EmailContent from '../components/EmailContent';
 import { useNotify } from '../context/NotificationContext';
 
 const PAGE_SIZE = 25;
@@ -43,10 +46,45 @@ function makeReplySubject(subject) {
   return /^re:/i.test(clean) ? clean : `Re: ${clean}`;
 }
 
+function buildHtmlDoc(html) {
+  const safeHtml = DOMPurify.sanitize(html || '', {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
+  });
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src data: blob: https:; style-src 'unsafe-inline'; font-src data: https:;"
+    />
+    <style>
+      body { font-family: Figtree, sans-serif; margin: 0; padding: 10px; color: #111827; }
+      img { max-width: 100%; height: auto; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>${safeHtml}</body>
+</html>`;
+}
+
+// helper used when rendering HTML messages outside an iframe
+function sanitizeHtmlContent(html) {
+  return DOMPurify.sanitize(html || '', {
+    USE_PROFILES: { html: true },
+    FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
+  });
+}
+
 export default function Unibox() {
   const notify = useNotify();
+  const [searchParams, setSearchParams] = useSearchParams();
+
   const [conversations, setConversations] = useState([]);
   const [total, setTotal] = useState(0);
+  // pagination state used for incremental loading only (infinite scroll)
   const [page, setPage] = useState(1);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState('');
@@ -65,34 +103,52 @@ export default function Unibox() {
   const [syncing, setSyncing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [autoSyncAttempted, setAutoSyncAttempted] = useState(false);
+  // view mode for each message is now determined automatically based on available content (html vs plain)
+  const [replyOpen, setReplyOpen] = useState(false);
   const listRequestInFlightRef = useRef(false);
   const sseRefreshTimerRef = useRef(null);
+  const threadScrollRef = useRef(null);
+  const listScrollRef = useRef(null); // reference for conversation list container
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / PAGE_SIZE)), [total]);
 
-  const loadConversations = useCallback(async ({ silent = false } = {}) => {
-    if (listRequestInFlightRef.current) return;
-    listRequestInFlightRef.current = true;
-    if (!silent) {
-      setListLoading(true);
-      setListError('');
-    }
-    try {
-      const data = await uniboxRequest(`/unibox?page=${page}&page_size=${PAGE_SIZE}`);
-      const items = data?.items || [];
-      setConversations(items);
-      setTotal(data?.total || 0);
-    } catch (err) {
+  // load one page of conversations.  when `append` is true we merge the
+  // results onto the existing list, otherwise we replace the current
+  // conversations (used for initial load and refreshing).
+  const loadConversations = useCallback(
+    async ({ page: requestedPage = 1, silent = false, append = false } = {}) => {
+      if (listRequestInFlightRef.current) return;
+      listRequestInFlightRef.current = true;
       if (!silent) {
-        setListError(err.message || 'Failed to load conversations');
+        setListLoading(true);
+        setListError('');
       }
-    } finally {
-      if (!silent) {
-        setListLoading(false);
+      try {
+        const data = await uniboxRequest(`
+          /unibox?page=${requestedPage}&page_size=${PAGE_SIZE}`
+            .trim(),
+        );
+        const items = data?.items || [];
+        setTotal(data?.total || 0);
+        if (append) {
+          setConversations((prev) => [...prev, ...items]);
+        } else {
+          setConversations(items);
+        }
+        setPage(requestedPage);
+      } catch (err) {
+        if (!silent) {
+          setListError(err.message || 'Failed to load conversations');
+        }
+      } finally {
+        if (!silent) {
+          setListLoading(false);
+        }
+        listRequestInFlightRef.current = false;
       }
-      listRequestInFlightRef.current = false;
-    }
-  }, [page]);
+    },
+    [],
+  );
 
   const loadThread = useCallback(async (threadId, inboxId) => {
     setThreadLoading(true);
@@ -102,6 +158,10 @@ export default function Unibox() {
       if (inboxId) params.set('inbox_id', String(inboxId));
       const data = await uniboxRequest(`/unibox/threads/${encodeURIComponent(threadId)}?${params.toString()}`);
       setSelectedThread(data);
+      // update URL so the conversation is reflected in the address bar
+      const newParams = { thread: threadId };
+      if (inboxId != null && inboxId !== '') newParams.inbox = String(inboxId);
+      setSearchParams(newParams);
 
       const messages = data?.messages || [];
       const lastReceived = [...messages].reverse().find(m => m.direction === 'received');
@@ -113,17 +173,60 @@ export default function Unibox() {
         body: '',
         is_html: false,
       });
+
+      // no explicit view mode state needed; rendering will choose based on msg fields
+      setReplyOpen(false);
     } catch (err) {
       setThreadError(err.message || 'Failed to load thread');
       setSelectedThread(null);
+      // clear URL on error/none
+      setSearchParams({});
     } finally {
       setThreadLoading(false);
     }
-  }, []);
+  }, [setSearchParams]);
 
   useEffect(() => {
-    loadConversations();
+    // initial load, clear any previously held entries
+    loadConversations({ page: 1 });
   }, [loadConversations]);
+
+  // monitor conversation list scrolling and load more pages lazily
+  useEffect(() => {
+    const el = listScrollRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      if (listLoading || page >= totalPages) return;
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 50) {
+        // nearing bottom, request next page
+        const next = page + 1;
+        if (next <= totalPages) {
+          loadConversations({ page: next, append: true });
+        }
+      }
+    };
+    el.addEventListener('scroll', onScroll);
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [listLoading, page, totalPages, loadConversations]);
+
+  // load thread from query params when component mounts or when params change
+  useEffect(() => {
+    const thread = searchParams.get('thread');
+    const inbox = searchParams.get('inbox');
+    if (thread) {
+      // avoid unnecessary reloads if we already have the same thread selected
+      if (
+        !selectedThread ||
+        selectedThread.thread_id !== thread ||
+        String(selectedThread.inbox_id) !== inbox
+      ) {
+        loadThread(thread, inbox || undefined);
+      }
+    } else if (selectedThread) {
+      // clear selection when param removed
+      setSelectedThread(null);
+    }
+  }, [searchParams, loadThread, selectedThread]);
 
   const triggerSync = useCallback(async () => {
     setSyncing(true);
@@ -209,6 +312,14 @@ export default function Unibox() {
     };
   }, [loadConversations, loadThread, selectedThread?.inbox_id, selectedThread?.thread_id]);
 
+  useEffect(() => {
+    if (!replyOpen || !threadScrollRef.current) return;
+    threadScrollRef.current.scrollTo({
+      top: threadScrollRef.current.scrollHeight,
+      behavior: 'smooth',
+    });
+  }, [replyOpen, selectedThread?.thread_id]);
+
   const sendReply = async (e) => {
     e.preventDefault();
     if (!selectedThread) return;
@@ -233,6 +344,7 @@ export default function Unibox() {
       });
       notify({ type: 'success', message: 'Reply sent.' });
       setCompose(c => ({ ...c, body: '' }));
+      setReplyOpen(false);
       await loadThread(selectedThread.thread_id, selectedThread.inbox_id);
       await loadConversations({ silent: true });
     } catch (err) {
@@ -243,23 +355,20 @@ export default function Unibox() {
   };
 
   return (
-    <div className="p-8 space-y-4">
-      <div className="flex items-center justify-between">
+    <div className="p-8 h-screen overflow-hidden flex flex-col gap-4">
+      <div className="flex items-center justify-between shrink-0">
         <h1 className="text-2xl font-semibold">Unibox</h1>
         <span className="text-sm text-gray-500">Gmail thread view and replies</span>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 min-h-[70vh]">
-        <section className="card xl:col-span-1 flex flex-col min-h-[70vh]">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 flex-1 min-h-0">
+        <section className="card xl:col-span-1 flex flex-col min-h-0 overflow-hidden">
           <div className="flex items-center justify-between border-b border-gray-200 pb-3 mb-3">
             <h2 className="font-semibold">Conversations</h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">{total} total</span>
               <Button variant="secondary" size="sm" onClick={triggerSync} disabled={syncing}>
                 {syncing ? 'Syncing...' : 'Sync now'}
-              </Button>
-              <Button variant="secondary" size="sm" onClick={triggerLoadOlder} disabled={loadingOlder}>
-                {loadingOlder ? 'Loading older...' : 'Show older'}
               </Button>
             </div>
           </div>
@@ -272,51 +381,37 @@ export default function Unibox() {
             </p>
           )}
 
-          <div className="space-y-2 overflow-y-auto pr-1">
+          <div ref={listScrollRef} className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">
             {conversations.map((item) => {
               const isActive = selectedThread?.thread_id === item.thread_id && selectedThread?.inbox_id === item.inbox_id;
+              const toUrl = `/mailbox?thread=${encodeURIComponent(item.thread_id)}${item.inbox_id ? `&inbox=${item.inbox_id}` : ''}`;
               return (
-                <button
+                <Link
                   key={`${item.inbox_id}-${item.thread_id}`}
-                  type="button"
-                  className={`w-full text-left p-3 rounded border ${
-                    isActive ? 'border-teal-400 bg-teal-50' : 'border-gray-200 hover:bg-gray-50'
+                  to={toUrl}
+                  className={`w-full block text-left p-3 rounded border no-underline hover:no-underline ${
+                    isActive ? 'border-teal-400 bg-teal-50' : 'border-gray-200 hover:bg-teal-50/30'
                   }`}
-                  onClick={() => loadThread(item.thread_id, item.inbox_id)}
                 >
                   <div className="text-xs text-gray-500 mb-1">{item.gmail_account}</div>
                   <div className="font-medium truncate">{item.subject || '(no subject)'}</div>
                   <div className="text-sm text-gray-600 truncate">{item.last_message_snippet || ''}</div>
                   <div className="text-xs text-gray-400 mt-1">{formatDateTime(item.timestamp)}</div>
-                </button>
+                </Link>
               );
             })}
-          </div>
-
-          <div className="pt-3 mt-3 border-t border-gray-200 flex items-center justify-between">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page <= 1 || listLoading}
-            >
-              Previous
-            </Button>
-            <span className="text-xs text-gray-600">Page {page} of {totalPages}</span>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-              disabled={page >= totalPages || listLoading}
-            >
-              Next
-            </Button>
+            {/* show older button at bottom of scrollable list */}
+            <div className="flex justify-center py-2">
+              <Button variant="secondary" size="sm" onClick={triggerLoadOlder} disabled={loadingOlder}>
+                {loadingOlder ? 'Loading older...' : 'Show older'}
+              </Button>
+            </div>
           </div>
         </section>
 
-        <section className="card xl:col-span-2 flex flex-col min-h-[70vh]">
+        <section className="card xl:col-span-2 flex flex-col min-h-0 overflow-hidden">
           {!selectedThread && !threadLoading && (
-            <div className="text-gray-500 text-sm">Select a conversation to view messages and reply.</div>
+            <div className="text-gray-500 text-sm flex-1">Select a conversation to view messages and reply.</div>
           )}
           {threadLoading && <div className="text-gray-500 text-sm">Loading thread...</div>}
           {threadError && <div className="text-red-600 text-sm">{threadError}</div>}
@@ -324,81 +419,90 @@ export default function Unibox() {
           {selectedThread && !threadLoading && (
             <>
               <div className="border-b border-gray-200 pb-3 mb-3">
-                <h2 className="text-lg font-semibold">{selectedThread.subject || '(no subject)'}</h2>
+                <h2 className="text-lg font-semibold truncate">{selectedThread.subject || '(no subject)'}</h2>
                 <p className="text-xs text-gray-500">
                   Inbox: {selectedThread.gmail_account} | Last update: {formatDateTime(selectedThread.last_message_timestamp)}
                 </p>
               </div>
 
-              <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-                {(selectedThread.messages || []).map(msg => (
-                  <article
-                    key={msg.message_id}
-                    className={`p-3 rounded border ${
-                      msg.direction === 'sent'
-                        ? 'bg-teal-50 border-teal-200'
-                        : 'bg-white border-gray-200'
-                    }`}
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                      <span className="text-xs uppercase tracking-wide font-semibold text-gray-600">
-                        {msg.direction === 'sent' ? 'Sent' : 'Received'}
-                      </span>
-                      <span className="text-xs text-gray-500">{formatDateTime(msg.timestamp)}</span>
-                    </div>
-                    <div className="text-xs text-gray-500 mb-2">
-                      From: {msg.from || '-'} | To: {msg.to || '-'}
-                    </div>
-                    <div className="text-sm whitespace-pre-wrap break-words">
-                      {msg.body_plain || msg.snippet || '(no message body)'}
-                    </div>
-                  </article>
-                ))}
+              <div ref={threadScrollRef} className="flex-1 min-h-0 overflow-y-auto pr-1">
+                <div className="flex flex-col gap-4 pb-1">
+                  {(selectedThread.messages || []).map((msg) => (
+                    <article
+                      key={msg.message_id}
+                      className={`p-3 rounded border ${
+                        msg.direction === 'sent'
+                          ? 'bg-teal-50 border-teal-200'
+                          : 'bg-white border-gray-200'
+                      }`}
+                    >
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                          <span className="text-xs uppercase tracking-wide font-semibold text-gray-600">
+                            {msg.direction === 'sent' ? 'Sent' : 'Received'}
+                          </span>
+                          <span className="text-xs text-gray-500">{formatDateTime(msg.timestamp)}</span>
+                        </div>
+                        <div className="text-xs text-gray-500 mb-2">
+                          From: {msg.from || '-'} | To: {msg.to || '-'}
+                        </div>
+                        {msg.body_html && msg.body_html.trim() ? (
+                          <div className="w-full bg-white border border-gray-200 rounded min-h-[220px] overflow-auto">
+                            <EmailContent html={msg.body_html} />
+                          </div>
+                        ) : (
+                          <div className="text-sm whitespace-pre-wrap break-words">
+                            {msg.body_plain || msg.snippet || '(no message body)'}
+                          </div>
+                        )}
+                    </article>
+                  ))}
+
+                  {replyOpen && (
+                    <form onSubmit={sendReply} className="rounded-2xl border border-gray-200 bg-gradient-to-b from-white to-gray-50 p-4 shadow-sm">
+                      <div className="flex items-center justify-between mb-3 gap-2">
+                        <h3 className="font-semibold">Reply</h3>
+                        <span className="text-xs text-gray-500 truncate">To {compose.to_email || '(unknown recipient)'}</span>
+                      </div>
+                      <textarea
+                        value={compose.body}
+                        onChange={e => setCompose(c => ({ ...c, body: e.target.value }))}
+                        className="w-full min-h-[180px] resize-y rounded-xl border-gray-300 shadow-sm focus:ring-teal-500 focus:border-teal-500"
+                        placeholder="Write your reply..."
+                        required
+                      />
+                      <div className="mt-3 flex items-center justify-end gap-2">
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          size="sm"
+                          className="rounded-full px-3 py-1.5"
+                          onClick={() => setReplyOpen(false)}
+                        >
+                          Cancel
+                        </Button>
+                        <Button type="submit" variant="primary" size="sm" disabled={sending} className="rounded-full px-4 py-1.5">
+                          {sending ? 'Sending...' : 'Send reply'}
+                        </Button>
+                      </div>
+                    </form>
+                  )}
+                </div>
               </div>
 
-              <form onSubmit={sendReply} className="mt-4 border-t border-gray-200 pt-4 space-y-3">
-                <h3 className="font-semibold">Reply</h3>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">To</label>
-                  <input
-                    type="email"
-                    value={compose.to_email}
-                    onChange={e => setCompose(c => ({ ...c, to_email: e.target.value }))}
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
-                  <input
-                    type="text"
-                    value={compose.subject}
-                    onChange={e => setCompose(c => ({ ...c, subject: e.target.value }))}
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Body</label>
-                  <textarea
-                    rows={6}
-                    value={compose.body}
-                    onChange={e => setCompose(c => ({ ...c, body: e.target.value }))}
-                    className="block w-full rounded-md border-gray-300 shadow-sm focus:ring-teal-500 focus:border-teal-500"
-                    required
-                  />
-                </div>
-                <label className="inline-flex items-center gap-2 text-sm text-gray-700">
-                  <input
-                    type="checkbox"
-                    checked={compose.is_html}
-                    onChange={e => setCompose(c => ({ ...c, is_html: e.target.checked }))}
-                  />
-                  Send as HTML
-                </label>
-                <div>
-                  <Button type="submit" variant="primary" disabled={sending}>
-                    {sending ? 'Sending...' : 'Send reply'}
-                  </Button>
-                </div>
-              </form>
+              <div className="pt-3 mt-3 border-t border-gray-200 flex items-center justify-between gap-3">
+                <p className="text-xs text-gray-500">
+                  {replyOpen ? 'Reply box added at the end of this thread.' : 'Want to continue this thread?'}
+                </p>
+                <Button
+                  type="button"
+                  variant={replyOpen ? 'secondary' : 'primary'}
+                  size="sm"
+                  className="rounded-full px-4 py-2 shadow-sm"
+                  onClick={() => setReplyOpen((open) => !open)}
+                >
+                  {replyOpen ? 'Close reply' : 'Reply'}
+                </Button>
+              </div>
             </>
           )}
         </section>
