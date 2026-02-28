@@ -1,6 +1,6 @@
 """Background job: send due emails from the queue."""
 import logging
-from datetime import datetime, date, time
+from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.models import (
     GmailAccount,
 )
 from app.sender import send_email, render_body, get_lead_data, SendResult
+from app.webhooks import maybe_fire_email_event
 from app.routers.gmail_oauth import refresh_access_token
 from app.app_settings import get_google_oauth_credentials
 from app import time as time_provider
@@ -60,6 +61,28 @@ async def run_send_job():
         g_client_id, g_client_secret = await get_google_oauth_credentials(session)
 
         for inbox in inboxes:
+            # compute how many emails already sent today so we enforce a hard
+            # daily cap rather than only relying on ``sent_this_inbox`` below.
+            max_per_day = inbox.max_emails_per_day
+            sent_count_result = await session.execute(
+                select(func.count(EmailLog.id))
+                .where(
+                    EmailLog.inbox_id == inbox.id,
+                    func.date(EmailLog.sent_at) == today,
+                )
+            )
+            already_sent = sent_count_result.scalar() or 0
+            quota_remaining = max_per_day - already_sent
+            if quota_remaining <= 0:
+                # we would break the daily limit even before sending a single
+                # message; skip this inbox entirely and notify the webhook.
+                await maybe_fire_email_event(
+                    session,
+                    "daily_limit",
+                    {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
+                )
+                continue
+
             # For Gmail inboxes, pre-fetch and refresh the access token
             gmail_token = ""
             inbox_provider = getattr(inbox, "provider", "") or settings.email_provider or ""
@@ -76,6 +99,11 @@ async def run_send_job():
                             await session.flush()
                         else:
                             log.error("Gmail token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
+                            await maybe_fire_email_event(
+                                session,
+                                "token_expired",
+                                {"inbox_id": inbox.id, "inbox_email": inbox.email},
+                            )
                             continue
                     gmail_token = ga.access_token
                 else:
@@ -104,9 +132,42 @@ async def run_send_job():
             sent_this_inbox = 0
             max_per_day = inbox.max_emails_per_day
 
+            # compute last sent timestamp so we can enforce the wait-minutes
+            last_sent_time = None
+            last_sent_res = await session.execute(
+                select(EmailLog.sent_at)
+                .where(EmailLog.inbox_id == inbox.id)
+                .order_by(EmailLog.sent_at.desc())
+                .limit(1)
+            )
+            last_sent_time = last_sent_res.scalar_one_or_none()
+
             for slot, cl, campaign, lead, sequence in rows:
-                if sent_this_inbox >= max_per_day:
+                # HARD LIMIT: daily quota
+                if sent_this_inbox >= quota_remaining:
+                    await maybe_fire_email_event(
+                        session,
+                        "daily_limit",
+                        {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
+                    )
                     break
+
+                # HARD LIMIT: rate/minutes between messages
+                if last_sent_time is not None:
+                    delta = now - last_sent_time
+                    if delta < timedelta(minutes=inbox.wait_minutes_between):
+                        await maybe_fire_email_event(
+                            session,
+                            "rate_limit",
+                            {
+                                "inbox_id": inbox.id,
+                                "inbox_email": inbox.email,
+                                "last_sent": last_sent_time.isoformat(),
+                                "now": now.isoformat(),
+                                "wait_minutes": inbox.wait_minutes_between,
+                            },
+                        )
+                        break
                 if getattr(campaign, 'paused', False):
                     continue  # Skip paused campaigns
                 if not _in_sending_window(now, campaign):
@@ -187,6 +248,13 @@ async def run_send_job():
                     gmail_account=ga,
                     thread_id=prev_thread_id,
                 )
+                if not result and inbox_provider == "gmail":
+                    # send failure on a Gmail inbox: likely token issue
+                    await maybe_fire_email_event(
+                        session,
+                        "token_expired",
+                        {"inbox_id": inbox.id, "inbox_email": inbox.email, "lead_id": lead.id},
+                    )
                 if result:
                     email_log_entry = EmailLog(
                         lead_id=lead.id,
@@ -201,6 +269,9 @@ async def run_send_job():
                     await session.delete(slot)
                     sent_this_inbox += 1
                     total_sent += 1
+                    quota_remaining -= 1
+                    # update last_sent_time for rate-limit comparisons
+                    last_sent_time = now
 
         await session.commit()
 

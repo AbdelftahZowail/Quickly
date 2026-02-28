@@ -1,0 +1,156 @@
+import pytest
+from datetime import datetime, timedelta
+from sqlalchemy import select, func
+
+from app.jobs import run_send_job
+from app.sender import SendResult
+from app.models import Inbox, EmailLog, GmailAccount
+from tests.conftest import (
+    make_inbox,
+    make_campaign,
+    make_sequence,
+    make_lead,
+    make_campaign_lead,
+    make_campaign_inbox,
+    make_queue_slot,
+    make_email_log,
+)
+
+
+@pytest.mark.asyncio
+async def test_daily_limit_prevents_extra_sends_and_fires_webhook(session, monkeypatch):
+    inbox = await make_inbox(session, max_emails_per_day=1)
+    campaign = await make_campaign(session)
+    seq = await make_sequence(session, campaign.id)
+    lead = await make_lead(session)
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+
+    now = datetime.utcnow()
+    # two slots scheduled in the past so they would be due
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(hours=1))
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(minutes=30), position_in_day=2)
+    await session.commit()
+
+    events = []
+    async def fake_webhook(db, event, data):
+        events.append((event, data))
+
+    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+
+    await run_send_job()
+
+    # only one email should have been logged
+    res = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    assert res.scalar() == 1
+
+    # webhook should have been called to indicate the daily limit was hit
+    assert any(ev[0] == "daily_limit" for ev in events)
+    assert any(ev[0] == "daily_limit" and ev[1].get("inbox_id") == inbox.id for ev in events)
+
+    # the second slot should still be in the queue (unsent)
+    from app.models import QueueSlot
+    res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    assert res2.scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_triggers_webhook_and_skips_send(session, monkeypatch):
+    inbox = await make_inbox(session, wait_minutes_between=60)
+    campaign = await make_campaign(session)
+    seq = await make_sequence(session, campaign.id)
+    lead = await make_lead(session)
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+
+    now = datetime.utcnow()
+    # create an email log less than wait_minutes_between ago
+    await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=now - timedelta(minutes=30))
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(minutes=1))
+    await session.commit()
+
+    events = []
+    async def fake_webhook(db, event, data):
+        events.append((event, data))
+
+    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+
+    await run_send_job()
+
+    # no new email logs should have been created
+    res = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    assert res.scalar() == 1
+
+    assert any(ev[0] == "rate_limit" for ev in events)
+    assert any(ev[0] == "rate_limit" and ev[1].get("inbox_id") == inbox.id for ev in events)
+
+    from app.models import QueueSlot
+    res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    assert res2.scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_gmail_token_refresh_failure_fires_webhook(session, monkeypatch):
+    inbox = await make_inbox(session, provider="gmail")
+    campaign = await make_campaign(session)
+    seq = await make_sequence(session, campaign.id)
+    lead = await make_lead(session)
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+
+    # attach a GmailAccount with an expired token
+    ga = GmailAccount(inbox_id=inbox.id, google_email=inbox.email,
+                      access_token="foo", refresh_token="bar",
+                      token_expiry=datetime.utcnow() - timedelta(days=1))
+    session.add(ga)
+    await session.flush()
+
+    now = datetime.utcnow()
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(minutes=1))
+    await session.commit()
+
+    events = []
+    async def fake_webhook(db, event, data):
+        events.append((event, data))
+
+    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+
+    # simulate refresh failure
+    monkeypatch.setattr("app.jobs.refresh_access_token", lambda *args, **kwargs: False)
+
+    await run_send_job()
+
+    # no email should be sent when token refresh fails
+    res = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    assert res.scalar() == 0
+
+    assert any(ev[0] == "token_expired" for ev in events), "webhook not called for token_expired"
+    from app.models import QueueSlot
+    res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    assert res2.scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_unibox_sync_failure_triggers_webhook(session, monkeypatch):
+    # an expired gmail token during a sync should fire the same webhook event
+    inbox = await make_inbox(session, provider="gmail")
+    ga = GmailAccount(inbox_id=inbox.id, google_email=inbox.email,
+                      access_token="foo", refresh_token="bar",
+                      token_expiry=datetime.utcnow() - timedelta(days=1))
+    session.add(ga)
+    await session.flush()
+    await session.commit()
+
+    events = []
+    async def fake_webhook(db, event, data):
+        events.append((event, data))
+
+    monkeypatch.setattr("app.unibox.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.unibox.refresh_access_token", lambda *args, **kwargs: False)
+
+    from app.unibox import sync_single_inbox
+    success = await sync_single_inbox(inbox.id)
+    assert not success
+    assert any(ev[0] == "token_expired" for ev in events)

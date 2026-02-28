@@ -29,7 +29,10 @@ from app.app_settings import (
     set_scheduling_strategy,
     get_test_mode,
     set_test_mode,
+    get_email_event_webhook_config,
+    save_email_event_webhook_config,
 )
+from app.webhooks import maybe_fire_email_event
 
 log = logging.getLogger("quickly.settings")
 
@@ -39,6 +42,11 @@ class GmailSyncConfig(BaseModel):
     push_topic: str = ""
     webhook_token: str = ""
     sync_interval_minutes: int = 5
+
+
+class EmailWebhookConfig(BaseModel):
+    webhook_url: str = ""
+    webhook_token: str = ""
 
 
 
@@ -68,6 +76,38 @@ async def set_time_offset(payload: _TimeOffset, db: AsyncSession = Depends(get_d
     except Exception as e:
         log.error('set_time_offset failed: %s', e)
         raise HTTPException(500, f"Failed to set time offset: {e}")
+
+
+# Email webhook configuration --------------------------------------------------
+@router.get("/email-webhook")
+async def get_email_webhook_config(db: AsyncSession = Depends(get_db)):
+    """Return the webhook settings used for email limit / token events."""
+    return await get_email_event_webhook_config(db)
+
+
+@router.post("/email-webhook")
+async def set_email_webhook_config(
+    payload: EmailWebhookConfig,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        await save_email_event_webhook_config(db, payload.webhook_url, payload.webhook_token)
+        await db.commit()
+        return {"ok": True, **(await get_email_event_webhook_config(db))}
+    except Exception as e:
+        log.error("set_email_webhook_config failed: %s", e)
+        raise HTTPException(500, f"Failed to update email webhook config: {e}")
+
+
+@router.post("/email-webhook/test")
+async def test_email_webhook(db: AsyncSession = Depends(get_db)):
+    """Trigger a test event to the configured email-events webhook."""
+    try:
+        await maybe_fire_email_event(db, "test", {"reason": "manual"})
+        return {"ok": True}
+    except Exception as e:
+        log.error("test_email_webhook failed: %s", e)
+        raise HTTPException(500, f"Failed to fire test webhook: {e}")
 
 # Test mode ---------------------------------------------------------------
 
