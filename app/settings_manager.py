@@ -106,10 +106,14 @@ class Settings:
             self.smtp_password = data["smtp_password"]
         if "smtp_use_tls" in data:
             self.smtp_use_tls = str(data["smtp_use_tls"]).lower() in ("true", "1", "yes")
-        if "google_client_id" in data:
-            self.google_client_id = data["google_client_id"]
-        if "google_client_secret" in data:
-            self.google_client_secret = data["google_client_secret"]
+        # Google OAuth credentials are supplied exclusively via environment
+        # variables (or a `.env` file) and are **not** read from the
+        # database.  Prior releases stored them in the `app_setting` table,
+        # but that behavior was removed so the process always uses the value
+        # that was present when it started.
+        #
+        # The `Settings` constructor already reads the env vars so there is
+        # nothing to do here.
         if "queue_check_interval_minutes" in data:
             self.queue_check_interval_minutes = int(data["queue_check_interval_minutes"])
         if "test_mode" in data:
@@ -190,8 +194,8 @@ async def initialize_settings(db: AsyncSession):
             "smtp_user": settings.smtp_user,
             "smtp_password": settings.smtp_password,
             "smtp_use_tls": str(settings.smtp_use_tls),
-            "google_client_id": settings.google_client_id,
-            "google_client_secret": settings.google_client_secret,
+            # google_client_id/secret intentionally omitted; they are read from
+            # the environment and should never be written to the database.
             "queue_check_interval_minutes": str(settings.queue_check_interval_minutes),
             "test_mode": str(settings.test_mode),
             "time_offset_days": str(settings.time_offset_days),
@@ -199,6 +203,19 @@ async def initialize_settings(db: AsyncSession):
         await save_all_settings_to_db(db, default_data)
         await db.commit()
     else:
+        # Remove any legacy OAuth entries so they can't accidentally
+        # confuse administrators looking at the table.  These values are
+        # ignored by the running process but keeping them serves no purpose.
+        from sqlalchemy import delete
+        from app.models import AppSetting
+
+        await db.execute(
+            delete(AppSetting).where(
+                AppSetting.key.in_(["google_client_id", "google_client_secret"])
+            )
+        )
+        await db.commit()
+
         settings.reload_from_dict(data)
         log.info("Settings loaded from database")
 

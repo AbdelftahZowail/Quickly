@@ -35,6 +35,14 @@ def test_google_callback_creates_inbox(monkeypatch):
         # avoid any background sync attempts which would call external APIs
         # patch the helper functions used inside the local _post_connect_tasks
 
+        # also verify that the status endpoint reflects the in-memory env values
+        from app.settings_manager import settings
+        settings.google_client_id = "cid"
+        settings.google_client_secret = "csecret"
+        resp_status = client.get("/api/gmail/status")
+        assert resp_status.status_code == 200
+        assert resp_status.json()["configured"] is True
+
         state = json.dumps({"display_name": "Foo", "max_per_day": 10})
         # use `params` to ensure proper URL encoding of the JSON string
         resp = client.get(

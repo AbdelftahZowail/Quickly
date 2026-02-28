@@ -74,7 +74,10 @@ Open http://127.0.0.1:8000 for the web UI. Navigate between pages:
 - **Email Provider**: Choose between Resend, SMTP, or Gmail OAuth  (this value is used as a default; each inbox has its own provider setting)
   - **Resend**: Enter your API key from [resend.com/api-keys](https://resend.com/api-keys)
   - **SMTP**: Configure host, port, username, password, TLS
-  - **Gmail OAuth**: Enter Google Client ID and Secret from Google Cloud Console, then link Gmail accounts from the Inboxes page
+  - **Gmail OAuth**: Make sure your Google Client ID and Secret are defined in your
+    environment (e.g. via `.env`); the UI does not allow editing these values.
+    Once the process is started with the credentials available, you can then
+    link Gmail accounts from the Inboxes page
 - **Test Mode**: Enable to preview emails before sending (see Test Mode section below)
 
 Settings are stored in the database and changes take effect immediately (no restart required).

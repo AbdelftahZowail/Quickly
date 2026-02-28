@@ -50,3 +50,52 @@ async def test_test_mode_settings_api(engine):
         assert resp["test_mode"] is False
         assert await get_test_mode(db) is False
         assert settings.test_mode is False
+
+        # confirm Google OAuth credentials are **not** seeded into the database
+        from sqlalchemy import select
+        from app.models import AppSetting
+
+        result = await db.execute(
+            select(AppSetting).where(
+                AppSetting.key.in_(["google_client_id", "google_client_secret"])
+            )
+        )
+        assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_google_oauth_credentials_ignore_db(engine):
+    """Even if the DB contains values, the helpers always honor the env.
+
+    This mirrors the desired behaviour of the running application after the
+    recent refactor: credentials are supplied from the environment and the
+    database is no longer consulted.
+    """
+    from app.app_settings import get_google_oauth_credentials
+    from app.models import AppSetting
+    from sqlalchemy import insert
+
+    # ensure schema exists
+    from app.database import engine as _engine, Base as _Base
+    async with _engine.begin() as conn:
+        await conn.run_sync(_Base.metadata.create_all)
+
+    # set environment values in the settings object manually
+    settings.google_client_id = "env-id"
+    settings.google_client_secret = "env-secret"
+
+    # use the supplied engine directly to avoid stale sessionmaker imports
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    engine_session = async_sessionmaker(
+        engine, class_=AsyncSession, expire_on_commit=False,
+    )
+    async with engine_session() as db:
+        # write conflicting values into the DB directly
+        await db.execute(insert(AppSetting).values(key="google_client_id", value="db-id"))
+        await db.execute(insert(AppSetting).values(key="google_client_secret", value="db-secret"))
+        await db.commit()
+
+        cid, csec = await get_google_oauth_credentials(db)
+        assert cid == "env-id"
+        assert csec == "env-secret"

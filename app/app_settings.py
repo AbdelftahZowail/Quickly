@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AppSetting
+from app.settings_manager import settings
 
 log = logging.getLogger("quickly.app_settings")
 
@@ -43,22 +44,30 @@ async def put_setting(db: AsyncSession, key: str, value: str) -> None:
 
 # Google OAuth convenience -----------------------------------------------------
 
-async def get_google_oauth_credentials(db: AsyncSession) -> tuple[str, str]:
-    """Return ``(client_id, client_secret)`` from the DB."""
-    client_id = await get_setting(db, GOOGLE_CLIENT_ID_KEY) or ""
-    client_secret = await get_setting(db, GOOGLE_CLIENT_SECRET_KEY) or ""
-    return client_id, client_secret
+async def get_google_oauth_credentials(db: AsyncSession | None = None) -> tuple[str, str]:
+    """Return ``(client_id, client_secret)`` from the environment.
+
+    The values are read from ``app.settings_manager.settings`` which itself
+    picks them up from environment variables (or a ``.env`` file) when the
+    process starts.  Older versions stored these credentials in the database,
+    but the lookup was removed to avoid surprises; the database is now
+    ignored entirely.  The ``db`` parameter is accepted for backwards
+    compatibility with existing callers but is unused.
+    """
+    # simply return whatever is currently in memory (populated from env)
+    return settings.google_client_id, settings.google_client_secret
 
 
 async def save_google_oauth_credentials(db: AsyncSession, client_id: str, client_secret: str) -> None:
-    """Persist Google OAuth credentials to the database and reload settings."""
-    await put_setting(db, GOOGLE_CLIENT_ID_KEY, client_id)
-    await put_setting(db, GOOGLE_CLIENT_SECRET_KEY, client_secret)
-    await db.flush()
-    # Reload settings into memory cache
-    from app.settings_manager import reload_settings
-    await reload_settings(db)
-    log.info("Google OAuth credentials saved to database")
+    """No-op wrapper retained for backward compatibility.
+
+    The application no longer persists OAuth client credentials to the
+    database; they are expected to be configured via environment variables.
+    Calling this function will log a warning but otherwise do nothing.
+    """
+    log.warning("save_google_oauth_credentials called but persistence is disabled; "
+                "credentials must be set via environment variables")
+    # intentionally do not write anything to the database
 
 
 # Test mode convenience --------------------------------------------------------

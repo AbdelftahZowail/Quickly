@@ -66,7 +66,10 @@ export default function Inboxes() {
     setMessage(null);
     if (form.provider === 'gmail') {
       if (!oauthConfigured) {
-        setMessage({ type: 'error', text: 'Google OAuth is not configured. Please enter client ID/secret in Settings and save.' });
+        setMessage({
+          type: 'error',
+          text: 'Google OAuth is not configured. Define GOOGLE_CLIENT_ID/SECRET in your environment and restart the server.',
+        });
         return;
       }
       // redirect to OAuth
@@ -207,7 +210,7 @@ export default function Inboxes() {
                 <>
                   {!oauthConfigured && (
                     <div className="text-red-600">
-                      Google OAuth credentials are not configured. Enter them in <a href="/settings" className="text-teal-500 underline">Settings</a> and save, then reload this page.
+                      Google OAuth credentials are not configured. Set the appropriate environment variables (e.g. in `.env`) and restart the server before reloading.
                     </div>
                   )}
                   {redirectUri && (
