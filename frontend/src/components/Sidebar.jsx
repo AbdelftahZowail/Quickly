@@ -6,6 +6,7 @@ const links = [
   { to: '/campaigns', label: 'Campaigns' },
   { to: '/analytics', label: 'Analytics' },
   { to: '/inboxes', label: 'Inboxes' },
+  { to: '/mailbox', label: 'Unibox' },
   { to: '/calendar', label: 'Calendar' },
   { to: '/settings', label: 'Settings' },
 ];

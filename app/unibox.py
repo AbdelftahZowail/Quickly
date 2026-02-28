@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -26,6 +27,17 @@ from app.routers.gmail_oauth import refresh_access_token
 log = logging.getLogger("quickly.unibox")
 
 GMAIL_API_ROOT = "https://gmail.googleapis.com/gmail/v1/users/me"
+FULL_SYNC_PROGRESS_COMMIT_INTERVAL = 5
+INITIAL_SYNC_WINDOW_DAYS = 7
+BACKFILL_WINDOW_DAYS = 7
+try:
+    INITIAL_SYNC_MAX_MESSAGES = max(50, int(os.getenv("UNIBOX_INITIAL_SYNC_MAX_MESSAGES", "200")))
+except ValueError:
+    INITIAL_SYNC_MAX_MESSAGES = 200
+try:
+    BACKFILL_SYNC_MAX_MESSAGES = max(50, int(os.getenv("UNIBOX_BACKFILL_SYNC_MAX_MESSAGES", "200")))
+except ValueError:
+    BACKFILL_SYNC_MAX_MESSAGES = 200
 
 
 class GmailAPIError(RuntimeError):
@@ -218,12 +230,19 @@ def _gmail_get_profile(access_token: str) -> dict[str, Any]:
     return _gmail_request_json("GET", f"{GMAIL_API_ROOT}/profile", access_token)
 
 
-def _gmail_list_all_message_ids(access_token: str) -> list[str]:
+def _gmail_list_message_ids(
+    access_token: str,
+    *,
+    query: str | None = None,
+    max_messages: int | None = None,
+) -> list[str]:
     out: list[str] = []
     page_token: str | None = None
 
     while True:
         params: dict[str, Any] = {"maxResults": 500}
+        if query:
+            params["q"] = query
         if page_token:
             params["pageToken"] = page_token
         payload = _gmail_request_json("GET", f"{GMAIL_API_ROOT}/messages", access_token, params=params)
@@ -231,12 +250,31 @@ def _gmail_list_all_message_ids(access_token: str) -> list[str]:
         for item in payload.get("messages", []) or []:
             if isinstance(item, dict) and item.get("id"):
                 out.append(str(item["id"]))
+                if max_messages and len(out) >= max_messages:
+                    return out
 
         page_token = payload.get("nextPageToken")
         if not page_token:
             break
 
     return out
+
+
+def _gmail_list_all_message_ids(access_token: str, *, max_messages: int | None = None) -> list[str]:
+    return _gmail_list_message_ids(access_token, max_messages=max_messages)
+
+
+def _gmail_list_message_ids_in_window(
+    access_token: str,
+    *,
+    start_dt: datetime,
+    end_dt: datetime,
+    max_messages: int | None = None,
+) -> list[str]:
+    start_unix = int(start_dt.timestamp())
+    end_unix = int(end_dt.timestamp())
+    query = f"after:{start_unix} before:{end_unix}"
+    return _gmail_list_message_ids(access_token, query=query, max_messages=max_messages)
 
 
 def _gmail_get_message(access_token: str, gmail_message_id: str) -> dict[str, Any]:
@@ -782,19 +820,52 @@ async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[
                 raise
 
     if do_full_sync:
-        message_ids = await asyncio.to_thread(_gmail_list_all_message_ids, access_token)
-        for msg_id in message_ids:
-            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
-            row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
-            touched_threads.add((inbox.id, row.thread_id))
+        # Initial sync only loads recent history window (default: last 7 days).
+        # Older history is loaded explicitly via incremental backfill.
+        sync_end = time_provider.utcnow()
+        sync_start = sync_end - timedelta(days=INITIAL_SYNC_WINDOW_DAYS)
+        message_ids = await asyncio.to_thread(
+            _gmail_list_message_ids_in_window,
+            access_token,
+            start_dt=sync_start,
+            end_dt=sync_end,
+            max_messages=INITIAL_SYNC_MAX_MESSAGES,
+        )
         state.anchor_history_id = profile_history_id
         state.latest_history_id = profile_history_id
         state.last_history_id = profile_history_id
+
+        total_messages = len(message_ids)
+        oldest_synced_ms: int | None = None
+        for idx, msg_id in enumerate(message_ids, start=1):
+            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+            row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
+            touched_threads.add((inbox.id, row.thread_id))
+            if row.internal_date is not None:
+                oldest_synced_ms = row.internal_date if oldest_synced_ms is None else min(oldest_synced_ms, row.internal_date)
+
+            if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+                state.last_sync_at = time_provider.utcnow()
+                await db.commit()
+                log.info(
+                    "Unibox full sync progress inbox_id=%s processed=%s/%s",
+                    inbox.id,
+                    idx,
+                    total_messages,
+                )
+        if oldest_synced_ms is not None:
+            if state.oldest_internal_date is None or oldest_synced_ms < state.oldest_internal_date:
+                state.oldest_internal_date = oldest_synced_ms
+        elif state.oldest_internal_date is None:
+            state.oldest_internal_date = int(sync_start.timestamp() * 1000)
     elif delta is not None:
         for msg_id in delta.added_ids:
             payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
             row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
             touched_threads.add((inbox.id, row.thread_id))
+            if row.internal_date is not None:
+                if state.oldest_internal_date is None or row.internal_date < state.oldest_internal_date:
+                    state.oldest_internal_date = row.internal_date
 
         for msg_id in delta.deleted_ids:
             deleted_thread_id = await _delete_message(db, inbox.id, msg_id)
@@ -847,15 +918,96 @@ async def _sync_inbox(db: AsyncSession, inbox: Inbox, reason: str) -> set[tuple[
     return touched_threads
 
 
+async def _backfill_older_window(
+    db: AsyncSession,
+    inbox: Inbox,
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+) -> tuple[set[tuple[int, str]], dict[str, Any]]:
+    touched_threads: set[tuple[int, str]] = set()
+    account_res = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
+    account = account_res.scalar_one_or_none()
+    if account is None:
+        return touched_threads, {"messages_synced": 0, "range_start": None, "range_end": None}
+
+    state = await _get_or_create_sync_state(db, inbox.id)
+    access_token = await _ensure_access_token(db, account)
+
+    end_dt = _epoch_ms_to_dt(state.oldest_internal_date) if state.oldest_internal_date else time_provider.utcnow()
+    if end_dt is None:
+        end_dt = time_provider.utcnow()
+    start_dt = end_dt - timedelta(days=max(1, int(window_days)))
+
+    message_ids = await asyncio.to_thread(
+        _gmail_list_message_ids_in_window,
+        access_token,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        max_messages=BACKFILL_SYNC_MAX_MESSAGES,
+    )
+
+    oldest_synced_ms: int | None = None
+    total_messages = len(message_ids)
+    for idx, msg_id in enumerate(message_ids, start=1):
+        payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
+        touched_threads.add((inbox.id, row.thread_id))
+        if row.internal_date is not None:
+            oldest_synced_ms = row.internal_date if oldest_synced_ms is None else min(oldest_synced_ms, row.internal_date)
+
+        if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+            state.last_sync_at = time_provider.utcnow()
+            await db.commit()
+            log.info(
+                "Unibox backfill progress inbox_id=%s processed=%s/%s",
+                inbox.id,
+                idx,
+                total_messages,
+            )
+
+    if oldest_synced_ms is not None:
+        if state.oldest_internal_date is None or oldest_synced_ms < state.oldest_internal_date:
+            state.oldest_internal_date = oldest_synced_ms
+    else:
+        state.oldest_internal_date = int(start_dt.timestamp() * 1000)
+
+    state.last_sync_at = time_provider.utcnow()
+    await db.flush()
+    meta = {
+        "messages_synced": total_messages,
+        "range_start": _dt_to_iso(start_dt),
+        "range_end": _dt_to_iso(end_dt),
+    }
+    log.info(
+        "Unibox backfill inbox_id=%s messages_synced=%s range_start=%s range_end=%s",
+        inbox.id,
+        total_messages,
+        meta["range_start"],
+        meta["range_end"],
+    )
+    return touched_threads, meta
+
+
 _sync_lock = asyncio.Lock()
 _inflight_inbox_syncs: set[int] = set()
 
 
-async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
+async def _acquire_inflight(inbox_id: int) -> bool:
     async with _sync_lock:
         if inbox_id in _inflight_inbox_syncs:
             return False
         _inflight_inbox_syncs.add(inbox_id)
+        return True
+
+
+async def _release_inflight(inbox_id: int) -> None:
+    async with _sync_lock:
+        _inflight_inbox_syncs.discard(inbox_id)
+
+
+async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
+    if not await _acquire_inflight(inbox_id):
+        return False
 
     touched: set[tuple[int, str]] = set()
     try:
@@ -871,8 +1023,45 @@ async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
         log.exception("Failed unibox sync for inbox_id=%s reason=%s", inbox_id, reason)
         return False
     finally:
-        async with _sync_lock:
-            _inflight_inbox_syncs.discard(inbox_id)
+        await _release_inflight(inbox_id)
+
+    for i_id, thread_id in touched:
+        await unibox_events.publish(
+            {
+                "type": "unibox.thread.updated",
+                "reason": reason,
+                "inbox_id": i_id,
+                "thread_id": thread_id,
+                "timestamp": _dt_to_iso(time_provider.utcnow()),
+            }
+        )
+    return True
+
+
+async def backfill_single_inbox(
+    inbox_id: int,
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+    reason: str = "manual-backfill",
+) -> bool:
+    if not await _acquire_inflight(inbox_id):
+        return False
+
+    touched: set[tuple[int, str]] = set()
+    try:
+        async with AsyncSessionLocal() as db:
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider == "gmail"))
+            inbox = inbox_res.scalar_one_or_none()
+            if not inbox:
+                await db.rollback()
+                return False
+            touched, _meta = await _backfill_older_window(db, inbox, window_days=window_days)
+            await db.commit()
+    except Exception:
+        log.exception("Failed unibox backfill for inbox_id=%s reason=%s", inbox_id, reason)
+        return False
+    finally:
+        await _release_inflight(inbox_id)
 
     for i_id, thread_id in touched:
         await unibox_events.publish(
@@ -915,6 +1104,33 @@ async def queue_sync_for_inbox(inbox_id: int, reason: str = "push") -> None:
 async def queue_sync_for_all_inboxes(reason: str = "startup") -> None:
     async def _runner() -> None:
         await sync_all_inboxes(reason=reason)
+
+    asyncio.create_task(_runner())
+
+
+async def queue_backfill_for_inbox(
+    inbox_id: int,
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+    reason: str = "manual-backfill",
+) -> None:
+    async def _runner() -> None:
+        await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)
+
+    asyncio.create_task(_runner())
+
+
+async def queue_backfill_for_all_inboxes(
+    *,
+    window_days: int = BACKFILL_WINDOW_DAYS,
+    reason: str = "manual-backfill",
+) -> None:
+    async def _runner() -> None:
+        async with AsyncSessionLocal() as db:
+            rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+            inbox_ids = [row[0] for row in rows.all()]
+        for inbox_id in inbox_ids:
+            await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)
 
     asyncio.create_task(_runner())
 

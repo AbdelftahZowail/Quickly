@@ -7,7 +7,7 @@ from sqlalchemy import select
 
 from app.models import GmailAccount, GmailMessage, GmailThread, Inbox
 from app.routers import unibox as unibox_router
-from app.routers.unibox import UniboxSendRequest
+from app.routers.unibox import UniboxLoadMoreRequest, UniboxSendRequest
 from app.sender import SendResult
 
 
@@ -176,4 +176,45 @@ async def test_unibox_send_does_not_insert_on_gmail_failure(session, monkeypatch
 
     row = await session.execute(select(GmailMessage).where(GmailMessage.inbox_id == inbox.id))
     assert row.scalars().first() is None
+
+
+@pytest.mark.asyncio
+async def test_unibox_load_more_empty_when_no_gmail_inboxes(session):
+    res = await unibox_router.trigger_unibox_load_more(
+        UniboxLoadMoreRequest(),
+        db=session,
+    )
+    assert res["ok"] is True
+    assert res["queued"] == 0
+    assert res["inbox_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_unibox_load_more_queues_selected_inbox(session, monkeypatch):
+    inbox = Inbox(email="older@example.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    called: dict[str, int | str] = {}
+
+    async def fake_queue_backfill_for_inbox(inbox_id: int, *, window_days: int, reason: str):
+        called["inbox_id"] = inbox_id
+        called["window_days"] = window_days
+        called["reason"] = reason
+
+    monkeypatch.setattr(
+        "app.routers.unibox.queue_backfill_for_inbox",
+        fake_queue_backfill_for_inbox,
+    )
+
+    res = await unibox_router.trigger_unibox_load_more(
+        UniboxLoadMoreRequest(inbox_id=inbox.id, window_days=7),
+        db=session,
+    )
+    assert res["ok"] is True
+    assert res["queued"] == 1
+    assert res["inbox_ids"] == [inbox.id]
+    assert called["inbox_id"] == inbox.id
+    assert called["window_days"] == 7
+    assert called["reason"] == "manual-backfill"
 
