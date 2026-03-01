@@ -253,7 +253,7 @@ export default function Unibox() {
       if ((res?.queued || 0) <= 0) {
         notify({ type: 'error', message: 'No Gmail inboxes available for sync.' });
       } else {
-        notify({ type: 'success', message: `Sync queued for ${res.queued} inbox(es).` });
+        // notify({ type: 'success', message: `Sync queued for ${res.queued} inbox(es).` });
         await loadSyncStatus({ silent: true });
       }
     } catch (err) {
