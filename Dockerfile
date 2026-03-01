@@ -23,6 +23,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # copy backend source code
 COPY app/ ./app/
+# include smoke-test utilities so that the validation endpoint works
+# (this directory is only used by the `/validate-queue` route and various
+# development helpers).
+COPY smoke_test/ ./smoke_test/
 COPY README.md ./
 # copy anything else the application might need (templates, etc.).
 # the `static` folder is optional; we create an empty directory in the repo

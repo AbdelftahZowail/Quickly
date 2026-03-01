@@ -35,3 +35,44 @@ jobs:
             azowail/quickly:latest
           cache-from: type=registry,ref=azowail/quickly:latest
           platforms: linux/amd64,linux/arm64
+
+      - name: Create GitHub Release
+        id: create_release
+        uses: actions/create-release@v1
+        with:
+          tag_name: ${{ steps.tagger.outputs.TAG }}
+          release_name: ${{ steps.tagger.outputs.TAG }}
+          body: |
+            🖥️ **Run locally or on a VPS**
+
+            1. Install Docker Desktop
+            2. Download `docker-compose.yml` and `.env.example` from the files below
+            3. Rename `.env.example` to `.env` and fill in your API keys
+            4. Run `docker compose up`
+            5. Open `http://localhost:8000`
+
+            ☁️ **Deploy on Railway / Render**
+
+            1. Create a new project
+            2. Deploy image `azowail/quickly:${{ steps.tagger.outputs.TAG }}` from Docker Hub
+            3. Add a Postgres plugin
+            4. Copy the variables from `.env.example` into your dashboard and fill them in
+            5. Done — you'll get a public URL
+          draft: false
+          prerelease: false
+
+      - name: Upload docker-compose.yml asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: docker-compose.yml
+          asset_name: docker-compose.yml
+          asset_content_type: application/x-yaml
+
+      - name: Upload .env.example asset
+        uses: actions/upload-release-asset@v1
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: .env.example
+          asset_name: .env.example
+          asset_content_type: text/plain

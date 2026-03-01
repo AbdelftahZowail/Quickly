@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Email sending with template substitution and threading. Supports Resend API, SMTP, and Gmail OAuth."""
 import base64
 import json
@@ -444,7 +446,7 @@ def send_email(
     is_html: bool = False,
     provider: str = "",
     gmail_access_token: str = "",
-    gmail_account: "GmailAccount" | None = None,
+    gmail_account: Optional[GmailAccount] = None,
     thread_id: Optional[str] = None,
 ) -> Optional[SendResult]:
     """
