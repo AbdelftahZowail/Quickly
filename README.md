@@ -227,7 +227,7 @@ During development the React app provides the following routes:
 
 As you build new functionality you can add new React components under `frontend/src/pages`.
 
-During development the app proxies `/api` requests to `http://localhost:8000`, so you can run the FastAPI server side‑by‑side.
+During development the app proxies `/api` requests to `http://localhost:8000`, so you can run the FastAPI server side‑by‑side.  Static assets (`/assets/*`) are served directly by Vite, and the unibox APIs live under `/api/unibox` so you don’t need any special bypass rules in the proxy.
 
 ### Building for production
 
@@ -241,16 +241,35 @@ Copy or serve the contents of `frontend/dist` from the backend's `static/` direc
 ### Hosting (single domain)
 
 1. **Build the frontend** as shown above.
-2. **Move the build**: either copy `frontend/dist/*` into `static/` at the project root or configure the backend to mount `frontend/dist` directly:
+2. **Move the build**: either copy `frontend/dist/*` into `static/` at the project root or configure the backend to mount just the asset directory and use explicit routes for the SPA entrypoint.  The latter avoids interference with `/api` paths by preventing a catch‑all static mount.
 
    ```python
    # app/main.py
-   from fastapi.staticfiles import StaticFiles
+   from fastapi.staticfiles import StaticFiles, FileResponse
    BASE_DIR = Path(__file__).resolve().parent.parent
-   app.mount("/", StaticFiles(directory=str(BASE_DIR / "frontend/dist"), html=True), name="frontend")
+
+   # serve static assets only
+   app.mount(
+       "/assets",
+       StaticFiles(directory=str(BASE_DIR / "frontend" / "dist" / "assets")),
+       name="assets",
+   )
+
+   @app.get("/", response_class=FileResponse)
+   def index():
+       return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
+
+   @app.get("/{full_path:path}", response_class=FileResponse)
+   def spa(request: Request, full_path: str):
+       # return index.html for any non-API/asset path so client-side routing works
+       if request.url.path.startswith("/api") or request.url.path.startswith("/assets"):
+           raise HTTPException(status_code=404)
+       return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
    ```
 
-   the `html=True` flag makes FastAPI return `index.html` for unknown routes (SPA fallback). Remove or update the existing template routes if you migrate fully to React.
+   In production you can now run the backend on a single domain and all
+   navigation refreshes (e.g. `/campaigns`, `/unibox`) will serve the
+   React application while `/api/*` continues to hit the API.
 
 3. **Run the backend**: `uvicorn app.main:app --host 0.0.0.0 --port 8000` (or via Gunicorn/Uvicorn for production). All UI traffic and API traffic share the same origin (`https://yourdomain.com`).
 

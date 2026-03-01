@@ -34,7 +34,7 @@ from app.unibox import (
 
 log = logging.getLogger("quickly.unibox.router")
 
-router = APIRouter(prefix="/unibox", tags=["unibox"])
+router = APIRouter(prefix="/api/unibox", tags=["unibox"])
 
 
 class UniboxSendRequest(BaseModel):
