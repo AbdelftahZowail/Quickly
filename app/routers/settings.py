@@ -180,7 +180,7 @@ async def set_scheduling_strategy_endpoint(
         await db.commit()
 
         # schedule recalculation by POSTing to the public endpoint
-        # `/api/calendar/recalculate-all`.  This mirrors the startup logic in
+        # `/api/scheduler/recalculate-all`.  This mirrors the startup logic in
         # ``app.main`` and ensures any middleware or side effects run through
         # the normal request machinery.  We do not wait for the request to
         # complete before returning to the caller.
@@ -191,7 +191,7 @@ async def set_scheduling_strategy_endpoint(
             try:
                 transport = ASGITransport(app=app)
                 async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.post("/api/calendar/recalculate-all")
+                    resp = await client.post("/api/scheduler/recalculate-all")
                     resp.raise_for_status()
             except Exception:
                 log.exception("background recalculation via endpoint failed")

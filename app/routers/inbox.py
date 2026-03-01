@@ -118,7 +118,7 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
         )
         campaign_ids = [cid for (cid,) in campaign_result.all()]
         log.info("Inbox %s capacity changed; campaigns touched %s", inbox_id, campaign_ids)
-        from app.routers.calendar import recalculate_all_campaigns
+        from app.routers.scheduler import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
     await db.refresh(inbox)
     return inbox
