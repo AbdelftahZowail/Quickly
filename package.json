@@ -1,5 +1,6 @@
 {
   "dependencies": {
-    "darkreader": "^4.9.120"
+    "darkreader": "^4.9.120",
+    "react-icons": "^4.12.0"
   }
 }

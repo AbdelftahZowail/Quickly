@@ -71,6 +71,16 @@ async def engine():
         async with eng.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
+    # install listener for any sqlite engine so that new threads/connections
+    # will also have the tables.  the listener uses the sync_engine since
+    # metadata.create_all requires a sync connection.
+    if eng.dialect.name == "sqlite":
+        from sqlalchemy import event
+
+        @event.listens_for(eng.sync_engine, "connect")
+        def _on_connect(dbapi_conn, conn_record):
+            Base.metadata.create_all(bind=eng.sync_engine)
+
     # ensure the global app.database engine matches the test engine so
     # requests via FastAPI use the same database connection state.  Without
     # this, two independent engines would each open their own in-memory
@@ -97,6 +107,15 @@ async def session(engine):
         engine, class_=AsyncSession, expire_on_commit=False,
     )
     async with async_session() as sess:
+        # patch commit/flush to avoid sqlite thread issues by running
+        # synchronous flush/commit on the active connection instead of
+        # letting the default implementations spawn background threads.
+        async def _sync_flush():
+            await sess.run_sync(lambda sync: sync.flush())
+        async def _sync_commit():
+            await sess.run_sync(lambda sync: sync.commit())
+        sess.flush = _sync_flush
+        sess.commit = _sync_commit
         yield sess
 
 
