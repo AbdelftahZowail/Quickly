@@ -4,6 +4,14 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   server: {
+    // File watching inside Docker on Windows can miss changes because
+    // the underlying filesystem notifications don’t propagate across
+    // the bind mount.  Enabling polling ensures hot‑reload works.
+    watch: {
+      usePolling: true,
+      interval: 100,
+    },
+
     proxy: {
       // During development proxy API requests to the backend.  The target
       // can be overridden by the VITE_API_URL environment variable which

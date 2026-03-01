@@ -234,7 +234,7 @@ export default function Campaigns() {
       )}
 
       <div className="mt-4">
-        <Button as={Link} to="/campaigns/add" variant="default">Create campaign</Button>
+        <Button as={Link} to="/campaigns/add" variant="default" className="no-underline hover:no-underline">Create campaign</Button>
       </div>
     </div>
   );

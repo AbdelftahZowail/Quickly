@@ -3,7 +3,8 @@ import { cva } from 'class-variance-authority';
 import { cn } from '../../utils/cn';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none ring-offset-background',
+  // ensure anchor buttons don't show text decoration (underline) on hover or by default
+  'inline-flex items-center justify-center rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-50 disabled:pointer-events-none ring-offset-background no-underline hover:no-underline',
   {
     variants: {
       variant: {
@@ -27,11 +28,13 @@ const buttonVariants = cva(
   }
 );
 
-// props are forwarded to the underlying button element; variant/size are accepted
+// props are forwarded to the underlying element; variant/size accepted and callers
+// can override the rendered element via the `as` prop (e.g. use Link for
+// client‑side navigation).
 const Button = React.forwardRef(
-  ({ className, variant, size, ...props }, ref) => {
+  ({ className, variant, size, as: Component = 'button', ...props }, ref) => {
     return (
-      <button
+      <Component
         className={cn(buttonVariants({ variant, size, class: className }))}
         ref={ref}
         {...props}
