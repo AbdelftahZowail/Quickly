@@ -24,8 +24,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # copy backend source code
 COPY app/ ./app/
 COPY README.md ./
-# copy anything else the application might need (templates, etc.)
-COPY static/ ./static/ 2>/dev/null || true
+# copy anything else the application might need (templates, etc.).
+# the `static` folder is optional; we create an empty directory in the repo
+# so that the COPY always succeeds even when there is nothing to add.
+COPY static/ ./static/
 
 # copy the compiled frontend assets from the builder stage
 # the backend expects the build to live under frontend/dist so that
