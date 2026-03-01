@@ -13,14 +13,13 @@ import {
   RiHomeLine,
 } from 'react-icons/ri';
 
-// add icon component to each link. Home gets RiHomeLine.
 const links = [
   { to: '/', label: 'Home', icon: <RiHomeLine size={20} /> },
   { to: '/campaigns', label: 'Campaigns', icon: <RiSendPlaneLine size={20} /> },
   { to: '/analytics', label: 'Analytics', icon: <RiLineChartLine size={20} /> },
   { to: '/inboxes', label: 'Inboxes', icon: <RiMailLine size={20} /> },
-  { to: '/mailbox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
-  { to: '/calendar', label: 'Calendar', icon: <RiCalendarScheduleLine size={20} /> },
+  { to: '/unibox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
+  { to: '/scheduler', label: 'Scheduler', icon: <RiCalendarScheduleLine size={20} /> },
   { to: '/settings', label: 'Settings', icon: <RiSettingsLine size={20} /> },
 ];
 

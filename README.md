@@ -12,7 +12,7 @@ Minimal email campaign tool for personal use: leads, campaigns with email sequen
 - **Campaigns**: Multiple sequences per campaign; each campaign has one or more inboxes. Each sequence: subject (optional = reply in thread), body (text/HTML), wait days after previous. Settings: sending days/hours, wait between emails, stop on reply, pause/resume.
 - **Queue**: When a lead joins, all sequence slots are reserved immediately. Each slot is assigned to an inbox that has capacity that day (round-robin across campaign inboxes). Business-day math and per-inbox daily limits. Add leads anytime; changing wait days recalculates pending slots.
 - **Sending**: A scheduled job (runs inside the same process as the server) sends due emails with template substitution (`{{name}}`, `{{email}}`, `{{company}}`, etc.) and threading (empty subject = reply in same thread).
-- **Calendar**: View all sent and scheduled emails across campaigns in one unified timeline with stats. Includes validation checks ("Validate Queue") to detect scheduling issues.
+- **Scheduler**: View all sent and scheduled emails across campaigns in one unified timeline with stats. Includes validation checks ("Validate Queue") to detect scheduling issues.
 
 ## Quick Start
 
@@ -61,7 +61,7 @@ Open http://127.0.0.1:8000 for the web UI. The **Analytics** page now serves as 
 - **Analytics** (`/`) - Landing dashboard with aggregated metrics
 - **Campaigns** (`/campaigns`) - Manage campaigns and sequences
 - **Inboxes** (`/inboxes`) - Configure sending addresses
-- **Calendar** (`/calendar`) - View sent and scheduled emails
+- **Scheduler** (`/scheduler`) - View sent and scheduled emails
 - **Settings** (`/settings`) - Configure app settings and defaults (individual inboxes determine their own send provider)
 
 > Click the logo in the sidebar to return to the analytics/home dashboard.
@@ -164,11 +164,11 @@ mini bar for progress and reply rate for easier visual comparison.
 - `PATCH /api/campaigns/{id}/sequences/{seq_id}` - Update sequence
 - `DELETE /api/campaigns/{id}/sequences/{seq_id}` - Delete sequence
 
-### Calendar
-- `GET /api/calendar/sent` - All sent emails across campaigns
-- `GET /api/calendar/scheduled` - All scheduled emails across campaigns
-- `POST /api/calendar/validate-queue` - Run scheduled-emails validation checks (returns issues list)
-- `GET /api/calendar/stats` - Aggregate statistics (sent today, scheduled today, total leads, etc.)
+### Scheduler
+- `GET /api/scheduler/sent` - All sent emails across campaigns
+- `GET /api/scheduler/scheduled` - All scheduled emails across campaigns
+- `POST /api/scheduler/validate-queue` - Run scheduled-emails validation checks (returns issues list)
+- `GET /api/scheduler/stats` - Aggregate statistics (sent today, scheduled today, total leads, etc.)
 
 ### Settings
 Most configuration is now managed via environment variables (see `.env.example`).
@@ -200,7 +200,7 @@ client‑side preference.
 4. Add sequences to campaign (position 0, 1, 2... with subject, body, wait days)
 5. Add leads via campaign page or API (POST /api/campaigns/{id}/leads)
 6. Assign leads to campaign - slots are automatically reserved across campaign's inboxes
-7. Monitor progress in **Calendar** page or via `/api/calendar/sent` and `/api/calendar/scheduled`
+7. Monitor progress in **Scheduler** page or via `/api/scheduler/sent` and `/api/scheduler/scheduled`
 8. Check `/api/status` to verify scheduler is running
 
 ## Frontend development
@@ -222,7 +222,7 @@ During development the React app provides the following routes:
 - `/campaigns/add` – form to create a campaign
 - `/campaigns/:id` – campaign details (sequences, leads, etc.; under construction)
 - `/inboxes` – manage sending inboxes with add/edit/delete, including Gmail OAuth flow
-- `/calendar` – (placeholder)
+- `/scheduler` – (placeholder)
 - `/settings` – (placeholder)
 
 As you build new functionality you can add new React components under `frontend/src/pages`.

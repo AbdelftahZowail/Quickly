@@ -431,7 +431,7 @@ export default function Unibox() {
           <div ref={listScrollRef} className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">
             {conversations.map((item) => {
               const isActive = selectedThread?.thread_id === item.thread_id && selectedThread?.inbox_id === item.inbox_id;
-              const toUrl = `/mailbox?thread=${encodeURIComponent(item.thread_id)}${item.inbox_id ? `&inbox=${item.inbox_id}` : ''}`;
+              const toUrl = `/unibox?thread=${encodeURIComponent(item.thread_id)}${item.inbox_id ? `&inbox=${item.inbox_id}` : ''}`;
               return (
                 <Link
                   key={`${item.inbox_id}-${item.thread_id}`}

@@ -21,7 +21,7 @@ from app.database import init_db
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
-from app.routers import calendar as calendar_router
+from app.routers import scheduler as scheduler_router
 from app.routers import settings as settings_router
 from app.routers import unibox as unibox_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
@@ -76,7 +76,7 @@ async def lifespan(app: FastAPI):
         try:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.post("/api/calendar/recalculate-all")
+                resp = await client.post("/api/scheduler/recalculate-all")
                 resp.raise_for_status()
         except Exception as e:
             logging.getLogger("quickly.routes").error(
@@ -113,7 +113,7 @@ app.include_router(leads.router)
 app.include_router(campaigns.router)
 app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
-app.include_router(calendar_router.router)
+app.include_router(scheduler_router.router)
 app.include_router(settings_router.router)
 app.include_router(unibox_router.router)
 
@@ -154,9 +154,9 @@ async def inboxes_page(request: Request):
 
 
 
-@app.get("/calendar", response_class=HTMLResponse)
-async def calendar_page(request: Request):
-    return templates.TemplateResponse("calendar.html", {"request": request, "active": "calendar"})
+@app.get("/scheduler", response_class=HTMLResponse)
+async def scheduler_page(request: Request):
+    return templates.TemplateResponse("scheduler.html", {"request": request, "active": "scheduler"})
 
 
 

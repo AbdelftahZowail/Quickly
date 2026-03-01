@@ -51,11 +51,11 @@ async def _recalculate_all() -> None:
     This uses FastAPI's TestClient so we don't need a live server process; the
     same startup events (DB initialization, etc.) run automatically.
     """
-    print("-> requesting /api/calendar/recalculate-all")
+    print("-> requesting /api/scheduler/recalculate-all")
 
     def sync_call():
         with TestClient(app) as client:
-            resp = client.post("/api/calendar/recalculate-all")
+            resp = client.post("/api/scheduler/recalculate-all")
             resp.raise_for_status()
             return resp.json()
 
@@ -71,11 +71,11 @@ async def _validate() -> bool:
 
     Returns True if the endpoint reported errors (mirrors previous return type).
     """
-    print("-> requesting /api/calendar/validate-queue")
+    print("-> requesting /api/scheduler/validate-queue")
 
     def sync_call():
         with TestClient(app) as client:
-            resp = client.post("/api/calendar/validate-queue")
+            resp = client.post("/api/scheduler/validate-queue")
             resp.raise_for_status()
             return resp.json()
 
