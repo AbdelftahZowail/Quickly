@@ -12,9 +12,8 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logging.getLogger("quickly").setLevel(logging.DEBUG)
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.database import init_db
@@ -119,52 +118,35 @@ app.include_router(unibox_router.router)
 
 # Web UI
 BASE_DIR = Path(__file__).resolve().parent.parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# When running in production we serve the compiled frontend from the
+# `frontend/dist` directory so the entire application is available on a
+# single port.  API routes live under `/api` (and a few legacy prefixes like
+# `/oauth`), so there is no chance of conflicting with client–side paths.
+#
+# The static mount handles asset files directly and html=True allows the
+# index.html file to be returned for the root path.  A catch‑all route below
+# ensures that any unmatched request (e.g. /unibox, /campaigns/123) returns
+# the SPA entrypoint rather than a 404.
+
+# serve only the compiled asset files.  We avoid mounting the entire
+# build at "/" because that would capture *all* requests (including
+# /api/*) and prevent our API routes from ever running.  The SPA entrypoint is
+# handled below by explicit path operations.
+app.mount(
+    "/assets",
+    StaticFiles(directory=str(BASE_DIR / "frontend" / "dist" / "assets")),
+    name="assets",
+)
+
+# legacy static directory is no longer needed once the React UI covers all
+# pages but we keep it around for now; it won't conflict because it's mounted
+# at /static.
 if (BASE_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-
-@app.get("/", response_class=HTMLResponse)
-async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "active": "home"})
-
-
-@app.get("/campaigns", response_class=HTMLResponse)
-async def campaigns_page(request: Request):
-    return templates.TemplateResponse("campaigns.html", {"request": request, "active": "campaigns"})
-
-
-@app.get("/campaigns/add", response_class=HTMLResponse)
-async def campaign_add_page(request: Request):
-    return templates.TemplateResponse("campaign_add.html", {"request": request, "active": "campaigns"})
-
-
-@app.get("/campaigns/{campaign_id}", response_class=HTMLResponse)
-async def campaign_detail_page(request: Request, campaign_id: int):
-    return templates.TemplateResponse(
-        "campaign_detail.html", {"request": request, "campaign_id": campaign_id, "active": "campaigns"}
-    )
-
-
-
-
-@app.get("/inboxes", response_class=HTMLResponse)
-async def inboxes_page(request: Request):
-    return templates.TemplateResponse("inboxes.html", {"request": request, "active": "inboxes"})
-
-
-
-@app.get("/scheduler", response_class=HTMLResponse)
-async def scheduler_page(request: Request):
-    return templates.TemplateResponse("scheduler.html", {"request": request, "active": "scheduler"})
-
-
-
-@app.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
-    return templates.TemplateResponse("settings.html", {"request": request, "active": "settings"})
-
-
+# the status endpoint should be defined before the SPA fallback so it isn't
+# swallowed by the catch‑all route (route order matters).
 @app.get("/api/status")
 async def api_status(request: Request):
     """Scheduler and send-job status so you can verify the worker is running."""
@@ -179,3 +161,21 @@ async def api_status(request: Request):
         "next_send_job_run": next_run,
         "test_mode": settings.test_mode,
     }
+
+# root and catch‑all for SPA.  Only run when the path does *not* match a known
+# API or asset prefix.  Since this route is added after all routers, any
+# /api/ request will be handled by the API router first; we still defensively
+# check the prefix to avoid accidentally serving index.html for APIs.
+
+@app.get("/", response_class=FileResponse)
+async def index():
+    return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
+
+@app.get("/{full_path:path}", response_class=FileResponse)
+async def spa(request: Request, full_path: str):
+    # If the path looks like an API or asset request, raise 404 so that the
+    # normal routing machinery handles it (routes have already been examined
+    # in order, but this is an extra guard).
+    if request.url.path.startswith("/api") or request.url.path.startswith("/assets") or request.url.path.startswith("/oauth"):
+        raise HTTPException(status_code=404)
+    return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
