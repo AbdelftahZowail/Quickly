@@ -10,7 +10,8 @@ const PAGE_SIZE = 25;
 const OLDER_WINDOW_DAYS = 7;
 
 async function uniboxRequest(path, options = {}) {
-  const res = await fetch(path, options);
+  // all unibox endpoints now live under /api/unibox on the server
+  const res = await fetch(`/api${path}`, options);
   if (!res.ok) {
     const text = await res.text();
     const err = new Error(text || res.statusText);
@@ -20,7 +21,7 @@ async function uniboxRequest(path, options = {}) {
 
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json')) {
-    throw new Error('Unexpected response type from Unibox API. Verify backend routing/proxy for /unibox.');
+    throw new Error('Unexpected response type from Unibox API. Verify backend routing/proxy for /api/unibox.');
   }
   return res.json();
 }
@@ -308,7 +309,7 @@ export default function Unibox() {
   }, [initialListSyncLoading, loadConversations, loadSyncStatus]);
 
   useEffect(() => {
-    const source = new EventSource('/unibox/events');
+    const source = new EventSource('/api/unibox/events');
 
     const onUpdate = () => {
       if (sseRefreshTimerRef.current) return;
