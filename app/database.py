@@ -88,6 +88,35 @@ async def init_db():
                 # ignore; columns may already exist or syntax unsupported
                 pass
 
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS gmail_thread
+                        ADD COLUMN IF NOT EXISTS is_lead_thread boolean NOT NULL DEFAULT false,
+                        ADD COLUMN IF NOT EXISTS unread_lead_reply boolean NOT NULL DEFAULT false;
+                        """
+                    )
+                )
+            except OperationalError:
+                pass
+
+    # SQLite: add missing columns individually (SQLite doesn't support
+    # multi-column ALTER TABLE or IF NOT EXISTS for ADD COLUMN).
+    if "sqlite" in engine.dialect.name:
+        async with engine.begin() as conn:
+            for col, typedef in [
+                ("is_lead_thread", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("unread_lead_reply", "BOOLEAN NOT NULL DEFAULT 0"),
+            ]:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE gmail_thread ADD COLUMN {col} {typedef}")
+                    )
+                except Exception:
+                    # Column already exists – ignore.
+                    pass
+
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:
         await initialize_settings(session)

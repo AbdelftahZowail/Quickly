@@ -10,6 +10,7 @@ import {
   RiSettingsLine,
   RiSidebarFoldLine,
 } from 'react-icons/ri';
+import { useUniboxNotifications } from '../../context/UniboxNotificationsContext';
 
 // links including icons
 const links = [
@@ -23,6 +24,7 @@ const links = [
 
 export default function Sidebar({ collapsed, onToggle }) {
   const location = useLocation();
+  const { count: unreadCount } = useUniboxNotifications();
   const widthClass = collapsed ? 'w-16' : 'w-44';
   const justifyLogo = collapsed ? 'justify-center' : '';
 
@@ -61,7 +63,14 @@ export default function Sidebar({ collapsed, onToggle }) {
                 }`;
               }}
             >
-              <span className="flex-shrink-0">{l.icon}</span>
+              <span className="flex-shrink-0 relative inline-flex">
+                {l.icon}
+                {l.to === '/unibox' && unreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white leading-none">
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
+              </span>
               {!collapsed && <span className="ml-2">{l.label}</span>}
             </NavLink>
             {collapsed && (

@@ -20,10 +20,12 @@ from app.sender import SendResult, send_email
 from app.unibox import (
     BACKFILL_WINDOW_DAYS,
     decode_push_message_data,
+    get_notification_count,
     get_unibox_sync_status,
     get_thread_messages,
     hydrate_thread_on_demand,
     list_unibox_conversations,
+    mark_thread_read,
     queue_backfill_for_all_inboxes,
     queue_backfill_for_inbox,
     queue_sync_for_all_inboxes,
@@ -77,14 +79,36 @@ def _extract_message_id_from_headers(headers_json: str) -> str | None:
 async def get_unibox(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
+    leads_only: bool = Query(default=True),
     db: AsyncSession = Depends(get_db),
 ):
-    return await list_unibox_conversations(db, page=page, page_size=page_size)
+    return await list_unibox_conversations(db, page=page, page_size=page_size, leads_only=leads_only)
 
 
 @router.get("/status")
 async def get_unibox_status(inbox_id: int | None = Query(default=None, ge=1)):
     return await get_unibox_sync_status(inbox_id=inbox_id)
+
+
+@router.get("/notifications")
+async def get_unibox_notifications(db: AsyncSession = Depends(get_db)):
+    """Return the count of threads with an unread lead reply."""
+    count = await get_notification_count(db)
+    return {"count": count}
+
+
+@router.post("/threads/{thread_id}/mark-read")
+async def mark_unibox_thread_read(
+    thread_id: str,
+    inbox_id: int = Query(..., ge=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """Mark a thread's unread-lead-reply flag as cleared."""
+    found = await mark_thread_read(db, thread_id=thread_id, inbox_id=inbox_id)
+    if not found:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    await db.commit()
+    return {"ok": True, "thread_id": thread_id}
 
 
 @router.post("/sync")

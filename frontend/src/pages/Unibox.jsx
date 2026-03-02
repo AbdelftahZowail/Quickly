@@ -5,6 +5,7 @@ import EmailContent from '../components/EmailContent';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
+import { useUniboxNotifications } from '../context/UniboxNotificationsContext';
 
 const PAGE_SIZE = 25;
 const OLDER_WINDOW_DAYS = 7;
@@ -82,8 +83,10 @@ function sanitizeHtmlContent(html) {
 
 export default function Unibox() {
   const notify = useNotify();
+  const { refresh: refreshNotifications } = useUniboxNotifications();
   const [searchParams, setSearchParams] = useSearchParams();
 
+  const [leadsOnly, setLeadsOnly] = useState(true);
   const [conversations, setConversations] = useState([]);
   const [total, setTotal] = useState(0);
   // pagination state used for incremental loading only (infinite scroll)
@@ -127,9 +130,8 @@ export default function Unibox() {
         setListError('');
       }
       try {
-        const data = await uniboxRequest(`
-          /unibox?page=${requestedPage}&page_size=${PAGE_SIZE}`
-            .trim(),
+        const data = await uniboxRequest(
+          `/unibox?page=${requestedPage}&page_size=${PAGE_SIZE}&leads_only=${leadsOnly}`,
         );
         const items = data?.items || [];
         setTotal(data?.total || 0);
@@ -150,7 +152,7 @@ export default function Unibox() {
         listRequestInFlightRef.current = false;
       }
     },
-    [],
+    [leadsOnly],
   );
 
   const loadThread = useCallback(async (threadId, inboxId) => {
@@ -165,6 +167,27 @@ export default function Unibox() {
       const newParams = { thread: threadId };
       if (inboxId != null && inboxId !== '') newParams.inbox = String(inboxId);
       setSearchParams(newParams);
+
+      // Mark thread as read if it had an unread lead reply.
+      if (inboxId) {
+        try {
+          await uniboxRequest(
+            `/unibox/threads/${encodeURIComponent(threadId)}/mark-read?inbox_id=${inboxId}`,
+            { method: 'POST' },
+          );
+          // Update unread flag locally (optimistic) so UI reacts immediately.
+          setConversations(prev =>
+            prev.map(c =>
+              c.thread_id === threadId && c.inbox_id === Number(inboxId)
+                ? { ...c, unread_lead_reply: false }
+                : c,
+            ),
+          );
+          refreshNotifications();
+        } catch {
+          // mark-read failure is non-critical; ignore
+        }
+      }
 
       const messages = data?.messages || [];
       const lastReceived = [...messages].reverse().find(m => m.direction === 'received');
@@ -187,7 +210,7 @@ export default function Unibox() {
     } finally {
       setThreadLoading(false);
     }
-  }, [setSearchParams]);
+  }, [setSearchParams, refreshNotifications]);
 
   const loadSyncStatus = useCallback(async ({ silent = false } = {}) => {
     try {
@@ -340,6 +363,10 @@ export default function Unibox() {
 
     source.addEventListener('unibox.thread.updated', onUpdate);
     source.addEventListener('unibox.sync.status', onSyncStatus);
+    // When a lead replies, refresh conversations so the unread thread pins to top.
+    source.addEventListener('unibox.notification', () => {
+      loadConversations({ silent: true });
+    });
     source.onerror = () => {
       // Keep the EventSource open so the browser can reconnect automatically.
     };
@@ -347,6 +374,7 @@ export default function Unibox() {
     return () => {
       source.removeEventListener('unibox.thread.updated', onUpdate);
       source.removeEventListener('unibox.sync.status', onSyncStatus);
+      source.removeEventListener('unibox.notification', () => {});
       source.close();
       if (sseRefreshTimerRef.current) {
         clearTimeout(sseRefreshTimerRef.current);
@@ -397,10 +425,19 @@ export default function Unibox() {
     }
   };
 
+  const { count: unreadCount } = useUniboxNotifications();
+
   return (
     <div className="p-8 h-screen overflow-hidden flex flex-col gap-4">
       <div className="flex items-center justify-between shrink-0">
-        <h1 className="text-2xl font-semibold">Unibox</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-semibold">Unibox</h1>
+          {unreadCount > 0 && (
+            <span className="inline-flex items-center justify-center h-6 min-w-6 px-1.5 rounded-full bg-red-500 text-white text-xs font-bold">
+              {unreadCount > 99 ? '99+' : unreadCount}
+            </span>
+          )}
+        </div>
         <span className="text-sm text-gray-500">Gmail thread view and replies</span>
       </div>
 
@@ -410,6 +447,19 @@ export default function Unibox() {
             <h2 className="font-semibold">Conversations</h2>
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">{total} total</span>
+              {/* Leads-only filter toggle */}
+              <button
+                type="button"
+                onClick={() => setLeadsOnly(v => !v)}
+                title={leadsOnly ? 'Showing lead conversations only — click to show all' : 'Show lead conversations only'}
+                className={`flex items-center gap-1 text-xs rounded-full px-2.5 py-1 border transition-colors ${
+                  leadsOnly
+                    ? 'bg-teal-600 text-white border-teal-600 hover:bg-teal-700'
+                    : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+                }`}
+              >
+                <span>{leadsOnly ? 'Leads' : 'All'}</span>
+              </button>
               <Button variant="outline" size="sm" onClick={triggerSync} disabled={syncing}>
                 {syncing ? 'Syncing...' : 'Sync now'}
               </Button>
@@ -425,24 +475,38 @@ export default function Unibox() {
           {listError && <p className="text-sm text-red-600">{listError}</p>}
           {!listLoading && !listError && conversations.length === 0 && (
             <p className="text-sm text-gray-500">
-              No synced conversations yet. Initial sync includes recent 7 days only.
+              {leadsOnly
+                ? 'No lead conversations found. Replies from leads will appear here.'
+                : 'No synced conversations yet. Initial sync includes recent 7 days only.'}
             </p>
           )}
 
           <div ref={listScrollRef} className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">
             {conversations.map((item) => {
               const isActive = selectedThread?.thread_id === item.thread_id && selectedThread?.inbox_id === item.inbox_id;
+              const isUnread = Boolean(item.unread_lead_reply);
               const toUrl = `/unibox?thread=${encodeURIComponent(item.thread_id)}${item.inbox_id ? `&inbox=${item.inbox_id}` : ''}`;
               return (
                 <Link
                   key={`${item.inbox_id}-${item.thread_id}`}
                   to={toUrl}
                   className={`w-full block text-left p-3 rounded border no-underline hover:no-underline ${
-                    isActive ? 'border-teal-400 bg-teal-50' : 'border-gray-200 hover:bg-teal-50/30'
+                    isActive
+                      ? 'border-teal-400 bg-teal-50'
+                      : isUnread
+                      ? 'border-red-300 bg-red-50 hover:bg-red-100/60'
+                      : 'border-gray-200 hover:bg-teal-50/30'
                   }`}
                 >
-                  <div className="text-xs text-gray-500 mb-1">{item.gmail_account}</div>
-                  <div className="font-medium truncate">{item.subject || '(no subject)'}</div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-xs text-gray-500 truncate">{item.gmail_account}</div>
+                    {isUnread && (
+                      <span className="flex-shrink-0 ml-1 h-2 w-2 rounded-full bg-red-500" title="Unread reply from lead" />
+                    )}
+                  </div>
+                  <div className={`truncate ${isUnread ? 'font-semibold text-gray-900' : 'font-medium'}`}>
+                    {item.subject || '(no subject)'}
+                  </div>
                   <div className="text-sm text-gray-600 truncate">{item.last_message_snippet || ''}</div>
                   <div className="text-xs text-gray-400 mt-1">{formatDateTime(item.timestamp)}</div>
                 </Link>

@@ -5,6 +5,7 @@ import { NotificationProvider } from '../context/NotificationContext';
 import { LoadingProvider } from '../context/LoadingContext';
 import { DarkModeProvider } from '../context/DarkModeContext';
 import { ConfirmProvider } from '../context/ConfirmContext';
+import { UniboxNotificationsProvider } from '../context/UniboxNotificationsContext';
 
 export default function Layout({ children }) {
   // initialize collapsed state from localStorage (knows before first paint)
@@ -25,6 +26,7 @@ export default function Layout({ children }) {
       <LoadingProvider>
         <DarkModeProvider>
           <ConfirmProvider>
+            <UniboxNotificationsProvider>
             <div className="flex min-h-screen">
               <Sidebar
                 collapsed={sidebarCollapsed}
@@ -44,6 +46,7 @@ export default function Layout({ children }) {
                 {children}
               </div>
             </div>
+            </UniboxNotificationsProvider>
           </ConfirmProvider>
         </DarkModeProvider>
       </LoadingProvider>

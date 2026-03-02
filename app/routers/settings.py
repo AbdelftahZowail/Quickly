@@ -31,8 +31,12 @@ from app.app_settings import (
     set_test_mode,
     get_email_event_webhook_config,
     save_email_event_webhook_config,
+    get_lead_reply_webhook_config,
+    save_lead_reply_webhook_config,
 )
-from app.webhooks import maybe_fire_email_event
+from sqlalchemy import select
+from app.models import EmailLog, EmailOpen
+from app.webhooks import maybe_fire_email_event, fire_lead_reply_webhook
 
 log = logging.getLogger("quickly.settings")
 
@@ -109,6 +113,53 @@ async def test_email_webhook(db: AsyncSession = Depends(get_db)):
         log.error("test_email_webhook failed: %s", e)
         raise HTTPException(500, f"Failed to fire test webhook: {e}")
 
+
+# Lead-reply webhook configuration --------------------------------------------
+
+@router.get("/lead-reply-webhook")
+async def get_lead_reply_webhook_endpoint(db: AsyncSession = Depends(get_db)):
+    """Return the lead-reply webhook configuration."""
+    return await get_lead_reply_webhook_config(db)
+
+
+@router.post("/lead-reply-webhook")
+async def set_lead_reply_webhook_config(
+    payload: EmailWebhookConfig,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save the dedicated lead-reply webhook URL and optional bearer token."""
+    try:
+        await save_lead_reply_webhook_config(db, payload.webhook_url, payload.webhook_token)
+        await db.commit()
+        return {"ok": True, **(await get_lead_reply_webhook_config(db))}
+    except Exception as e:
+        log.error("set_lead_reply_webhook_config failed: %s", e)
+        raise HTTPException(500, f"Failed to update lead reply webhook config: {e}")
+
+
+@router.post("/lead-reply-webhook/test")
+async def test_lead_reply_webhook(db: AsyncSession = Depends(get_db)):
+    """Trigger a test event to the configured lead-reply webhook."""
+    try:
+        import datetime as _dt
+        await fire_lead_reply_webhook(
+            db,
+            {
+                "lead_email": "test@example.com",
+                "lead_id": 0,
+                "lead_name": "Test Lead",
+                "thread_id": "test_thread",
+                "inbox_id": 0,
+                "inbox_email": "inbox@example.com",
+                "message_id": "test_message",
+                "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+            },
+        )
+        return {"ok": True}
+    except Exception as e:
+        log.error("test_lead_reply_webhook failed: %s", e)
+        raise HTTPException(500, f"Failed to fire test webhook: {e}")
+
 # Test mode ---------------------------------------------------------------
 
 @router.get("/test-mode")
@@ -135,6 +186,34 @@ async def set_test_mode_endpoint(
     except Exception as e:
         log.error("set_test_mode failed: %s", e)
         raise HTTPException(500, f"Failed to update test mode: {e}")
+
+
+# Survey tools / utility endpoints ----------------------------------------
+
+
+@router.post("/add-opens")
+async def add_opens_to_all_sent(db: AsyncSession = Depends(get_db)):
+    """Insert a synthetic open event on every row in ``email_log``.
+
+    This mirrors the ad‑hoc script used during development and is exposed
+    behind the settings UI so that users can quickly mark all sent emails as
+    opened.  An IPv4 placeholder is stored for each new ``EmailOpen`` row.
+    """
+    try:
+        result = await db.execute(select(EmailLog))
+        logs = result.scalars().all()
+        count = 0
+        for log in logs:
+            op = EmailOpen(email_log_id=log.id, ip_address="127.0.0.1")
+            db.add(op)
+            if not log.opened:
+                log.opened = True
+            count += 1
+        await db.commit()
+        return {"added": count, "total": len(logs)}
+    except Exception as e:
+        log.error("add_opens_to_all_sent failed: %s", e)
+        raise HTTPException(500, f"Failed to add opens: {e}")
 
 
 # Scheduling strategy ---------------------------------------------------------

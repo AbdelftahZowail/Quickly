@@ -15,14 +15,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, desc, func, select
+from sqlalchemy import and_, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import time as time_provider
 from app.app_settings import get_gmail_sync_config, get_google_oauth_credentials
-from app.webhooks import maybe_fire_email_event
+from app.webhooks import maybe_fire_email_event, fire_lead_reply_webhook
 from app.database import AsyncSessionLocal
-from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox
+from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox, Lead, LeadReply, EmailLog, CampaignLead, QueueSlot
 from app.routers.gmail_oauth import refresh_access_token
 
 log = logging.getLogger("quickly.unibox")
@@ -153,6 +153,22 @@ def _header_value(headers_json: str, name: str) -> str:
     for hdr in _parse_headers(headers_json):
         if hdr["name"].lower() == lname:
             return hdr["value"]
+    return ""
+
+
+def _extract_email_only(header_value: str) -> str:
+    """Extract bare email address from a From/To header value.
+
+    Handles both ``Name <email>`` and bare ``email`` formats.
+    Returns lowercase email or empty string if nothing found.
+    """
+    import re as _re
+    angle_match = _re.search(r"<([^>]+)>", header_value)
+    if angle_match:
+        return angle_match.group(1).strip().lower()
+    bare_match = _re.search(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", header_value, _re.IGNORECASE)
+    if bare_match:
+        return bare_match.group(0).strip().lower()
     return ""
 
 
@@ -477,6 +493,15 @@ async def _ensure_access_token(db: AsyncSession, account: GmailAccount) -> str:
     return account.access_token
 
 
+async def _fire_lead_reply_webhook_bg(data: dict[str, Any]) -> None:
+    """Fire the lead-reply webhook in a background task with its own DB session."""
+    try:
+        async with AsyncSessionLocal() as session:
+            await fire_lead_reply_webhook(session, data)
+    except Exception as exc:
+        log.warning("Background lead-reply webhook task failed: %s", exc)
+
+
 async def _upsert_thread(
     db: AsyncSession,
     *,
@@ -584,6 +609,139 @@ async def _upsert_message_from_gmail(
             row.body_fetched = True
             row.body_plain = body_plain
             row.body_html = body_html
+
+    # ---------- Lead-reply detection (new received messages only) ----------
+    if created and "SENT" not in [lbl.upper() for lbl in labels]:
+        from_email_addr = _extract_email_only(
+            _header_value(headers_json, "From")
+        )
+        if from_email_addr:
+            lead_res = await db.execute(
+                select(Lead).where(Lead.email == from_email_addr)
+            )
+            lead = lead_res.scalar_one_or_none()
+            if lead is not None:
+                # Mark the thread as a lead thread & unread.
+                thread_res = await db.execute(
+                    select(GmailThread).where(
+                        GmailThread.inbox_id == inbox_id,
+                        GmailThread.thread_id == thread_id,
+                    )
+                )
+                thread_obj = thread_res.scalar_one_or_none()
+                if thread_obj is not None:
+                    thread_obj.is_lead_thread = True
+                    thread_obj.unread_lead_reply = True
+
+                # Mark lead status as replied.
+                if lead.status != "replied":
+                    lead.status = "replied"
+
+                # Find which campaign(s) this thread belongs to via EmailLog,
+                # then record a LeadReply so stop_on_reply works correctly.
+                # Primary lookup: match by Gmail thread_id stored in EmailLog.
+                log_res = await db.execute(
+                    select(EmailLog.campaign_id).where(
+                        EmailLog.thread_id == thread_id,
+                        EmailLog.lead_id == lead.id,
+                    ).distinct()
+                )
+                campaign_ids = [r[0] for r in log_res.all()]
+
+                # Fallback: if no EmailLog row carries this thread_id (e.g. reply
+                # came before the first send or thread_id wasn't recorded), mark
+                # all campaigns the lead is currently enrolled in.
+                if not campaign_ids:
+                    cl_res = await db.execute(
+                        select(CampaignLead.campaign_id).where(
+                            CampaignLead.lead_id == lead.id
+                        )
+                    )
+                    campaign_ids = [r[0] for r in cl_res.all()]
+
+                for camp_id in campaign_ids:
+                    existing_reply = await db.execute(
+                        select(LeadReply).where(
+                            LeadReply.lead_id == lead.id,
+                            LeadReply.campaign_id == camp_id,
+                        )
+                    )
+                    if existing_reply.scalar_one_or_none() is None:
+                        db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
+
+                # Delete all remaining QueueSlots for this lead+campaign so
+                # the queue is clean and the send job doesn't re-skip them.
+                if campaign_ids:
+                    cl_ids_res = await db.execute(
+                        select(CampaignLead.id).where(
+                            CampaignLead.lead_id == lead.id,
+                            CampaignLead.campaign_id.in_(campaign_ids),
+                        )
+                    )
+                    cl_ids = [r[0] for r in cl_ids_res.all()]
+                    if cl_ids:
+                        await db.execute(
+                            delete(QueueSlot).where(
+                                QueueSlot.campaign_lead_id.in_(cl_ids)
+                            )
+                        )
+
+                await db.flush()
+                # Resolve inbox email for the webhook payload.
+                inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+                inbox_obj = inbox_res.scalar_one_or_none()
+                webhook_data: dict[str, Any] = {
+                    "lead_email": from_email_addr,
+                    "lead_id": lead.id,
+                    "lead_name": lead.name or "",
+                    "thread_id": thread_id,
+                    "inbox_id": inbox_id,
+                    "inbox_email": inbox_obj.email if inbox_obj else "",
+                    "message_id": gmail_msg_id,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+                # SSE notification fires immediately (in-memory, no commit needed).
+                asyncio.create_task(
+                    unibox_events.publish(
+                        {
+                            "type": "unibox.notification",
+                            "reason": "lead_reply",
+                            "inbox_id": inbox_id,
+                            "thread_id": thread_id,
+                            "lead_id": lead.id,
+                            "lead_email": from_email_addr,
+                            "timestamp": datetime.utcnow().isoformat() + "Z",
+                        }
+                    )
+                )
+                # Webhook fires in the background after current transaction commits.
+                asyncio.create_task(_fire_lead_reply_webhook_bg(webhook_data))
+    # -----------------------------------------------------------------------
+
+    # ---------- Sent-to-lead detection (outbound messages only) ----------
+    # Mark the thread as a lead thread when we sent the email to a lead,
+    # even if the lead hasn't replied yet — so the unibox shows it.
+    if created and "SENT" in [lbl.upper() for lbl in labels]:
+        to_email_addr = _extract_email_only(
+            _header_value(headers_json, "To")
+        )
+        if to_email_addr:
+            to_lead_res = await db.execute(
+                select(Lead).where(Lead.email == to_email_addr)
+            )
+            to_lead = to_lead_res.scalar_one_or_none()
+            if to_lead is not None:
+                sent_thread_res = await db.execute(
+                    select(GmailThread).where(
+                        GmailThread.inbox_id == inbox_id,
+                        GmailThread.thread_id == thread_id,
+                    )
+                )
+                sent_thread_obj = sent_thread_res.scalar_one_or_none()
+                if sent_thread_obj is not None and not sent_thread_obj.is_lead_thread:
+                    sent_thread_obj.is_lead_thread = True
+                    await db.flush()
+    # -----------------------------------------------------------------------
 
     await db.flush()
     return row, created
@@ -731,6 +889,7 @@ async def list_unibox_conversations(
     *,
     page: int,
     page_size: int,
+    leads_only: bool = False,
 ) -> dict[str, Any]:
     offset = (page - 1) * page_size
 
@@ -751,7 +910,13 @@ async def list_unibox_conversations(
         .subquery()
     )
 
+    base_where = []
+    if leads_only:
+        base_where.append(GmailThread.is_lead_thread.is_(True))
+
     count_stmt = select(func.count()).select_from(GmailThread)
+    if base_where:
+        count_stmt = count_stmt.where(*base_where)
     total = (await db.execute(count_stmt)).scalar_one() or 0
 
     stmt = (
@@ -760,6 +925,8 @@ async def list_unibox_conversations(
             GmailThread.thread_id,
             GmailThread.last_internal_date,
             GmailThread.snippet.label("thread_snippet"),
+            GmailThread.is_lead_thread,
+            GmailThread.unread_lead_reply,
             Inbox.email.label("account_email"),
             latest_message_sq.c.snippet.label("last_snippet"),
             latest_message_sq.c.headers_json.label("last_headers_json"),
@@ -773,10 +940,16 @@ async def list_unibox_conversations(
                 latest_message_sq.c.rn == 1,
             ),
         )
-        .order_by(desc(GmailThread.last_internal_date), desc(GmailThread.updated_at))
-        .offset(offset)
-        .limit(page_size)
     )
+    if base_where:
+        stmt = stmt.where(*base_where)
+
+    # Unread lead replies are pinned to the top, then sorted by date descending.
+    stmt = stmt.order_by(
+        desc(GmailThread.unread_lead_reply),
+        desc(GmailThread.last_internal_date),
+        desc(GmailThread.updated_at),
+    ).offset(offset).limit(page_size)
 
     rows = (await db.execute(stmt)).all()
     items: list[dict[str, Any]] = []
@@ -792,6 +965,8 @@ async def list_unibox_conversations(
                 "subject": subject,
                 "last_message_snippet": last_snippet,
                 "timestamp": timestamp,
+                "is_lead_thread": bool(row.is_lead_thread),
+                "unread_lead_reply": bool(row.unread_lead_reply),
             }
         )
 
@@ -801,6 +976,51 @@ async def list_unibox_conversations(
         "page_size": page_size,
         "total": int(total),
     }
+
+
+async def get_notification_count(db: AsyncSession) -> int:
+    """Return the number of threads with an unread lead reply."""
+    stmt = select(func.count()).select_from(GmailThread).where(
+        GmailThread.unread_lead_reply.is_(True)
+    )
+    result = await db.execute(stmt)
+    return int(result.scalar_one() or 0)
+
+
+async def mark_thread_read(
+    db: AsyncSession,
+    *,
+    thread_id: str,
+    inbox_id: int,
+) -> bool:
+    """Clear the unread_lead_reply flag on a thread.
+
+    Returns True if the thread was found and updated, False otherwise.
+    """
+    res = await db.execute(
+        select(GmailThread).where(
+            GmailThread.inbox_id == inbox_id,
+            GmailThread.thread_id == thread_id,
+        )
+    )
+    thread = res.scalar_one_or_none()
+    if thread is None:
+        return False
+    if thread.unread_lead_reply:
+        thread.unread_lead_reply = False
+        await db.flush()
+        # Broadcast updated notification count via SSE.
+        new_count = await get_notification_count(db)
+        asyncio.create_task(
+            unibox_events.publish(
+                {
+                    "type": "unibox.notification.count",
+                    "count": new_count,
+                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+        )
+    return True
 
 
 async def get_thread_messages(

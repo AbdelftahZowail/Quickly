@@ -57,10 +57,51 @@ async def test_test_mode_settings_api(engine):
 
         result = await db.execute(
             select(AppSetting).where(
-                AppSetting.key.in_(["google_client_id", "google_client_secret"])
+                AppSetting.key.in_(
+                    ["google_client_id", "google_client_secret"]
+                )
             )
         )
         assert result.scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_add_opens_setting_endpoint(session):
+    """Verify the ``POST /api/settings/add-opens`` helper adds events.
+
+    Create a minimal email log then invoke the new endpoint via HTTP;
+    afterwards the database should contain an ``EmailOpen`` and the log’s
+    ``opened`` flag should be true.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from sqlalchemy import select
+    from app.models import EmailLog, EmailOpen
+    from tests.conftest import make_campaign, make_lead, make_email_log
+
+    # create related objects and a single log row
+    campaign = await make_campaign(session)
+    lead = await make_lead(session)
+    log = await make_email_log(session, lead.id, campaign.id)
+    await session.commit()
+
+    with TestClient(app) as client:
+        resp = client.post("/api/settings/add-opens")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["added"] == 1
+        assert data["total"] == 1
+
+    # inspect database to confirm open event was written and flag toggled
+    result = await session.execute(select(EmailOpen))
+    opens = result.scalars().all()
+    assert len(opens) == 1
+    assert opens[0].email_log_id == log.id
+
+    # refresh the log row
+    result = await session.execute(select(EmailLog).where(EmailLog.id == log.id))
+    refreshed = result.scalar_one()
+    assert refreshed.opened is True
 
 
 @pytest.mark.asyncio

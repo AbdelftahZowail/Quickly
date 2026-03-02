@@ -180,6 +180,7 @@ client‑side preference.
 
 - `GET /api/settings/scheduling-strategy` – retrieve current strategy
 - `POST /api/settings/scheduling-strategy` – update strategy (body `{scheduling_strategy}`)
+- `POST /api/settings/add-opens` – **debug**: attach a synthetic open event to every sent email log
 
 ### Gmail OAuth
 - `GET /api/gmail/status` - Gmail OAuth configuration status
