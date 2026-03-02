@@ -46,7 +46,7 @@ table tr:nth-child(even){ @apply bg-gray-50; }
 tr.dragging { opacity: 0.35; }
 tr.drag-over td { border-top: 2px solid rgba(34, 211, 238, 0.8); }
 
-/* scheduler styles copied from legacy CSS */
+/* schedule styles copied from legacy CSS */
 .stats-row { @apply flex flex-wrap gap-6 mb-4; }
 .stat-card { @apply bg-white border border-gray-300 rounded p-3 min-w-[140px]; }
 .stat-card .num { @apply text-xl font-bold text-teal-400; }
@@ -71,7 +71,7 @@ tr.drag-over td { border-top: 2px solid rgba(34, 211, 238, 0.8); }
 .badge-status { @apply inline-block px-2 py-0.5 rounded text-xs font-semibold uppercase tracking-wide; }
 .badge-status.sent { @apply bg-green-100 text-green-600; }
 
-/* lead status badges in scheduler rows */
+/* lead status badges in schedule rows */
 .badge.active { @apply bg-green-100 text-green-600; }
 .badge.unsubscribed { @apply bg-gray-200 text-gray-500; }
 .badge.bounced { @apply bg-red-100 text-red-600; }

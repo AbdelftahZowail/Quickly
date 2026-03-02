@@ -4,7 +4,7 @@ import Campaigns from './pages/Campaigns';
 import AddCampaign from './pages/AddCampaign';
 import CampaignDetail from './pages/CampaignDetail';
 import Inboxes from './pages/Inboxes';
-import Scheduler from './pages/Scheduler';
+import Schedule from './pages/Schedule';
 import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Unibox from './pages/Unibox';
@@ -20,7 +20,7 @@ export default function App() {
         <Route path="/campaigns/:id" element={<CampaignDetail />} />
         <Route path="/inboxes" element={<Inboxes />} />
         <Route path="/unibox" element={<Unibox />} />
-        <Route path="/scheduler" element={<Scheduler />} />
+        <Route path="/schedule" element={<Schedule />} />
         <Route path="/analytics" element={<Analytics />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="*" element={<Navigate to="/" />} />

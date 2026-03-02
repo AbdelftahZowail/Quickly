@@ -12,7 +12,7 @@ function escapeHtml(s){
   return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-export default function Scheduler() {
+export default function Schedule() {
   const loading = useLoading();
   const notify = useNotify();
 
@@ -40,9 +40,9 @@ export default function Scheduler() {
     // loading.start();
     try {
       const [s, sch, st, srv, stratData] = await Promise.all([
-        api.get('/scheduler/sent').catch(() => []),
-        api.get('/scheduler/scheduled').catch(() => []),
-        api.get('/scheduler/stats').catch(() => ({})),
+        api.get('/schedule/sent').catch(() => []),
+        api.get('/schedule/scheduled').catch(() => []),
+        api.get('/schedule/stats').catch(() => ({})),
         api.get('/status').catch(() => ({})),
         api.get('/settings/scheduling-strategy').catch(() => ({})),
       ]);
@@ -57,7 +57,7 @@ export default function Scheduler() {
       });
       filterCampaignOptions.current = [...camps.entries()].sort((a,b) => a[1].localeCompare(b[1]));
     } catch (e) {
-      notify({ type: 'error', message: 'Failed to load scheduler data' });
+      notify({ type: 'error', message: 'Failed to load schedule data' });
     } finally {
       // loading.stop();
     }
@@ -109,7 +109,7 @@ export default function Scheduler() {
     if (!ok) return;
     setRecalcState({ busy: true, text: '⚡ Recalculating...' });
     try {
-      const res = await fetch('/api/scheduler/recalculate-all',{method:'POST'});
+      const res = await fetch('/api/schedule/recalculate-all',{method:'POST'});
       if (res.ok) {
         const data = await res.json();
         const stratLabel = strategy==='priority'?'Priority':'Round-Robin';
@@ -135,7 +135,7 @@ export default function Scheduler() {
     if (!ok) return;
     setValidateState({ busy: true, text: '🔍 Validating...' });
     try {
-      const res = await fetch('/api/scheduler/validate-queue',{method:'POST'});
+      const res = await fetch('/api/schedule/validate-queue',{method:'POST'});
       if (res.ok) {
         const data = await res.json();
         const issues = data.issues||[];
@@ -290,14 +290,14 @@ export default function Scheduler() {
 
   return (
     <div className="p-8">
-      <h1 className="text-2xl font-bold">Scheduler</h1>
+      <h1 className="text-2xl font-bold">Schedule</h1>
       <Card className="flex flex-wrap justify-between items-center mb-4 p-2">
         <div className="flex flex-wrap gap-4 items-center">
           <div>
             <span className="text-sm text-gray-500">Test Mode:</span> <span className={serverStatus.test_mode?'text-red-600':'text-green-600'}>{serverStatus.test_mode?'ON':'OFF'}</span>
           </div>
           <div>
-            <span className="text-sm text-gray-500">Scheduler:</span> <span className={serverStatus.scheduler_running?'text-green-600':'text-red-600'}>{serverStatus.scheduler_running?'Running':'Stopped'}</span>
+            <span className="text-sm text-gray-500">Schedule:</span> <span className={serverStatus.schedule_running?'text-green-600':'text-red-600'}>{serverStatus.schedule_running?'Running':'Stopped'}</span>
           </div>
           <div>
             <span className="text-sm text-gray-500">Last Job:</span> <span className="font-semibold">{renderLastRun(serverStatus.last_send_job_run)}</span>
@@ -350,7 +350,7 @@ export default function Scheduler() {
           {recalcState.text}
         </Button>
       </div>
-      <Card className="p-4" id="scheduler-body">
+      <Card className="p-4" id="schedule-body">
         {renderSection()}
       </Card>
     </div>

@@ -464,3 +464,72 @@ async def test_get_unibox_thread_hydrates_on_demand_when_body_missing(session, m
     assert msg.body_fetched is True
     assert msg.body_plain == "Hydrated body content"
 
+
+@pytest.mark.asyncio
+async def test_hydrate_thread_not_found_skips(session, monkeypatch):
+    # ensure that a 404 from _gmail_get_thread does not raise at the HTTP level
+    inbox = Inbox(email="missingthread@example.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+
+    session.add(
+        GmailAccount(
+            inbox_id=inbox.id,
+            google_email="missingthread@example.com",
+            access_token="token",
+            refresh_token="refresh",
+        )
+    )
+
+    msg_time = _ms(datetime(2026, 2, 3, 9, 0, 0))
+    session.add(
+        GmailThread(
+            inbox_id=inbox.id,
+            thread_id="thr-missing",
+            snippet="preview",
+            last_internal_date=msg_time,
+        )
+    )
+    session.add(
+        GmailMessage(
+            inbox_id=inbox.id,
+            message_id="m-missing",
+            thread_id="thr-missing",
+            internal_date=msg_time,
+            snippet="preview",
+            headers_json=json.dumps(
+                [
+                    {"name": "Subject", "value": "Need body"},
+                    {"name": "From", "value": "sender@example.com"},
+                    {"name": "To", "value": "missingthread@example.com"},
+                ]
+            ),
+            label_ids_json=json.dumps(["INBOX"]),
+            body_fetched=False,
+            body_plain="",
+            body_html="",
+        )
+    )
+    await session.flush()
+
+    # import inside the test so the module name is defined
+    import app.unibox
+
+    def fake_get_thread(access_token: str, thread_id: str, *, payload_format: str = "full"):
+        raise app.unibox.GmailAPIError(404, "thread not found")
+
+    monkeypatch.setattr("app.unibox._gmail_get_thread", fake_get_thread)
+
+    # the router should still return an empty body rather than raising
+    payload = await unibox_router.get_unibox_thread("thr-missing", inbox_id=inbox.id, db=session)
+    assert payload["messages"][0]["body_plain"] == ""
+
+    msg_row = await session.execute(
+        select(GmailMessage).where(
+            GmailMessage.inbox_id == inbox.id,
+            GmailMessage.message_id == "m-missing",
+        )
+    )
+    msg = msg_row.scalar_one()
+    assert msg.body_fetched is False
+

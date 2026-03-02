@@ -952,12 +952,22 @@ async def _hydrate_thread_from_gmail(
     thread_id: str,
     access_token: str,
 ) -> bool:
-    payload = await asyncio.to_thread(
-        _gmail_get_thread,
-        access_token,
-        thread_id,
-        payload_format="full",
-    )
+    try:
+        payload = await asyncio.to_thread(
+            _gmail_get_thread,
+            access_token,
+            thread_id,
+            payload_format="full",
+        )
+    except GmailAPIError as exc:
+        if exc.status_code == 404:
+            log.debug(
+                "hydrate thread skipped missing thread %s for inbox_id=%s",
+                thread_id,
+                inbox_id,
+            )
+            return False
+        raise
 
     raw_messages = payload.get("messages", []) or []
     hydrated_any = False
@@ -1173,12 +1183,26 @@ async def _sync_inbox(
             total_messages = len(message_ids)
             oldest_synced_ms: int | None = None
             for idx, msg_id in enumerate(message_ids, start=1):
-                payload = await asyncio.to_thread(
-                    _gmail_get_message,
-                    access_token,
-                    msg_id,
-                    payload_format="metadata",
-                )
+                try:
+                    payload = await asyncio.to_thread(
+                        _gmail_get_message,
+                        access_token,
+                        msg_id,
+                        payload_format="metadata",
+                    )
+                except GmailAPIError as exc:
+                    # If the message vanished between listing and fetch, ignore it rather
+                    # than aborting the whole sync. 404s are relatively common when users
+                    # delete or move messages concurrently.
+                    if exc.status_code == 404:
+                        log.debug(
+                            "initial sync skipped missing message %s for inbox_id=%s",
+                            msg_id,
+                            inbox.id,
+                        )
+                        continue
+                    raise
+
                 row, _created = await _upsert_message_from_gmail(
                     db,
                     inbox_id=inbox.id,
@@ -1213,7 +1237,18 @@ async def _sync_inbox(
             hydrate_after_commit_thread_ids = set(full_sync_thread_ids)
     elif delta is not None:
         for msg_id in delta.added_ids:
-            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+            try:
+                payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+            except GmailAPIError as exc:
+                if exc.status_code == 404:
+                    log.debug(
+                        "delta sync skipped missing message %s for inbox_id=%s",
+                        msg_id,
+                        inbox.id,
+                    )
+                    continue
+                raise
+
             row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
             touched_threads.add((inbox.id, row.thread_id))
             if row.internal_date is not None:
@@ -1323,7 +1358,18 @@ async def _backfill_older_window(
     oldest_synced_ms: int | None = None
     total_messages = len(message_ids)
     for idx, msg_id in enumerate(message_ids, start=1):
-        payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        try:
+            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        except GmailAPIError as exc:
+            if exc.status_code == 404:
+                log.debug(
+                    "backfill skipped missing message %s for inbox_id=%s",
+                    msg_id,
+                    inbox.id,
+                )
+                continue
+            raise
+
         row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox.id, gmail_message=payload)
         touched_threads.add((inbox.id, row.thread_id))
         if row.internal_date is not None:
@@ -1395,7 +1441,18 @@ async def _recover_recent_missing_messages(
 
     touched_threads: set[tuple[int, str]] = set()
     for msg_id in missing_ids:
-        payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        try:
+            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+        except GmailAPIError as exc:
+            if exc.status_code == 404:
+                log.debug(
+                    "recent recovery skipped missing message %s for inbox_id=%s",
+                    msg_id,
+                    inbox_id,
+                )
+                continue
+            raise
+
         row, _created = await _upsert_message_from_gmail(db, inbox_id=inbox_id, gmail_message=payload)
         touched_threads.add((inbox_id, row.thread_id))
 

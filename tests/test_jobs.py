@@ -16,6 +16,7 @@ from sqlalchemy import select, func
 from app.jobs import run_send_job
 from app.sender import SendResult
 from app.models import Inbox, EmailLog, GmailAccount
+from app.unibox import GmailAPIError
 from tests.conftest import (
     make_inbox,
     make_campaign,
@@ -175,3 +176,40 @@ async def test_unibox_sync_failure_triggers_webhook(session, monkeypatch):
     success = await sync_single_inbox(inbox.id)
     assert not success
     assert any(ev[0] == "token_expired" for ev in events)
+
+
+@pytest.mark.asyncio
+async def test_unibox_sync_skips_not_found_messages(session, monkeypatch):
+    """A 404 from Gmail during message fetch should be ignored and not abort sync."""
+    inbox = await make_inbox(session, provider="gmail")
+    ga = GmailAccount(
+        inbox_id=inbox.id,
+        google_email=inbox.email,
+        access_token="token",
+        refresh_token="refresh",
+    )
+    session.add(ga)
+    await session.flush()
+    await session.commit()
+
+    # simulate a normal profile/history response so that the sync enters full-sync path
+    monkeypatch.setattr("app.unibox._gmail_get_profile", lambda token: {"historyId": "h1"})
+    monkeypatch.setattr(
+        "app.unibox._gmail_list_message_ids_in_window",
+        lambda access_token, *, start_dt, end_dt, max_messages=None: ["msg-1"],
+    )
+
+    def fake_get_message(access_token: str, message_id: str, *, payload_format: str = "full"):
+        raise GmailAPIError(404, "not found")
+
+    monkeypatch.setattr("app.unibox._gmail_get_message", fake_get_message)
+
+    from app.unibox import sync_single_inbox
+    success = await sync_single_inbox(inbox.id, reason="manual")
+    assert success, "sync should return True even when a message is missing"
+
+    # no messages should have been inserted
+    from sqlalchemy import select, func
+    from app.models import GmailMessage
+    res = await session.execute(select(func.count()).select_from(GmailMessage).where(GmailMessage.inbox_id == inbox.id))
+    assert res.scalar() == 0

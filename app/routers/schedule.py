@@ -1,4 +1,4 @@
-"""Global scheduler API — all sent + scheduled emails across all campaigns."""
+"""Global schedule API — all sent + scheduled emails across all campaigns."""
 import logging
 from fastapi import APIRouter, Depends
 from sqlalchemy import select, func, delete
@@ -15,9 +15,9 @@ from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, r
 from app.app_settings import get_scheduling_strategy
 from smoke_test.validate_scheduled_emails import EmailScheduleValidator
 
-log = logging.getLogger("quickly.scheduler")
+log = logging.getLogger("quickly.schedule")
 
-router = APIRouter(prefix="/api/scheduler", tags=["scheduler"])
+router = APIRouter(prefix="/api/schedule", tags=["schedule"])
 
 
 @router.get("/sent")
@@ -162,7 +162,7 @@ async def log_click(log_id: int, payload: dict, db: AsyncSession = Depends(get_d
 
 @router.get("/stats")
 async def global_stats(db: AsyncSession = Depends(get_db)):
-    """Quick summary for the scheduler header."""
+    """Quick summary for the schedule header."""
     sent_count = await db.execute(select(func.count(EmailLog.id)))
     scheduled_count = await db.execute(select(func.count(QueueSlot.id)))
     campaign_count = await db.execute(select(func.count(Campaign.id)))

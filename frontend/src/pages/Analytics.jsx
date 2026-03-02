@@ -21,7 +21,7 @@ export default function Analytics() {
   const [currentChoice, setCurrentChoice] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
   const [error, setError] = useState(null);
-  // scheduler sent data and filters
+  // schedule sent data and filters
   const [allSent, setAllSent] = useState([]);
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -43,7 +43,7 @@ export default function Analytics() {
       try {
         const [camps, sent, offsetData] = await Promise.all([
           api.get('/campaigns'),
-          api.get('/scheduler/sent').catch(() => []),
+          api.get('/schedule/sent').catch(() => []),
           api.get('/settings/time-offset').catch(() => ({ time_offset_days: 0 })),
         ]);
         setCampaigns(camps);
