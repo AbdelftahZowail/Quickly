@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 import asyncio
 
 # Configure logging so our debug messages show up
@@ -83,11 +83,25 @@ async def lifespan(app: FastAPI):
                 "startup recalculation failed: %s", e
             )
 
-    # fire-and-forget; lifetime of task tied to event loop
-    asyncio.create_task(kickoff())
-    asyncio.create_task(queue_sync_for_all_inboxes(reason="startup"))
+    # Track startup tasks so we can cancel them cleanly on shutdown.
+    # Without this, rapid reloads leave open DB transactions which cause
+    # "unexpected EOF on client connection with an open transaction" errors.
+    startup_tasks = [
+        asyncio.create_task(kickoff()),
+        asyncio.create_task(queue_sync_for_all_inboxes(reason="startup")),
+    ]
 
     yield
+
+    # Cancel any still-running startup tasks before the event loop closes.
+    for task in startup_tasks:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
     schedule.shutdown()
 
 
@@ -117,37 +131,23 @@ app.include_router(schedule_router.router)
 app.include_router(settings_router.router)
 app.include_router(unibox_router.router)
 
-# Web UI
+# ---------------------------------------------------------------------------
+# Static assets and SPA fallback
+# ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# When running in production we serve the compiled frontend from the
-# `frontend/dist` directory so the entire application is available on a
-# single port.  API routes live under `/api` (and a few legacy prefixes like
-# `/oauth`), so there is no chance of conflicting with client–side paths.
-#
-# The static mount handles asset files directly and html=True allows the
-# index.html file to be returned for the root path.  A catch‑all route below
-# ensures that any unmatched request (e.g. /unibox, /campaigns/123) returns
-# the SPA entrypoint rather than a 404.
-
-# serve only the compiled asset files.  We avoid mounting the entire
-# build at "/" because that would capture *all* requests (including
-# /api/*) and prevent our API routes from ever running.  The SPA entrypoint is
-# handled below by explicit path operations.
+# Serve compiled frontend assets.  Mounted at /assets so API routes are never
+# shadowed.  The SPA entrypoint and catch-all are handled by explicit routes
+# below so that /api/* is always matched by the routers first.
 app.mount(
     "/assets",
     StaticFiles(directory=str(BASE_DIR / "frontend" / "dist" / "assets")),
     name="assets",
 )
 
-# legacy static directory is no longer needed once the React UI covers all
-# pages but we keep it around for now; it won't conflict because it's mounted
-# at /static.
 if (BASE_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
-# the status endpoint should be defined before the SPA fallback so it isn't
-# swallowed by the catch‑all route (route order matters).
 @app.get("/api/status")
 async def api_status(request: Request):
     """Schedule and send-job status so you can verify the worker is running."""
@@ -163,20 +163,20 @@ async def api_status(request: Request):
         "test_mode": settings.test_mode,
     }
 
-# root and catch‑all for SPA.  Only run when the path does *not* match a known
-# API or asset prefix.  Since this route is added after all routers, any
-# /api/ request will be handled by the API router first; we still defensively
-# check the prefix to avoid accidentally serving index.html for APIs.
 
 @app.get("/", response_class=FileResponse)
 async def index():
     return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
 
+
 @app.get("/{full_path:path}", response_class=FileResponse)
 async def spa(request: Request, full_path: str):
-    # If the path looks like an API or asset request, raise 404 so that the
-    # normal routing machinery handles it (routes have already been examined
-    # in order, but this is an extra guard).
-    if request.url.path.startswith("/api") or request.url.path.startswith("/assets") or request.url.path.startswith("/oauth"):
+    # Guard: let the normal routing machinery handle API / asset requests.
+    if (
+        request.url.path.startswith("/api")
+        or request.url.path.startswith("/assets")
+        or request.url.path.startswith("/oauth")
+    ):
         raise HTTPException(status_code=404)
     return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
+

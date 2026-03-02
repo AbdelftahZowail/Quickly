@@ -19,16 +19,32 @@ services:
   app:
     image: azowail/quickly:latest
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"  # internal only; Caddy proxies to this
     depends_on:
       db:
         condition: service_healthy
     env_file: .env
     environment:
-      # override DATABASE_URL so users running compose don’t have to edit
+      # override DATABASE_URL so users running compose don't have to edit
       # .env; it will point at the db container automatically.
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
 
+  caddy:
+    image: caddy:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    env_file: .env
+    depends_on:
+      - app
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:
