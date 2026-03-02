@@ -251,6 +251,9 @@ class GmailThread(Base):
     history_id = Column(String(64), nullable=False, default="")
     snippet = Column(Text, default="")
     last_internal_date = Column(BigInteger, nullable=True)
+    # Lead notification tracking
+    is_lead_thread = Column(Boolean, default=False, nullable=False)
+    unread_lead_reply = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 

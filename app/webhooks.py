@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.app_settings import (
     EMAIL_EVENTS_WEBHOOK_URL_KEY,
     EMAIL_EVENTS_WEBHOOK_TOKEN_KEY,
+    LEAD_REPLY_WEBHOOK_URL_KEY,
+    LEAD_REPLY_WEBHOOK_TOKEN_KEY,
     get_setting,
 )
 
@@ -56,3 +58,34 @@ async def maybe_fire_email_event(
             await client.post(url, json=payload, headers=headers)
     except Exception as exc:
         log.warning("email event webhook POST failed %s: %s", url, exc)
+
+
+async def fire_lead_reply_webhook(
+    db: AsyncSession, data: dict[str, Any]
+) -> None:
+    """Fire the dedicated lead-reply webhook, if configured.
+
+    Falls back to the general email-events webhook when no dedicated URL is
+    set so integrations that only configure one URL still receive the event.
+    """
+    # Try dedicated lead-reply webhook first.
+    url = await get_setting(db, LEAD_REPLY_WEBHOOK_URL_KEY)
+    token: str | None = None
+    if url:
+        token = await get_setting(db, LEAD_REPLY_WEBHOOK_TOKEN_KEY)
+    else:
+        # Fall back to the general email-events webhook.
+        url = await get_setting(db, EMAIL_EVENTS_WEBHOOK_URL_KEY)
+        if url:
+            token = await get_setting(db, EMAIL_EVENTS_WEBHOOK_TOKEN_KEY)
+
+    if not url:
+        return
+
+    headers = _build_headers(token)
+    payload = {"event": "lead.reply", "data": data}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(url, json=payload, headers=headers)
+    except Exception as exc:
+        log.warning("lead reply webhook POST failed %s: %s", url, exc)

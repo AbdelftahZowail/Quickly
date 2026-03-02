@@ -18,13 +18,20 @@ export default function Settings() {
   const [webhookUrlConfigured, setWebhookUrlConfigured] = useState(false);
   const [webhookTokenConfigured, setWebhookTokenConfigured] = useState(false);
 
+  // Lead-reply webhook
+  const [leadWebhookUrl, setLeadWebhookUrl] = useState('');
+  const [leadWebhookToken, setLeadWebhookToken] = useState('');
+  const [leadWebhookUrlConfigured, setLeadWebhookUrlConfigured] = useState(false);
+  const [leadWebhookTokenConfigured, setLeadWebhookTokenConfigured] = useState(false);
+
 
   const loadStrategy = async () => {
     try {
-      const [data, tm, webhook] = await Promise.all([
+      const [data, tm, webhook, leadWebhook] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/email-webhook'),
+        api.get('/settings/lead-reply-webhook'),
       ]);
       setStrategy(data.scheduling_strategy || 'priority');
       setTestMode(tm.test_mode || false);
@@ -33,6 +40,12 @@ export default function Settings() {
         setWebhookToken(webhook.webhook_token || '');
         setWebhookUrlConfigured(!!webhook.webhook_url);
         setWebhookTokenConfigured(!!webhook.webhook_token);
+      }
+      if (leadWebhook) {
+        setLeadWebhookUrl(leadWebhook.webhook_url || '');
+        setLeadWebhookToken(leadWebhook.webhook_token || '');
+        setLeadWebhookUrlConfigured(!!leadWebhook.webhook_url);
+        setLeadWebhookTokenConfigured(!!leadWebhook.webhook_token);
       }
     } catch {};
   };
@@ -99,6 +112,45 @@ export default function Settings() {
     try {
       await api.post('/settings/email-webhook/test');
       notify({ type: 'success', message: 'Test event sent (check your endpoint)' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
+  const submitLeadWebhookConfig = async () => {
+    try {
+      const resp = await api.post('/settings/lead-reply-webhook', {
+        webhook_url: leadWebhookUrl,
+        webhook_token: leadWebhookToken,
+      });
+      setLeadWebhookUrl(resp.webhook_url || '');
+      setLeadWebhookToken(resp.webhook_token || '');
+      setLeadWebhookUrlConfigured(resp.webhook_url_configured || false);
+      setLeadWebhookTokenConfigured(resp.webhook_token_configured || false);
+      notify({ type: 'success', message: 'Lead-reply webhook saved' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
+  const testLeadWebhook = async () => {
+    try {
+      await api.post('/settings/lead-reply-webhook/test');
+      notify({ type: 'success', message: 'Test lead-reply event sent' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
+  const addOpensToAll = async () => {
+    try {
+      const resp = await api.post('/settings/add-opens');
+      notify({
+        type: 'success',
+        message: `Added open events to ${resp.added} email${
+          resp.added === 1 ? '' : 's'
+        }`,
+      });
     } catch (e) {
       notify({ type: 'error', message: e.message });
     }
@@ -184,6 +236,56 @@ export default function Settings() {
         </div>
       </Card>
 
+      {/* lead-reply webhook */}
+      <Card className="mt-6">
+        <h2 className="text-lg font-semibold mb-2">Lead Reply Webhook</h2>
+        <p className="text-xs text-gray-500 mb-2">
+          Receive a <code>POST</code> request whenever a lead replies to one of
+          your campaign emails. When no URL is set here the general Email Events
+          webhook (above) is used as a fallback.
+        </p>
+        <div className="space-y-3">
+          <div>
+            <label className="block text-sm font-medium">Webhook URL</label>
+            <input
+              type="text"
+              className="mt-1 block w-full border rounded p-1"
+              value={leadWebhookUrl}
+              onChange={e => setLeadWebhookUrl(e.target.value)}
+              placeholder="https://your-endpoint.example.com/lead-reply"
+            />
+            {leadWebhookUrlConfigured && (
+              <span className="text-xs text-green-600">configured</span>
+            )}
+          </div>
+          <div>
+            <label className="block text-sm font-medium">Bearer Token</label>
+            <input
+              type="text"
+              className="mt-1 block w-full border rounded p-1"
+              value={leadWebhookToken}
+              onChange={e => setLeadWebhookToken(e.target.value)}
+            />
+            {leadWebhookTokenConfigured && (
+              <span className="text-xs text-green-600">configured</span>
+            )}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" onClick={submitLeadWebhookConfig}>
+              Save
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={testLeadWebhook}
+              disabled={!leadWebhookUrlConfigured}
+            >
+              Test Webhook
+            </Button>
+          </div>
+        </div>
+      </Card>
+
       {/* scheduling strategy */}
       <Card className="mt-6">
         <h2 className="text-lg font-semibold mb-2">Scheduling Strategy</h2>
@@ -208,6 +310,18 @@ export default function Settings() {
             </span>
           </label>
         </div>
+      </Card>
+
+      {/* utility / debug actions */}
+      <Card className="mt-6">
+        <h2 className="text-lg font-semibold mb-2">Utilities</h2>
+        <p className="text-xs text-gray-500 mb-2">
+          Developer/test helper functions.  These are safe to run at any time
+          but are mostly useful for seeding state when experimenting.
+        </p>
+        <Button size="sm" onClick={addOpensToAll} className="mt-2">
+          Add open event to all sent emails
+        </Button>
       </Card>
     </div>
   );

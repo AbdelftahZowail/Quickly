@@ -25,6 +25,10 @@ GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY = "gmail_reply_sync_interval_minutes"
 EMAIL_EVENTS_WEBHOOK_URL_KEY = "email_events_webhook_url"
 EMAIL_EVENTS_WEBHOOK_TOKEN_KEY = "email_events_webhook_token"
 
+# dedicated webhook fired when a lead replies
+LEAD_REPLY_WEBHOOK_URL_KEY = "lead_reply_webhook_url"
+LEAD_REPLY_WEBHOOK_TOKEN_KEY = "lead_reply_webhook_token"
+
 
 # Generic helpers --------------------------------------------------------------
 
@@ -107,6 +111,29 @@ async def save_email_event_webhook_config(
     """Persist outbound webhook configuration for email events."""
     await put_setting(db, EMAIL_EVENTS_WEBHOOK_URL_KEY, webhook_url.strip())
     await put_setting(db, EMAIL_EVENTS_WEBHOOK_TOKEN_KEY, webhook_token.strip())
+    await db.flush()
+
+
+# Lead reply webhook helpers --------------------------------------------------
+
+async def get_lead_reply_webhook_config(db: AsyncSession) -> dict:
+    """Return configuration for the dedicated lead-reply webhook."""
+    url = await get_setting(db, LEAD_REPLY_WEBHOOK_URL_KEY) or ""
+    token = await get_setting(db, LEAD_REPLY_WEBHOOK_TOKEN_KEY) or ""
+    return {
+        "webhook_url": url,
+        "webhook_url_configured": bool(url),
+        "webhook_token": token,
+        "webhook_token_configured": bool(token),
+    }
+
+
+async def save_lead_reply_webhook_config(
+    db: AsyncSession, webhook_url: str, webhook_token: str
+) -> None:
+    """Persist the dedicated lead-reply webhook configuration."""
+    await put_setting(db, LEAD_REPLY_WEBHOOK_URL_KEY, webhook_url.strip())
+    await put_setting(db, LEAD_REPLY_WEBHOOK_TOKEN_KEY, webhook_token.strip())
     await db.flush()
 
 

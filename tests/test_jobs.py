@@ -105,6 +105,42 @@ async def test_rate_limit_triggers_webhook_and_skips_send(session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_allows_small_slack(session, monkeypatch):
+    """A send less than one second inside the wait period should still go
+    through thanks to the small wiggle-room we grant."""
+    inbox = await make_inbox(session, wait_minutes_between=5)
+    campaign = await make_campaign(session)
+    seq = await make_sequence(session, campaign.id)
+    lead = await make_lead(session)
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+
+    now = datetime.utcnow()
+    # last_sent occurs 4m59.5s ago (0.5s inside the 5-minute window)
+    last_sent = now - timedelta(minutes=5) + timedelta(seconds=0.5)
+    await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=last_sent)
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(seconds=1))
+    await session.flush()
+
+    events = []
+    async def fake_webhook(db, event, data):
+        events.append((event, data))
+
+    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+
+    await run_send_job()
+
+    # a second log should have been added
+    res = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    assert res.scalar() == 2
+    assert not any(ev[0] == "rate_limit" for ev in events)
+    from app.models import QueueSlot
+    res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    assert res2.scalar() == 0
+
+
+@pytest.mark.asyncio
 async def test_gmail_token_refresh_failure_fires_webhook(session, monkeypatch):
     inbox = await make_inbox(session, provider="gmail")
     campaign = await make_campaign(session)

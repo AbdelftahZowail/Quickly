@@ -155,7 +155,9 @@ async def run_send_job():
                 # HARD LIMIT: rate/minutes between messages
                 if last_sent_time is not None:
                     delta = now - last_sent_time
-                    if delta < timedelta(minutes=inbox.wait_minutes_between):
+                    required = timedelta(minutes=inbox.wait_minutes_between)
+                    # allow up to 20 second of slack before firing rate_limit
+                    if delta + timedelta(seconds=20) < required:
                         await maybe_fire_email_event(
                             session,
                             "rate_limit",
@@ -228,6 +230,10 @@ async def run_send_job():
                         subject = "(no subject)"
                 else:
                     subject = sequence.subject.strip()
+
+                # Apply lead-data variable substitution to the subject line
+                # (same {{firstName}} / {{company}} etc. tokens as the body).
+                subject = render_body(subject, get_lead_data(lead))
 
                 body = render_body(sequence.body, get_lead_data(lead))
                 from_addr = inbox.email
