@@ -11,6 +11,14 @@ import os
 # Postgres only.
 db_url = os.getenv("TEST_DATABASE_URL", settings.database_url)
 
+# Railway (and some other platforms) provide DATABASE_URL as plain
+# "postgresql://" or "postgres://".  SQLAlchemy's async engine requires the
+# asyncpg dialect, so rewrite the scheme when it is missing.
+if db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+elif db_url.startswith("postgresql://"):
+    db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+
 # If the database URL refers to SQLite we need the StaticPool/"
 # check_same_thread" combination so that an in-memory database survives
 # across multiple connections.  This is primarily for the test suite when
