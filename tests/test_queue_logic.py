@@ -308,7 +308,7 @@ class TestNextAvailableSendTimeToday:
         assert result is None
 
     async def test_different_day_ignores_now(self, session):
-        """If 'now' is on a different scheduler day, treat now_min as 0."""
+        """If 'now' is on a different schedule day, treat now_min as 0."""
         inbox = await make_inbox(session)
         now = datetime(2026, 3, 1, 22, 0)  # day before
         result = await _next_available_send_time_today(
@@ -828,7 +828,7 @@ class TestMultipleLeadsMultipleCampaigns:
         assert result.scalar() == 10
 
         # Verify campaign A assignments: leads are locked to a single inbox each;
-        # the scheduler may prefer one inbox if it can accommodate entire sequences.
+        # the schedule may prefer one inbox if it can accommodate entire sequences.
         result = await session.execute(
             select(QueueSlot.inbox_id).where(
                 QueueSlot.campaign_lead_id.in_([cl.id for cl in cls_a])
@@ -847,7 +847,7 @@ class TestMultipleLeadsMultipleCampaigns:
         )
         inbox_ids_used_b = set(row[0] for row in result.all())
         assert inbox_2.id in inbox_ids_used_b
-        # selected inboxes must be a subset of the campaign's inbox list (scheduler may prefer one inbox)
+        # selected inboxes must be a subset of the campaign's inbox list (schedule may prefer one inbox)
         assert inbox_ids_used_b.issubset({inbox_2.id, inbox_3.id})
 
         # Verify wait_days: campaign A seq 1 should be >= 1 business day after seq 0
@@ -868,7 +868,7 @@ class TestMultipleLeadsMultipleCampaigns:
             slots = result.scalars().all()
             assert len(slots) == 2
             diff = (slots[1].scheduled_date.date() - slots[0].scheduled_date.date()).days
-            assert diff >= 2  # At least 2 scheduler days (could be more if weekend)
+            assert diff >= 2  # At least 2 schedule days (could be more if weekend)
 
     async def test_shared_inbox_respects_capacity_across_campaigns(self, session):
         """
@@ -1585,7 +1585,7 @@ class TestOrderCampaignLeadsPrioritizingPartials:
         # EmailLog exists for lead_sent (in campaign A)
         await make_email_log(session, lead_sent.id, campaign_a.id, sequence_index=0)
 
-        from app.routers.scheduler import order_campaign_leads_prioritizing_partials
+        from app.routers.schedule import order_campaign_leads_prioritizing_partials
 
         # Provide campaign_leads in an order where cl_b_sent appears after cl_b_new
         campaign_leads = [cl_a_sent, cl_b_new, cl_b_sent]

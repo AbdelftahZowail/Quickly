@@ -20,7 +20,7 @@ from app.database import init_db
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
-from app.routers import scheduler as scheduler_router
+from app.routers import schedule as schedule_router
 from app.routers import settings as settings_router
 from app.routers import unibox as unibox_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
@@ -30,7 +30,8 @@ from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    scheduler = AsyncIOScheduler()
+    # APScheduler renamed class; keep variable named `schedule` for legacy compatibility
+    schedule = AsyncIOScheduler()
     interval_minutes = max(1, settings.queue_check_interval_minutes)
     unibox_interval_minutes = 5
 
@@ -45,22 +46,22 @@ async def lifespan(app: FastAPI):
             logging.getLogger("quickly").exception("Failed loading unibox sync config; using default interval")
             unibox_interval_minutes = 5
 
-    scheduler.add_job(
+    schedule.add_job(
         run_send_job,
         "cron",
         minute=f"*/{interval_minutes}",
         second=0,
         id="send_queue",
     )
-    scheduler.add_job(
+    schedule.add_job(
         run_unibox_sync_job,
         "cron",
         minute=f"*/{unibox_interval_minutes}",
         second=10,
         id="unibox_sync",
     )
-    scheduler.start()
-    app.state.scheduler = scheduler
+    schedule.start()
+    app.state.schedule = schedule
 
     # perform a global recalculation on startup to ensure the queue reflects
     # any configuration changes that may have occurred while the server was down.
@@ -75,7 +76,7 @@ async def lifespan(app: FastAPI):
         try:
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.post("/api/scheduler/recalculate-all")
+                resp = await client.post("/api/schedule/recalculate-all")
                 resp.raise_for_status()
         except Exception as e:
             logging.getLogger("quickly.routes").error(
@@ -87,7 +88,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(queue_sync_for_all_inboxes(reason="startup"))
 
     yield
-    scheduler.shutdown()
+    schedule.shutdown()
 
 
 app = FastAPI(title="Quickly", lifespan=lifespan)
@@ -112,7 +113,7 @@ app.include_router(leads.router)
 app.include_router(campaigns.router)
 app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
-app.include_router(scheduler_router.router)
+app.include_router(schedule_router.router)
 app.include_router(settings_router.router)
 app.include_router(unibox_router.router)
 
@@ -149,12 +150,12 @@ if (BASE_DIR / "static").exists():
 # swallowed by the catch‑all route (route order matters).
 @app.get("/api/status")
 async def api_status(request: Request):
-    """Scheduler and send-job status so you can verify the worker is running."""
-    scheduler = getattr(request.app.state, "scheduler", None)
-    job = scheduler.get_job("send_queue") if (scheduler and scheduler.running) else None
+    """Schedule and send-job status so you can verify the worker is running."""
+    schedule = getattr(request.app.state, "schedule", None)
+    job = schedule.get_job("send_queue") if (schedule and schedule.running) else None
     next_run = job.next_run_time.isoformat() if (job and getattr(job, "next_run_time", None)) else None
     return {
-        "scheduler_running": scheduler is not None and scheduler.running,
+        "schedule_running": schedule is not None and schedule.running,
         "queue_check_interval_minutes": settings.queue_check_interval_minutes,
         "last_send_job_run": last_send_job_run.isoformat() if last_send_job_run else None,
         "last_send_job_sent_count": last_send_job_sent_count,

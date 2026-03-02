@@ -228,7 +228,7 @@ async def reorder_campaigns(data: CampaignReorder, db: AsyncSession = Depends(ge
         {cid: idx for idx, cid in enumerate(data.campaign_ids)},
     )
     # changing campaign order affects scheduling;
-    from app.routers.scheduler import recalculate_all_campaigns
+    from app.routers.schedule import recalculate_all_campaigns
     await recalculate_all_campaigns(db)
     return {"ok": True, "order": data.campaign_ids}
 
@@ -339,7 +339,7 @@ async def update_campaign(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            from app.routers.scheduler import recalculate_all_campaigns
+            from app.routers.schedule import recalculate_all_campaigns
             await recalculate_all_campaigns(db)
     
     schedule_changed = False
@@ -359,7 +359,7 @@ async def update_campaign(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            from app.routers.scheduler import recalculate_all_campaigns
+            from app.routers.schedule import recalculate_all_campaigns
             await recalculate_all_campaigns(db)
     
     if data.wait_minutes_between is not None:
@@ -375,7 +375,7 @@ async def update_campaign(
             # schedule (or are added back when resumed) and other campaigns can
             # move into the newly freed capacity.  Using the global routine is
             # simpler than trying to reason about individual leads.
-            from app.routers.scheduler import recalculate_all_campaigns
+            from app.routers.schedule import recalculate_all_campaigns
             log.info(
                 "Campaign %s paused state changed (%s -> %s); triggering full recalculation",
                 campaign_id,
@@ -388,7 +388,7 @@ async def update_campaign(
         campaign.priority = data.priority
         # Changing priority affects the order campaigns are scheduled, so
         # rebuild globally.
-        from app.routers.scheduler import recalculate_all_campaigns
+        from app.routers.schedule import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
     await db.flush()
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
@@ -479,7 +479,7 @@ async def create_sequence(
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
-        from app.routers.scheduler import recalculate_all_campaigns
+        from app.routers.schedule import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
     return seq
 
@@ -510,7 +510,7 @@ async def update_sequence(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            from app.routers.scheduler import recalculate_all_campaigns
+            from app.routers.schedule import recalculate_all_campaigns
             await recalculate_all_campaigns(db)
     await db.refresh(seq)
     return seq
@@ -546,7 +546,7 @@ async def delete_sequence(
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
-        from app.routers.scheduler import recalculate_all_campaigns
+        from app.routers.schedule import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
     return {"ok": True}
 
@@ -640,7 +640,7 @@ async def list_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{campaign_id}/sent")
 async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    """Return sent email history for this campaign (for the scheduler view)."""
+    """Return sent email history for this campaign (for the schedule view)."""
     result = await db.execute(
         select(EmailLog, Lead)
         .join(Lead, EmailLog.lead_id == Lead.id)
@@ -694,7 +694,7 @@ async def bulk_add_leads_to_campaign(
     """
     Add one or more leads to a campaign.
     For each entry: find existing lead by email (or create), then enroll if not already enrolled.
-    Queues slots for each newly enrolled lead using the bulk scheduler
+    Queues slots for each newly enrolled lead using the bulk schedule
     (accepts a single id as well; does NOT perform a full recalculate).    """
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     if not result.scalar_one_or_none():

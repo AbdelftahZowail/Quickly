@@ -17,7 +17,7 @@ const links = [
   { to: '/campaigns', label: 'Campaigns', icon: <RiSendPlaneLine size={20} /> },
   { to: '/inboxes', label: 'Inboxes', icon: <RiMailLine size={20} /> },
   { to: '/unibox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
-  { to: '/scheduler', label: 'Scheduler', icon: <RiCalendarScheduleLine size={20} /> },
+  { to: '/schedule', label: 'Schedule', icon: <RiCalendarScheduleLine size={20} /> },
   { to: '/settings', label: 'Settings', icon: <RiSettingsLine size={20} /> },
 ];
 

@@ -16,4 +16,4 @@ def test_api_routes_still_work():
     client = TestClient(app)
     resp = client.get("/api/status")
     assert resp.status_code == 200
-    assert resp.json().get("scheduler_running") in (True, False)
+    assert resp.json().get("schedule_running") in (True, False)

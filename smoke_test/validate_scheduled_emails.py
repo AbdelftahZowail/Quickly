@@ -345,7 +345,7 @@ class EmailScheduleValidator:
                 #   (a) The ideal target date was already in the past at scheduling
                 #       time, so ASAP scheduling naturally pushed it forward, OR
                 #   (b) The inbox was at capacity on the ideal target date, so the
-                #       scheduler had no choice but to use a later day.
+                #       schedule had no choice but to use a later day.
                 # Any other case means the algorithm introduced a delay for no reason.
                 ideal_date = next_business_date(prev['date'], sending_days, expected_wait_days)
 
