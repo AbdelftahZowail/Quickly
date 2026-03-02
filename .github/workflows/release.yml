@@ -35,6 +35,7 @@ jobs:
         uses: docker/build-push-action@v4
         with:
           context: .
+          dockerfile: Dockerfile
           push: true
           tags: |
             azowail/quickly:${{ steps.tagger.outputs.TAG }}
@@ -54,10 +55,11 @@ jobs:
             🖥️ **Run locally or on a VPS**
 
             1. Install Docker Desktop
-            2. Download `docker-compose.yml` and `.env.example` from the files below
+            2. Download `docker-compose.yml`, `Caddyfile`, and `.env.example` from the files below
             3. Rename `.env.example` to `.env` and fill in your API keys
-            4. Run `docker compose up`
-            5. Open `http://localhost:8000`
+            4. For HTTPS: set `CADDY_HOST=yourdomain.com` in `.env`
+            5. Run `docker compose up`
+            6. Open `http://localhost` (or `https://yourdomain.com` if you set a domain)
 
             ☁️ **Deploy on Railway / Render**
 
@@ -87,4 +89,14 @@ jobs:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: .env.example
           asset_name: .env.example
+          asset_content_type: text/plain
+
+      - name: Upload Caddyfile asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: Caddyfile
+          asset_name: Caddyfile
           asset_content_type: text/plain

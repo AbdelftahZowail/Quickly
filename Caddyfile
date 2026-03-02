@@ -1,0 +1,14 @@
+# Caddyfile for self-hosted Quickly deployments.
+#
+# Usage:
+#   - Local / no domain:  leave CADDY_HOST unset or empty in .env
+#                         (defaults to :80, HTTP only, all interfaces)
+#   - VPS with a domain:  set CADDY_HOST=yourdomain.com in .env — Caddy will
+#                         automatically obtain and renew a Let's Encrypt certificate.
+#
+# For custom tracking domains (future feature), add additional site blocks or
+# use on_demand_tls once your FastAPI /api/caddy/ask endpoint is ready.
+
+{$CADDY_HOST::80} {
+    reverse_proxy app:8000
+}
