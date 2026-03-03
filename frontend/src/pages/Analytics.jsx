@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import DatePicker from '../components/ui/DatePicker';
 // Recharts for charts
 import {
   ResponsiveContainer,
@@ -156,7 +157,12 @@ export default function Analytics() {
   const rangeSent = chartData.reduce((a,d)=>a+d.sent,0);
   const rangeReplies = chartData.reduce((a,d)=>a+d.totalReplies,0);
   const rangeClicks = chartData.reduce((a,d)=>a+d.totalClicks,0);
-  const replyRateRange = rangeSent > 0 ? Math.round((rangeReplies / rangeSent) * 100) : 0;
+  // Use the actual reply count from campaign stats (LeadReply table), not the
+  // per-sent-email lead_status field — the latter inflates the count by the
+  // number of emails sent to a replied lead, not the number of actual replies.
+  const totalRepliesFromStats = filtered.reduce((a,c)=>a+(c.stats?.replies||0),0);
+  const totalSentFromStats = filtered.reduce((a,c)=>a+(c.stats?.emails_sent||0),0);
+  const replyRateRange = totalSentFromStats > 0 ? Math.round((totalRepliesFromStats / totalSentFromStats) * 100) : 0;
   const clickRateRange = rangeSent > 0 ? Math.round((rangeClicks / rangeSent) * 100) : 0;
 
   return (
@@ -186,12 +192,8 @@ export default function Analytics() {
       </div>
       <div className="flex flex-col lg:flex-row items-center gap-4 mb-4">
         <div className="flex items-center gap-2">
-          <label className="text-sm">
-            From <input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)} className="ml-1 border rounded p-1" />
-          </label>
-          <label className="text-sm">
-            To <input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)} className="ml-1 border rounded p-1" />
-          </label>
+          <label className="text-sm flex items-center gap-1">From <DatePicker value={startDate} onChange={setStartDate} /></label>
+          <label className="text-sm flex items-center gap-1">To <DatePicker value={endDate} onChange={setEndDate} /></label>
         </div>
         {/* legend now controls series visibility, toggles below chart instead of checkboxes */}
         <div className="text-sm text-gray-500">Toggle series by clicking legend items below the chart.</div>
@@ -318,7 +320,7 @@ export default function Analytics() {
                 <th>Name</th>
                 <th className="text-center">Leads</th>
                 <th className="text-center">Sent</th>
-                <th className="text-center">Expected</th>
+                <th className="text-center">Pending</th>
                 <th className="text-center">Progress</th>
                 <th className="text-center">Replies</th>
                 <th className="text-center">Reply Rate</th>
@@ -331,9 +333,12 @@ export default function Analytics() {
                 const stats = c.stats || {};
                 const totalLeads = stats.total_leads || 0;
                 const sent = stats.emails_sent || 0;
-                const seq = stats.sequences || 1;
-                const expected = totalLeads * seq;
-                const progress = expected > 0 ? Math.round((sent / expected) * 100) : 0;
+                const scheduled = stats.scheduled || 0;
+                // show the denominator used for progress rather than the naive
+                // total_leads * sequences calculation; this reflects the actual
+                // number of messages either sent or still queued.
+                const denom = sent + scheduled;
+                const progress = denom > 0 ? Math.round((sent / denom) * 100) : 0;
                 const replies = stats.replies || 0;
                 // placeholder fields may not exist yet
                 const openRate = stats.open_rate ?? null;
@@ -347,8 +352,8 @@ export default function Analytics() {
                       </Link>
                     </td>
                     <td className="py-2 text-center font-mono">{totalLeads}</td>
-                    <td className="py-2 text-center font-mono">{sent}</td>
-                    <td className="py-2 text-center font-mono">{expected}</td>
+                    <td className="py-2 text-center font-mono">{scheduled}</td>
+                    <td className="py-2 text-center font-mono">{denom}</td>
                     <td className="py-2 text-center">
                       <div className="bg-gray-200 h-2 rounded overflow-hidden mx-auto w-32">
                         <div className="bg-teal-500 h-2" style={{width: `${progress}%`}} />

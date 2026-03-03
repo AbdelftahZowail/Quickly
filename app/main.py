@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 import asyncio
+import urllib.parse as _urlparse
 
 # Configure logging so our debug messages show up
 logging.basicConfig(
@@ -23,6 +25,7 @@ from app.routers import gmail_oauth
 from app.routers import schedule as schedule_router
 from app.routers import settings as settings_router
 from app.routers import unibox as unibox_router
+from app.routers import tracking as tracking_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 
@@ -130,6 +133,7 @@ app.include_router(gmail_oauth.router)
 app.include_router(schedule_router.router)
 app.include_router(settings_router.router)
 app.include_router(unibox_router.router)
+app.include_router(tracking_router.router)
 
 # ---------------------------------------------------------------------------
 # Static assets and SPA fallback
@@ -151,6 +155,7 @@ if (BASE_DIR / "static").exists():
 @app.get("/api/status")
 async def api_status(request: Request):
     """Schedule and send-job status so you can verify the worker is running."""
+    import os
     schedule = getattr(request.app.state, "schedule", None)
     job = schedule.get_job("send_queue") if (schedule and schedule.running) else None
     next_run = job.next_run_time.isoformat() if (job and getattr(job, "next_run_time", None)) else None
@@ -161,21 +166,59 @@ async def api_status(request: Request):
         "last_send_job_sent_count": last_send_job_sent_count,
         "next_send_job_run": next_run,
         "test_mode": settings.test_mode,
+        "app_mode": os.environ.get("QUICKLY_MODE", "development").lower(),
     }
 
 
 @app.get("/", response_class=FileResponse)
-async def index():
+async def index(request: Request):
+    # ── Custom tracking domain guard (same logic as the SPA catch-all) ────
+    host = request.headers.get("host", "").split(":")[0]
+    own_host = (
+        _urlparse.urlparse(settings.base_url).netloc.split(":")[0]
+        if settings.base_url
+        else ""
+    )
+    if host and own_host and host != own_host:
+        from app.database import AsyncSessionLocal
+        from app.models import Inbox
+        from sqlalchemy import select as _select
+        async with AsyncSessionLocal() as _db:
+            _res = await _db.execute(_select(Inbox).where(Inbox.tracking_domain == host))
+            if _res.scalar_one_or_none() is not None:
+                return JSONResponse({"ts": None, "ref": 0}, status_code=200)
     return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
 
 
 @app.get("/{full_path:path}", response_class=FileResponse)
 async def spa(request: Request, full_path: str):
+    # ── Custom tracking domain guard ─────────────────────────────────────────
+    # Requests arriving on a custom tracking domain (CNAME'd to this server)
+    # should only ever hit the known tracking routes (/o/, /c/, /u/, …).
+    # Any other path is silently answered with a deliberately vague JSON so
+    # a recipient who stumbles on the URL cannot tell what the server is.
+    host = request.headers.get("host", "").split(":")[0]
+    own_host = (
+        _urlparse.urlparse(settings.base_url).netloc.split(":")[0]
+        if settings.base_url
+        else ""
+    )
+    if host and own_host and host != own_host:
+        from app.database import AsyncSessionLocal
+        from app.models import Inbox
+        from sqlalchemy import select as _select
+        async with AsyncSessionLocal() as _db:
+            _res = await _db.execute(_select(Inbox).where(Inbox.tracking_domain == host))
+            if _res.scalar_one_or_none() is not None:
+                return JSONResponse({"ts": None, "ref": 0}, status_code=200)
+    # ── Normal SPA / API routing ─────────────────────────────────────────────
     # Guard: let the normal routing machinery handle API / asset requests.
     if (
         request.url.path.startswith("/api")
         or request.url.path.startswith("/assets")
         or request.url.path.startswith("/oauth")
+        or request.url.path.startswith("/o/")
+        or request.url.path.startswith("/c/")
     ):
         raise HTTPException(status_code=404)
     return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))

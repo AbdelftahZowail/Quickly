@@ -27,7 +27,12 @@ class Inbox(Base):
     display_name = Column(String(255), default="")
     max_emails_per_day = Column(Integer, default=50, nullable=False)
     wait_minutes_between = Column(Integer, default=5, nullable=False)  # Minutes between emails from this inbox
-    provider = Column(String(32), default="resend")  # resend | smtp | gmail
+    provider = Column(String(32), default="gmail")  # gmail
+    # Custom tracking domain for this inbox (hostname only, e.g. "mail.client.com").
+    # When set, open/click tracking URLs for emails sent from this inbox will use
+    # https://<tracking_domain>/o/... instead of the app's own base URL.
+    # Leave NULL to use the app's base URL (default / PaaS-friendly behaviour).
+    tracking_domain = Column(String(255), nullable=True, default=None)
     created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
@@ -60,6 +65,16 @@ class Campaign(Base):
     sending_hours_end = Column(String(5), default="17:00")   # 5pm
     wait_minutes_between = Column(Integer, default=5)  # Deprecated: wait time now controlled by Inbox.wait_minutes_between
     stop_on_reply = Column(Boolean, default=True)
+    # Tracking toggles (default OFF for better deliverability)
+    track_opens = Column(Boolean, default=False, nullable=False)
+    track_clicks = Column(Boolean, default=False, nullable=False)
+    # Unsubscribe
+    add_unsubscribe_header = Column(Boolean, default=True, nullable=False)
+    # Plain-text sending options
+    send_first_as_text = Column(Boolean, default=False, nullable=False)  # Force seq 0 to plain text
+    send_all_as_text = Column(Boolean, default=False, nullable=False)    # Force every sequence to plain text
+    # Timezone for scheduling (IANA timezone name, e.g. "America/New_York")
+    timezone = Column(String(64), nullable=True, default=None)
     created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship(
         "CampaignInbox",
@@ -92,6 +107,8 @@ class Sequence(Base):
     position = Column(Integer, nullable=False)  # 0, 1, 2...
     subject = Column(String(512), default=None)  # None = reply in same thread
     body = Column(Text, nullable=False)
+    # Explicit HTML flag.  None = legacy auto-detect; True = HTML; False = plain text.
+    is_html = Column(Boolean, nullable=True, default=None)
     wait_days_after_previous = Column(Integer, default=0)  # days after previous sequence
     campaign = relationship("Campaign", back_populates="sequences")
 
@@ -154,6 +171,27 @@ class EmailLog(Base):
         back_populates="email_log",
         cascade="all, delete-orphan",
     )
+    tracked_links = relationship(
+        "TrackedLink",
+        back_populates="email_log",
+        cascade="all, delete-orphan",
+    )
+
+
+class LeadUnsubscribeToken(Base):
+    """Stores a persistent unsubscribe token for each (lead, campaign) pair.
+
+    The token is embedded in the ``{{unsubscribe_link}}`` placeholder and
+    in the ``List-Unsubscribe`` header.  Hitting ``GET /u/<token>`` marks the
+    lead as unsubscribed and removes their remaining queue slots.
+    """
+    __tablename__ = "lead_unsubscribe_token"
+    __table_args__ = (UniqueConstraint("lead_id", "campaign_id", name="uq_lead_campaign_unsubscribe"),)
+    id = Column(Integer, primary_key=True, index=True)
+    lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime, default=_utcnow)
 
 
 class LeadReply(Base):
@@ -193,6 +231,30 @@ class EmailClick(Base):
     ip_address = Column(String(45), nullable=True)
     clicked_at = Column(DateTime, default=_utcnow)
     email_log = relationship("EmailLog", back_populates="clicks")
+
+
+class TrackedLink(Base):
+    """One row per rewritten href in a sent HTML email.
+
+    ``token`` is a random URL-safe string embedded in the click-tracking
+    redirect URL (``/c/<token>``).  The redirect logs the click and sends
+    the recipient to ``original_url``.
+    """
+
+    __tablename__ = "tracked_link"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email_log_id = Column(
+        Integer,
+        ForeignKey("email_log.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    original_url = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+
+    email_log = relationship("EmailLog", back_populates="tracked_links")
 
 
 class AppSetting(Base):
@@ -328,3 +390,36 @@ class GmailAttachment(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     message = relationship("GmailMessage", back_populates="attachments")
+
+
+class Webhook(Base):
+    """User-defined outbound webhook endpoints.
+
+    Each webhook can subscribe to specific event types. When an event occurs,
+    all active webhooks subscribed to that event type receive a POST request
+    with a JSON payload containing the event name and data.
+    """
+    __tablename__ = "webhook"
+    id = Column(Integer, primary_key=True, index=True)
+    url = Column(String(1024), nullable=False)
+    secret = Column(String(512), default="")  # Bearer token for authentication
+    events = Column(JSON, default=list)  # e.g. ["email.sent", "email.opened"]
+    active = Column(Boolean, default=True, nullable=False)
+    description = Column(String(255), default="")  # optional human-readable label
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+# All supported webhook event types
+WEBHOOK_EVENT_TYPES = [
+    "email.sent",          # An email was successfully sent to a lead
+    "email.opened",        # A lead opened an email (tracking pixel loaded)
+    "email.clicked",       # A lead clicked a link in an email
+    "email.bounced",       # An email bounced (permanent delivery failure)
+    "lead.replied",        # A lead replied to a campaign email
+    "lead.unsubscribed",   # A lead clicked the unsubscribe link
+    "lead.status_changed", # A lead's status was changed (any status transition)
+    "daily_limit",         # An inbox hit its daily sending limit
+    "rate_limit",          # A rate limit violation was detected
+    "token_expired",       # A Gmail OAuth token could not be refreshed
+]

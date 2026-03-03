@@ -6,6 +6,34 @@ import { LoadingProvider } from '../context/LoadingContext';
 import { DarkModeProvider } from '../context/DarkModeContext';
 import { ConfirmProvider } from '../context/ConfirmContext';
 import { UniboxNotificationsProvider } from '../context/UniboxNotificationsContext';
+import { AppModeProvider, useAppMode } from '../context/AppModeContext';
+
+function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
+  const { isProduction } = useAppMode();
+  const contentMargin = sidebarCollapsed ? 'ml-16' : 'ml-44';
+
+  return (
+    <div className="flex min-h-screen">
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => {
+          setSidebarCollapsed(c => {
+            const next = !c;
+            try {
+              localStorage.setItem('sidebarCollapsed', next ? 'true' : 'false');
+            } catch {}
+            return next;
+          });
+        }}
+      />
+      <div className={`${contentMargin} flex-1 bg-gray-50 text-gray-900`}
+      >
+        {!isProduction && <TestModeBanner />}
+        {children}
+      </div>
+    </div>
+  );
+}
 
 export default function Layout({ children }) {
   // initialize collapsed state from localStorage (knows before first paint)
@@ -18,34 +46,20 @@ export default function Layout({ children }) {
     }
   });
 
-  // update margin for main content when sidebar changes
-  const contentMargin = sidebarCollapsed ? 'ml-16' : 'ml-44';
-
   return (
     <NotificationProvider>
       <LoadingProvider>
         <DarkModeProvider>
           <ConfirmProvider>
             <UniboxNotificationsProvider>
-            <div className="flex min-h-screen">
-              <Sidebar
-                collapsed={sidebarCollapsed}
-                onToggle={() => {
-                  setSidebarCollapsed(c => {
-                    const next = !c;
-                    try {
-                      localStorage.setItem('sidebarCollapsed', next ? 'true' : 'false');
-                    } catch {}
-                    return next;
-                  });
-                }}
-              />
-              <div className={`${contentMargin} flex-1 bg-gray-50 text-gray-900`}
-              >
-                <TestModeBanner />
-                {children}
-              </div>
-            </div>
+              <AppModeProvider>
+                <LayoutInner
+                  sidebarCollapsed={sidebarCollapsed}
+                  setSidebarCollapsed={setSidebarCollapsed}
+                >
+                  {children}
+                </LayoutInner>
+              </AppModeProvider>
             </UniboxNotificationsProvider>
           </ConfirmProvider>
         </DarkModeProvider>

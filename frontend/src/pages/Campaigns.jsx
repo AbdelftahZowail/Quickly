@@ -100,12 +100,12 @@ export default function Campaigns() {
 
   const isPriority = strategy === 'priority';
   const banner = isPriority ? (
-    <div className="mb-4 p-4 bg-teal-50 border border-teal-200 rounded text-teal-700 text-sm flex flex-wrap items-center gap-2">
-      <strong className="mr-2">Priority strategy active.</strong>
-      Drag rows to set the order — <strong>#1</strong> gets inbox capacity first.
-      <span className="ml-auto text-xs">
-        Strategy: <Link to="/settings" className="underline">change in Settings</Link>
-      </span>
+    <div className="mb-4 flex items-center gap-2 text-xs text-gray-500">
+      <span className="font-medium text-gray-700">Priority</span>
+      <span>·</span>
+      <span>Drag rows to reorder</span>
+      <span>·</span>
+      <Link to="/settings" className="underline text-teal-500">Change strategy</Link>
     </div>
   ) : null;
 
@@ -146,9 +146,13 @@ export default function Campaigns() {
                 const stats = c.stats || {};
                 const totalLeads = stats.total_leads || 0;
                 const emailsSent = stats.emails_sent || 0;
-                const sequences = stats.sequences || 1;
-                const expected = totalLeads * sequences;
-                const percent = expected > 0 ? Math.round((emailsSent / expected) * 100) : 0;
+                const scheduled = stats.scheduled || 0; // newly added field
+                // instead of assuming every enrolled lead will receive every
+                // sequence, compute progress as sent / (sent + scheduled).  slots
+                // are removed when a lead replies, so replied leads immediately
+                // appear "complete".
+                const denom = emailsSent + scheduled;
+                const percent = denom > 0 ? Math.round((emailsSent / denom) * 100) : 0;
                 const replies = stats.replies || 0;
                 const replyRate = emailsSent > 0 ? Math.round((replies / emailsSent) * 100) : 0;
 
@@ -197,19 +201,21 @@ export default function Campaigns() {
                         />
                       </div>
                       <div className="text-xs mt-1">
-                        {emailsSent} / {expected || 0} ({percent}%)
+                        {emailsSent} / {denom} ({percent}%)
                       </div>
                     </td>
                     <td className="py-2 text-center">
                       {replies} ({replyRate}%)
                     </td>
-                    <td className="py-2 gap-2">
-                      <Button as={Link} to={`/campaigns/${c.id}`} variant="outline" size="sm">View</Button>
-                      <Button variant="outline" size="sm" onClick={() => togglePause(c.id, c.paused, c.name)}>
-                        {c.paused ? 'Resume' : 'Pause'}
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => duplicateCampaign(c.id, c.name)}>Duplicate</Button>
-                      <Button variant="danger" size="sm" onClick={() => deleteCampaign(c.id, c.name)}>Delete</Button>
+                    <td className="py-2">
+                      <div className="flex flex-wrap gap-2">
+                        <Button as={Link} to={`/campaigns/${c.id}`} variant="outline" size="sm">View</Button>
+                        <Button variant="outline" size="sm" onClick={() => togglePause(c.id, c.paused, c.name)}>
+                          {c.paused ? 'Resume' : 'Pause'}
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => duplicateCampaign(c.id, c.name)}>Duplicate</Button>
+                        <Button variant="danger" size="sm" onClick={() => deleteCampaign(c.id, c.name)}>Delete</Button>
+                      </div>
                     </td>
                   </tr>
                 );

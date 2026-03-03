@@ -24,13 +24,28 @@ services:
     volumes:
       - ./:/app          # mount source for live reload
     ports:
-      - "8000:8000"
+      - "8000:8000"      # direct access without Caddy (useful for quick testing)
     env_file: .env
     environment:
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
     depends_on:
       db:
         condition: service_healthy
+
+  caddy:
+    image: caddy:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"    # HTTP/3
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - caddy_data_dev:/data
+      - caddy_config_dev:/config
+    env_file: .env
+    depends_on:
+      - backend
 
   frontend:
     build:
@@ -54,3 +69,5 @@ services:
 
 volumes:
   pgdata_dev:
+  caddy_data_dev:
+  caddy_config_dev:

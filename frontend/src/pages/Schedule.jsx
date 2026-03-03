@@ -3,10 +3,98 @@ import { api } from '../api';
 import { useLoading } from '../context/LoadingContext';
 import { useNotify } from '../context/NotificationContext';
 import { useConfirm } from '../context/ConfirmContext';
+import { useAppMode } from '../context/AppModeContext';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 
 const DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+
+// ── Email Preview Modal for schedule items ────────────────────────────────────
+function ScheduleEmailPreviewModal({ item, onClose }) {
+  const isHtml = item.sequence_is_html || (item.sequence_body || '').trim().startsWith('<');
+  const subject = item.subject || '(no subject)';
+  const body = item.sequence_body || '';
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        data-darkreader-ignore
+        className="rounded shadow w-full max-w-3xl max-h-[90vh] flex flex-col"
+        style={{ backgroundColor: 'white' }}
+        onClick={e => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b">
+          <div>
+            <h2 className="font-semibold text-gray-800">Email Preview</h2>
+            <p className="text-xs text-gray-400 mt-0.5">
+              {item.type === 'sent' ? `Sent to ${item.lead_email}` : `Scheduled for ${item.lead_email}`}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+        </div>
+
+        {/* Meta */}
+        <div className="px-6 py-3 border-b bg-gray-50 flex flex-wrap gap-x-6 gap-y-1 text-sm">
+          <span className="text-gray-500">
+            <span className="font-medium text-gray-700">Campaign:</span> {item.campaign_name}
+          </span>
+          <span className="text-gray-500">
+            <span className="font-medium text-gray-700">Sequence:</span> #{(item.sequence_index ?? 0) + 1}
+          </span>
+          {item.type === 'sent' && item.sent_at && (
+            <span className="text-gray-500">
+              <span className="font-medium text-gray-700">Sent:</span> {new Date(item.sent_at).toLocaleString()}
+            </span>
+          )}
+          {item.type === 'scheduled' && item.scheduled_at && (
+            <span className="text-gray-500">
+              <span className="font-medium text-gray-700">Scheduled:</span> {new Date(item.scheduled_at).toLocaleString()}
+            </span>
+          )}
+        </div>
+
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          {/* Subject */}
+          <div className="bg-gray-50 rounded-lg px-4 py-3">
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Subject</span>
+            <p className="font-medium text-gray-800">
+              {!item.subject || item.subject === '(reply in thread)'
+                ? <em className="text-gray-400 font-normal">Reply in thread</em>
+                : item.subject}
+            </p>
+          </div>
+          {/* Body */}
+          <div>
+            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
+            {body ? (
+              isHtml ? (
+                <div
+                  className="border rounded-lg p-5 bg-white prose prose-sm max-w-none"
+                  dangerouslySetInnerHTML={{ __html: body }}
+                />
+              ) : (
+                <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800">
+                  {body}
+                </pre>
+              )
+            ) : (
+              <p className="text-gray-400 italic text-sm">No body available</p>
+            )}
+          </div>
+        </div>
+
+        <div className="px-6 py-3 border-t flex justify-end">
+          <Button variant="outline" size="sm" onClick={onClose}>Close</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function escapeHtml(s){
   return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -15,6 +103,7 @@ function escapeHtml(s){
 export default function Schedule() {
   const loading = useLoading();
   const notify = useNotify();
+  const { isProduction } = useAppMode();
 
   const [sent, setSent] = useState([]);
   const [scheduled, setScheduled] = useState([]);
@@ -29,6 +118,7 @@ export default function Schedule() {
 
   const [pastExpanded, setPastExpanded] = useState(false);
   const [expandedId, setExpandedId] = useState(null);
+  const [previewItem, setPreviewItem] = useState(null);
 
   // button states for recalc/validate so React can re-render correctly
   const [recalcState, setRecalcState] = useState({ busy: false, text: '⚡ Recalculate All Campaigns' });
@@ -226,6 +316,11 @@ export default function Schedule() {
               <div><span className="dp-label">Stop on reply</span><br/><span className="dp-val">{item.campaign_stop_on_reply?'Yes':'No'}</span></div>
               {item.sequence_body && (
                 <div className="dp-full"><span className="dp-label">Email body</span>
+                  <div className="flex items-center gap-2 mt-1 mb-1">
+                    <Button size="sm" variant="outline" onClick={e => { e.stopPropagation(); setPreviewItem(item); }}>
+                      View full preview
+                    </Button>
+                  </div>
                   <div className="body-preview" dangerouslySetInnerHTML={{__html:item.sequence_body.trim().startsWith('<')?item.sequence_body:escapeHtml(item.sequence_body)}} />
                 </div>
               )}
@@ -290,12 +385,19 @@ export default function Schedule() {
 
   return (
     <div className="p-8">
-      <h1 className="text-2xl font-bold">Schedule</h1>
+      <div className="flex items-center gap-3">
+        <h1 className="text-2xl font-bold">Schedule</h1>
+        <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5" title="All times shown in your local timezone">
+          🕐 {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, ' ')}
+        </span>
+      </div>
       <Card className="flex flex-wrap justify-between items-center mb-4 p-2">
         <div className="flex flex-wrap gap-4 items-center">
-          <div>
-            <span className="text-sm text-gray-500">Test Mode:</span> <span className={serverStatus.test_mode?'text-red-600':'text-green-600'}>{serverStatus.test_mode?'ON':'OFF'}</span>
-          </div>
+          {!isProduction && (
+            <div>
+              <span className="text-sm text-gray-500">Test Mode:</span> <span className={serverStatus.test_mode?'text-red-600':'text-green-600'}>{serverStatus.test_mode?'ON':'OFF'}</span>
+            </div>
+          )}
           <div>
             <span className="text-sm text-gray-500">Schedule:</span> <span className={serverStatus.schedule_running?'text-green-600':'text-red-600'}>{serverStatus.schedule_running?'Running':'Stopped'}</span>
           </div>
@@ -331,28 +433,37 @@ export default function Schedule() {
         </select>
         <input type="text" value={searchFilter} onChange={e=>setSearchFilter(e.target.value)} placeholder="Search lead, subject…" className="border rounded p-1 text-sm" style={{maxWidth:'240px'}} />
         <Button size="sm" variant="outline" onClick={clearFilters}>Clear</Button>
-        <Button
-          id="validate-queue-btn"
-          size="sm"
-          variant="outline"
-          onClick={validateQueue}
-          disabled={validateState.busy}
-        >
-          {validateState.text}
-        </Button>
-        <Button
-          id="recalc-all-btn"
-          size="sm"
-          variant="outline"
-          onClick={recalculateAll}
-          disabled={recalcState.busy}
-        >
-          {recalcState.text}
-        </Button>
+        {!isProduction && (
+          <>
+            <Button
+              id="validate-queue-btn"
+              size="sm"
+              variant="outline"
+              onClick={validateQueue}
+              disabled={validateState.busy}
+            >
+              {validateState.text}
+            </Button>
+            <Button
+              id="recalc-all-btn"
+              size="sm"
+              variant="outline"
+              onClick={recalculateAll}
+              disabled={recalcState.busy}
+            >
+              {recalcState.text}
+            </Button>
+          </>
+        )}
       </div>
       <Card className="p-4" id="schedule-body">
         {renderSection()}
       </Card>
+
+      {/* Email preview modal */}
+      {previewItem && (
+        <ScheduleEmailPreviewModal item={previewItem} onClose={() => setPreviewItem(null)} />
+      )}
     </div>
   );
 }

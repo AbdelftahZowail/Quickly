@@ -109,6 +109,49 @@ async def init_db():
             except OperationalError:
                 pass
 
+            # Campaign: tracking & plain-text options (added with unsubscribe feature)
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS campaign
+                        ADD COLUMN IF NOT EXISTS track_opens boolean NOT NULL DEFAULT false,
+                        ADD COLUMN IF NOT EXISTS track_clicks boolean NOT NULL DEFAULT false,
+                        ADD COLUMN IF NOT EXISTS add_unsubscribe_header boolean NOT NULL DEFAULT true,
+                        ADD COLUMN IF NOT EXISTS send_first_as_text boolean NOT NULL DEFAULT false,
+                        ADD COLUMN IF NOT EXISTS send_all_as_text boolean NOT NULL DEFAULT false;
+                        """
+                    )
+                )
+            except OperationalError:
+                pass
+
+            # Campaign: timezone support
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS campaign
+                        ADD COLUMN IF NOT EXISTS timezone varchar(64);
+                        """
+                    )
+                )
+            except OperationalError:
+                pass
+
+            # Sequence: explicit HTML flag
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS sequence
+                        ADD COLUMN IF NOT EXISTS is_html boolean;
+                        """
+                    )
+                )
+            except OperationalError:
+                pass
+
     # SQLite: add missing columns individually (SQLite doesn't support
     # multi-column ALTER TABLE or IF NOT EXISTS for ADD COLUMN).
     if "sqlite" in engine.dialect.name:
@@ -124,6 +167,26 @@ async def init_db():
                 except Exception:
                     # Column already exists – ignore.
                     pass
+            # Campaign tracking / plain-text options
+            for col, typedef in [
+                ("track_opens", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("track_clicks", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("add_unsubscribe_header", "BOOLEAN NOT NULL DEFAULT 1"),
+                ("send_first_as_text", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("send_all_as_text", "BOOLEAN NOT NULL DEFAULT 0"),
+                ("timezone", "VARCHAR(64)"),
+            ]:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE campaign ADD COLUMN {col} {typedef}")
+                    )
+                except Exception:
+                    pass
+            # Sequence explicit HTML flag
+            try:
+                await conn.execute(text("ALTER TABLE sequence ADD COLUMN is_html BOOLEAN"))
+            except Exception:
+                pass
 
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:

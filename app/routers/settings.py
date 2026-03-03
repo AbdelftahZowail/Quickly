@@ -1,5 +1,6 @@
 """Settings API routes for managing configuration."""
 import logging
+import urllib.parse
 
 from typing import Optional
 
@@ -29,14 +30,11 @@ from app.app_settings import (
     set_scheduling_strategy,
     get_test_mode,
     set_test_mode,
-    get_email_event_webhook_config,
-    save_email_event_webhook_config,
-    get_lead_reply_webhook_config,
-    save_lead_reply_webhook_config,
 )
 from sqlalchemy import select
-from app.models import EmailLog, EmailOpen
-from app.webhooks import maybe_fire_email_event, fire_lead_reply_webhook
+from app.models import EmailLog, EmailOpen, Webhook, WEBHOOK_EVENT_TYPES
+from app.schemas import WebhookCreate, WebhookUpdate, WebhookResponse
+from app.webhooks import fire_webhook_event
 
 log = logging.getLogger("quickly.settings")
 
@@ -48,9 +46,106 @@ class GmailSyncConfig(BaseModel):
     sync_interval_minutes: int = 5
 
 
-class EmailWebhookConfig(BaseModel):
-    webhook_url: str = ""
-    webhook_token: str = ""
+# ---------------------------------------------------------------------------
+# Webhook CRUD
+# ---------------------------------------------------------------------------
+
+@router.get("/webhooks/events")
+async def list_webhook_events():
+    """Return the list of valid event types a webhook can subscribe to."""
+    return {"events": list(WEBHOOK_EVENT_TYPES)}
+
+
+@router.get("/webhooks", response_model=list[WebhookResponse])
+async def list_webhooks(db: AsyncSession = Depends(get_db)):
+    """Return all configured webhooks ordered by creation date."""
+    result = await db.execute(
+        select(Webhook).order_by(Webhook.created_at.desc())
+    )
+    return result.scalars().all()
+
+
+@router.post("/webhooks", response_model=WebhookResponse, status_code=201)
+async def create_webhook(
+    payload: WebhookCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Register a new outbound webhook endpoint."""
+    invalid = [e for e in payload.events if e not in WEBHOOK_EVENT_TYPES]
+    if invalid:
+        raise HTTPException(400, f"Invalid event types: {invalid}")
+    wh = Webhook(
+        url=payload.url.strip(),
+        secret=payload.secret,
+        events=payload.events,
+        active=payload.active,
+        description=payload.description,
+    )
+    db.add(wh)
+    await db.commit()
+    await db.refresh(wh)
+    return wh
+
+
+@router.patch("/webhooks/{webhook_id}", response_model=WebhookResponse)
+async def update_webhook(
+    webhook_id: int,
+    payload: WebhookUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Partially update an existing webhook."""
+    result = await db.execute(select(Webhook).where(Webhook.id == webhook_id))
+    wh = result.scalar_one_or_none()
+    if not wh:
+        raise HTTPException(404, "Webhook not found")
+    if payload.events is not None:
+        invalid = [e for e in payload.events if e not in WEBHOOK_EVENT_TYPES]
+        if invalid:
+            raise HTTPException(400, f"Invalid event types: {invalid}")
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if field == "url" and value is not None:
+            value = value.strip()
+        setattr(wh, field, value)
+    await db.commit()
+    await db.refresh(wh)
+    return wh
+
+
+@router.delete("/webhooks/{webhook_id}")
+async def delete_webhook(
+    webhook_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a webhook."""
+    result = await db.execute(select(Webhook).where(Webhook.id == webhook_id))
+    wh = result.scalar_one_or_none()
+    if not wh:
+        raise HTTPException(404, "Webhook not found")
+    await db.delete(wh)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/webhooks/{webhook_id}/test")
+async def test_webhook(
+    webhook_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fire a synthetic test event to a specific webhook."""
+    result = await db.execute(select(Webhook).where(Webhook.id == webhook_id))
+    wh = result.scalar_one_or_none()
+    if not wh:
+        raise HTTPException(404, "Webhook not found")
+    import datetime as _dt
+    test_data = {
+        "webhook_id": wh.id,
+        "test": True,
+        "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
+    }
+    # Fire directly to this one webhook regardless of its event subscriptions
+    from app.webhooks import _post_webhook
+    success = await _post_webhook(wh, "test", test_data)
+    return {"ok": success}
 
 
 
@@ -81,84 +176,6 @@ async def set_time_offset(payload: _TimeOffset, db: AsyncSession = Depends(get_d
         log.error('set_time_offset failed: %s', e)
         raise HTTPException(500, f"Failed to set time offset: {e}")
 
-
-# Email webhook configuration --------------------------------------------------
-@router.get("/email-webhook")
-async def get_email_webhook_config(db: AsyncSession = Depends(get_db)):
-    """Return the webhook settings used for email limit / token events."""
-    return await get_email_event_webhook_config(db)
-
-
-@router.post("/email-webhook")
-async def set_email_webhook_config(
-    payload: EmailWebhookConfig,
-    db: AsyncSession = Depends(get_db),
-):
-    try:
-        await save_email_event_webhook_config(db, payload.webhook_url, payload.webhook_token)
-        await db.commit()
-        return {"ok": True, **(await get_email_event_webhook_config(db))}
-    except Exception as e:
-        log.error("set_email_webhook_config failed: %s", e)
-        raise HTTPException(500, f"Failed to update email webhook config: {e}")
-
-
-@router.post("/email-webhook/test")
-async def test_email_webhook(db: AsyncSession = Depends(get_db)):
-    """Trigger a test event to the configured email-events webhook."""
-    try:
-        await maybe_fire_email_event(db, "test", {"reason": "manual"})
-        return {"ok": True}
-    except Exception as e:
-        log.error("test_email_webhook failed: %s", e)
-        raise HTTPException(500, f"Failed to fire test webhook: {e}")
-
-
-# Lead-reply webhook configuration --------------------------------------------
-
-@router.get("/lead-reply-webhook")
-async def get_lead_reply_webhook_endpoint(db: AsyncSession = Depends(get_db)):
-    """Return the lead-reply webhook configuration."""
-    return await get_lead_reply_webhook_config(db)
-
-
-@router.post("/lead-reply-webhook")
-async def set_lead_reply_webhook_config(
-    payload: EmailWebhookConfig,
-    db: AsyncSession = Depends(get_db),
-):
-    """Save the dedicated lead-reply webhook URL and optional bearer token."""
-    try:
-        await save_lead_reply_webhook_config(db, payload.webhook_url, payload.webhook_token)
-        await db.commit()
-        return {"ok": True, **(await get_lead_reply_webhook_config(db))}
-    except Exception as e:
-        log.error("set_lead_reply_webhook_config failed: %s", e)
-        raise HTTPException(500, f"Failed to update lead reply webhook config: {e}")
-
-
-@router.post("/lead-reply-webhook/test")
-async def test_lead_reply_webhook(db: AsyncSession = Depends(get_db)):
-    """Trigger a test event to the configured lead-reply webhook."""
-    try:
-        import datetime as _dt
-        await fire_lead_reply_webhook(
-            db,
-            {
-                "lead_email": "test@example.com",
-                "lead_id": 0,
-                "lead_name": "Test Lead",
-                "thread_id": "test_thread",
-                "inbox_id": 0,
-                "inbox_email": "inbox@example.com",
-                "message_id": "test_message",
-                "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
-            },
-        )
-        return {"ok": True}
-    except Exception as e:
-        log.error("test_lead_reply_webhook failed: %s", e)
-        raise HTTPException(500, f"Failed to fire test webhook: {e}")
 
 # Test mode ---------------------------------------------------------------
 
@@ -283,3 +300,80 @@ async def set_scheduling_strategy_endpoint(
     except Exception as e:
         log.error("set_scheduling_strategy failed: %s", e)
         raise HTTPException(500, f"Failed to update scheduling strategy: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Server info (used by the frontend for DNS setup instructions)
+# ---------------------------------------------------------------------------
+
+@router.get("/server-info")
+async def get_server_info():
+    """Return the server's configured base URL and derived hostname.
+
+    The frontend uses ``cname_target`` to tell users what hostname their
+    custom tracking CNAME should point to.
+    """
+    base_url = settings.base_url.rstrip("/")
+    parsed = urllib.parse.urlparse(base_url)
+    # Strip port from netloc for use as a CNAME target
+    cname_target = parsed.hostname or parsed.netloc or base_url
+    return {
+        "base_url": base_url,
+        "cname_target": cname_target,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Verify a custom tracking domain is reachable and pointing here
+# ---------------------------------------------------------------------------
+
+@router.get("/verify-tracking-domain")
+async def verify_tracking_domain(domain: str):
+    """Probe a custom tracking domain to confirm it resolves to this server.
+
+    Uses httpx to call ``https://<domain>/api/tracking-probe`` from the
+    server side (no CORS restrictions).  Returns:
+
+    * ``{"ok": true}``  — domain resolves and responds correctly
+    * ``{"ok": false, "error": "<reason>"}``  — DNS/network/TLS failure
+    """
+    import httpx
+
+    # Use removeprefix (not lstrip!) — lstrip strips individual characters,
+    # so lstrip("https://") on "track.example.com" would eat the leading 't'.
+    domain = domain.strip()
+    for scheme in ("https://", "http://"):
+        if domain.startswith(scheme):
+            domain = domain[len(scheme):]
+    domain = domain.rstrip("/")
+
+    target = f"https://{domain}/api/tracking-probe"
+    last_error: str = ""
+    # Try twice: first with strict TLS verification, then without.
+    # The second pass catches cases where Caddy is still provisioning the cert
+    # or the caller is behind a private CA.
+    for verify_ssl in (True, False):
+        try:
+            async with httpx.AsyncClient(
+                timeout=10,
+                follow_redirects=True,
+                verify=verify_ssl,
+            ) as client:
+                resp = await client.get(target)
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok"):
+                    return {"ok": True}
+                last_error = "Probe endpoint returned unexpected body"
+            else:
+                last_error = f"Probe returned HTTP {resp.status_code}"
+            # Got a real HTTP response — no point retrying without SSL
+            break
+        except httpx.ConnectError as exc:
+            last_error = f"Connection refused or DNS not resolving ({exc})"
+        except httpx.TimeoutException:
+            last_error = "Connection timed out (10 s)"
+        except Exception as exc:
+            last_error = str(exc)
+
+    return {"ok": False, "error": last_error}

@@ -1,307 +1,165 @@
-# Quickly
+﻿# Quickly
 
-This project previously used server-rendered HTML templates. A new modern frontend has been added using React and Tailwind CSS. See the **Frontend** section below for details.
+<p>
+  <img src="https://img.shields.io/badge/Self--Hosted-100%25-teal" alt="Self-Hosted" />
+  <img src="https://img.shields.io/badge/License-MIT-blue" alt="License" />
+  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker" />
+</p>
 
+**Cold email infrastructure you own.** Self-hosted email campaign platform with multi-step sequences, a smart queue, Gmail OAuth sending, open/click/bounce tracking, webhooks, and a unified inbox  all in one `docker compose up`.
 
-Minimal email campaign tool for personal use: leads, campaigns with email sequences, and a smart queue that sends at the right time. No authentication required.
+---
 
 ## Features
 
-- **Leads**: Create and enroll leads from a campaign page or the campaign API (`POST /api/campaigns/{id}/leads`). Standalone lead creation (`POST /api/leads`) is not supported. Status tracking: active, unsubscribed, bounced, replied. Enroll leads into campaigns during create or later.
-- **Inboxes**: Add sending addresses (email, display name, max emails per day) via the **Inboxes** page or API. Support for Resend, SMTP, or Gmail OAuth. Campaigns can use multiple inboxes; the queue spreads sends across them by capacity.
-- **Campaigns**: Multiple sequences per campaign; each campaign has one or more inboxes. Each sequence: subject (optional = reply in thread), body (text/HTML), wait days after previous. Settings: sending days/hours, wait between emails, stop on reply, pause/resume.
-- **Queue**: When a lead joins, all sequence slots are reserved immediately. Each slot is assigned to an inbox that has capacity that day (round-robin across campaign inboxes). Business-day math and per-inbox daily limits. Add leads anytime; changing wait days recalculates pending slots.
-- **Sending**: A scheduled job (runs inside the same process as the server) sends due emails with template substitution (`{{name}}`, `{{email}}`, `{{company}}`, etc.) and threading (empty subject = reply in same thread).
-- **Schedule**: View all sent and scheduled emails across campaigns in one unified timeline with stats. Includes validation checks ("Validate Queue") to detect scheduling issues.
+- **Multi-step sequences**  Build campaigns with any number of follow-up emails, configurable wait days, and automatic threading.
+- **Smart queue**  Emails are scheduled across your inboxes respecting daily limits, business days, sending windows, and per-inbox cooldowns.
+- **Multiple inboxes**  Spread sends across as many Gmail accounts as you want. Add more accounts at any time.
+- **Open & click tracking**  Built-in pixel tracking and link wrapping with optional custom tracking domains (automatic HTTPS via Caddy).
+- **Bounce detection**  Permanent send failures (bounced, invalid address, auth errors) are detected automatically. Affected leads are marked and further sends stop.
+- **Unified inbox (Unibox)**  Real-time Gmail sync with lead-reply detection, threaded view, and compose/reply inside the app.
+- **Analytics**  Aggregated metrics, per-campaign progress, timeline charts, open/click/reply rates.
+- **Priority scheduling**  Drag campaigns to set send priority. Choose between priority-first or round-robin strategies.
+- **Webhooks**  Subscribe multiple endpoints to any of 10 event types: `email.sent`, `email.opened`, `email.clicked`, `email.bounced`, `lead.replied`, `lead.unsubscribed`, `lead.status_changed`, `daily_limit`, `rate_limit`, `token_expired`.
+- **Test mode**  Simulate sends without delivering real emails. Validate templates safely.
+- **Full REST API**  Every UI action has an equivalent API endpoint.
+- **Dark mode**  Because of course.
+
+---
 
 ## Quick Start
 
-This project now uses **PostgreSQL only** for its datastore.  Since the
-codebase is pre‑release and no real data exists, the SQLite support has been
-removed and all old migration code deleted – starting the server will create
-a clean Postgres schema.
-
-You need a Postgres server and a database (e.g. `quickly`).  Provide the
-connection URI either via the web UI settings after the first launch or by
-setting the `DATABASE_URL` environment variable before starting the server.
-
-### Running the test suite
-
-By default the test harness will use an **in‑memory SQLite database**.  This
-is controlled via `TEST_DATABASE_URL`, which is automatically set to
-`sqlite+aiosqlite:///:memory:?cache=shared` by the `conftest.py` fixture.  You
-may override this with a Postgres connection string if you want to exercise the
-full backend:
+### Option 1  Self-hosted (VPS + Caddy, recommended)
 
 ```bash
-export TEST_DATABASE_URL="postgresql+asyncpg://user:pass@localhost/test_db"
-pytest
+mkdir quickly && cd quickly
+
+curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
+curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
+curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+mv .env.example .env
 ```
 
-The suite will create/drop tables on every run, so point it at a disposable
-database.  SQLite is convenient for local development; Postgres gives a closer
-match to production but is not required.
+Edit `.env`  at minimum set:
 
-If you do use SQLite the project still requires `aiosqlite` (listed in
-`requirements.txt`) to support the fallback.  Production deployments may omit
-that dependency.
+```env
+CADDY_HOST=yourdomain.com
+BASE_URL=https://yourdomain.com
+GOOGLE_CLIENT_ID=...
+GOOGLE_CLIENT_SECRET=...
+```
 
 ```bash
-cd "Quickly"
+docker compose up -d
+```
+
+Caddy obtains a Let's Encrypt certificate automatically. Open `https://yourdomain.com`.
+
+### Option 2  PaaS (Railway, Render, Fly.io, etc.)
+
+1. Create a new service and deploy image `azowail/quickly:latest` from Docker Hub.
+2. Add a managed PostgreSQL database and copy the connection string to `DATABASE_URL`.
+3. Set the environment variables from `.env.example` in your platform's dashboard.
+4. Done  you get a public HTTPS URL automatically.
+
+### Option 3  Local development
+
+```bash
+git clone https://github.com/azowail/quickly.git
+cd quickly
+
+# Backend
 python -m venv .venv
-.venv\Scripts\activate   # Windows
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # macOS/Linux
 pip install -r requirements.txt
-# Example env var for local Postgres (replace user/password/host as needed):
+
 set DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/quickly
+set GOOGLE_CLIENT_ID=...
+set GOOGLE_CLIENT_SECRET=...
+set BASE_URL=http://localhost:8000
 uvicorn app.main:app --reload
+
+# Frontend (separate terminal)
+cd frontend
+npm install
+npm run dev   # Vite on localhost:5173, proxies /api to localhost:8000
 ```
 
-
-Open http://127.0.0.1:8000 for the web UI. The **Analytics** page now serves as the default landing page; other pages are available via the sidebar links (home is still accessible by clicking the logo):
-- **Analytics** (`/`) - Landing dashboard with aggregated metrics
-- **Campaigns** (`/campaigns`) - Manage campaigns and sequences
-- **Inboxes** (`/inboxes`) - Configure sending addresses
-- **Schedule** (`/schedule`) - View sent and scheduled emails
-- **Settings** (`/settings`) - Configure app settings and defaults (individual inboxes determine their own send provider)
-
-> Click the logo in the sidebar to return to the analytics/home dashboard.
-
-**When do emails send?** The send job runs only while the server is running (`uvicorn app.main:app`). By default it runs every 1 minute (configurable in Settings). To confirm it's running: check the server console for log lines like `Send job running at ...` and `Send job finished: N email(s) sent`, or call **GET /api/status** to see `schedule_running`, `last_send_job_run`, and `next_send_job_run`.
-
-## Configuration
-
-**All settings are managed from the web UI:** Navigate to the **Settings** page (http://127.0.0.1:8000/settings) to configure (including your `database_url` if you didn't set it via environment):
-
-- **General Settings**: Base URL, queue check interval
-- **Email Provider**: Choose between Resend, SMTP, or Gmail OAuth  (this value is used as a default; each inbox has its own provider setting)
-  - **Resend**: Enter your API key from [resend.com/api-keys](https://resend.com/api-keys)
-  - **SMTP**: Configure host, port, username, password, TLS
-  - **Gmail OAuth**: Make sure your Google Client ID and Secret are defined in your
-    environment (e.g. via `.env`); the UI does not allow editing these values.
-    Once the process is started with the credentials available, you can then
-    link Gmail accounts from the Inboxes page
-- **Test Mode**: Enable to preview emails before sending (see Test Mode section below)
-
-Settings are stored in the database and changes take effect immediately (no restart required).
-
-**Environment variables and `.env` files**: the application still reads a handful of
-settings from the environment at startup (primarily `DATABASE_URL`). A
-`.env` file in the project root will be loaded automatically via
-`python-dotenv`, so you can keep your connection string and other initial
-values there. On initial startup the values are written to the database;
-thereafter the web UI (or the settings API) is the normal way to make
-changes. **Test mode is managed from the Settings page and is stored in the
-database — environment variables are no longer required.** See
-[SETTINGS_MIGRATION.md](SETTINGS_MIGRATION.md) for migration details.
-
-## Test Mode
-
-Enable test mode from the Settings page to safely test email sending without sending to real recipients:
-
-- For **Resend/SMTP**: All emails are redirected to `delivered+{tag}@resend.dev` (tag based on original recipient)
-- For **Gmail**: Emails are simulated (not actually sent, but logged as if they were)
-- Check status: `GET /api/test/status`
-
-The web UI shows a banner when test mode is enabled.
-
-## Developer utilities
-
-- `add_bulk_leads.py` — CLI helper to create/add many test leads to a campaign via the API. Usage: `python add_bulk_leads.py --campaign-id 2 --count 50` (see file header for full options).
-- `populate_test_data.py` — Create sample inboxes, campaigns, sequences and leads for testing. Run with `python populate_test_data.py` (use `--delete` to remove test data).
-
-## API Reference
-
-No authentication required on any endpoint.
-
-### Status
-- `GET /api/status` - Schedule status, last/next send job run, test mode state
-
-### Leads
-- `GET /api/leads` - List all leads
-- `GET /api/leads/{id}` - Get single lead
-- `PATCH /api/leads/{id}` - Update lead
-- `DELETE /api/leads/{id}` - Delete lead
-- `GET /api/leads/{id}/history` - Email history for lead
-- `POST /api/leads/{id}/campaigns/{campaign_id}` - Add lead to campaign
-- `POST /api/leads/mark-replied` - Mark lead as replied (body: `{lead_id, campaign_id}`)
-
-- Note: Creating standalone leads via `POST /api/leads` is not supported — use `POST /api/campaigns/{id}/leads` to create and enroll leads.
-
-### Inboxes
-- `GET /api/inboxes` - List all inboxes (each entry now includes a `sent_today` count reflecting how many emails have been sent from that inbox so far today).
-- `POST /api/inboxes` - Create inbox (body: `{email, display_name?, max_emails_per_day?, provider?}`)
-- `GET /api/inboxes/{id}` - Get single inbox
-- `PATCH /api/inboxes/{id}` - Update inbox
-- `DELETE /api/inboxes/{id}` - Delete inbox
-
-### Campaigns
-- `GET /api/campaigns` - List all campaigns (response now includes `stats` object containing totals for leads, emails sent, replies and sequence count)
-- `POST /api/campaigns` - Create campaign (body: `{name, inbox_ids, sending_days?, sending_hours_start?, sending_hours_end?, wait_minutes_between?, stop_on_reply?}`)
-- `GET /api/campaigns/{id}` - Get single campaign (response includes a `stats` object with aggregated progress info)
-
-The frontend now includes an **Analytics** page (`/analytics`) which uses
-`GET /api/campaigns` to display per-campaign progress, reply rates, and will
-later surface open/click metrics.  A multi-select dropdown at the top lets
-you add campaigns to the view (leave blank to see all); selected names appear
-as tags that can be removed.  An area chart above the filter shows progress
-percentages for the displayed campaigns, and summary bar graphs show
-combined progress and reply rate.  Each row in the table also contains a
-mini bar for progress and reply rate for easier visual comparison.
-- `PATCH /api/campaigns/{id}` - Update campaign
-- `DELETE /api/campaigns/{id}` - Delete campaign
-- `POST /api/campaigns/{id}/duplicate` - Duplicate campaign with sequences
-- `GET /api/campaigns/{id}/leads` - List leads in campaign with progress
-- `POST /api/campaigns/{id}/leads` - Add one or more leads to campaign (body: list of `{email, name?, custom_data?}`); creates missing leads and schedules queue slots
-- `POST /api/campaigns/{id}/leads/{lead_id}` - Add lead to campaign
-- `DELETE /api/campaigns/{id}/leads/{lead_id}` - Remove lead from campaign
-- `GET /api/campaigns/{id}/queue` - View scheduled queue for campaign
-- `POST /api/campaigns/{id}/recalculate-queue` - Recalculate queue after sequence changes
-- `GET /api/campaigns/{id}/sent` - View sent emails for campaign
-
-### Sequences
-- `GET /api/campaigns/{id}/sequences` - List sequences for campaign
-- `POST /api/campaigns/{id}/sequences` - Create sequence (body: `{position, subject?, body, wait_days_after_previous}`)
-- `PATCH /api/campaigns/{id}/sequences/{seq_id}` - Update sequence
-- `DELETE /api/campaigns/{id}/sequences/{seq_id}` - Delete sequence
-
-### Schedule
-- `GET /api/schedule/sent` - All sent emails across campaigns
-- `GET /api/schedule/scheduled` - All scheduled emails across campaigns
-- `POST /api/schedule/validate-queue` - Run scheduled-emails validation checks (returns issues list)
-- `GET /api/schedule/stats` - Aggregate statistics (sent today, scheduled today, total leads, etc.)
-
-### Settings
-Most configuration is now managed via environment variables (see `.env.example`).
-The web UI no longer allows editing provider credentials, API keys, SMTP details,
-or other sensitive values; those should be defined in your `.env` file or
-exported in the environment before starting the server.  Only the
-scheduling strategy is adjustable at runtime, and dark/light mode is purely a
-client‑side preference.
-
-- `GET /api/settings/scheduling-strategy` – retrieve current strategy
-- `POST /api/settings/scheduling-strategy` – update strategy (body `{scheduling_strategy}`)
-- `POST /api/settings/add-opens` – **debug**: attach a synthetic open event to every sent email log
-
-### Gmail OAuth
-- `GET /api/gmail/status` - Gmail OAuth configuration status
-- `GET /api/gmail/accounts` - List connected Gmail accounts
-- `GET /api/gmail/permissions` - Check Gmail API permissions
-- `GET /oauth/google/authorize?inbox_id={id}` - Start OAuth flow for inbox
-- `GET /oauth/google/callback` - OAuth callback (redirect)
-- `DELETE /api/gmail/accounts/{id}` - Disconnect Gmail account
-
-### Test Mode
-- `GET /api/test/status` - Check if test mode is enabled
-
-## Workflow Example
-
-1. Configure email provider in **Settings** page
-2. Add sending addresses in **Inboxes** page (or via `POST /api/inboxes`)
-3. Create campaign in **Campaigns** page, select inboxes
-4. Add sequences to campaign (position 0, 1, 2... with subject, body, wait days)
-5. Add leads via campaign page or API (POST /api/campaigns/{id}/leads)
-6. Assign leads to campaign - slots are automatically reserved across campaign's inboxes
-7. Monitor progress in **Schedule** page or via `/api/schedule/sent` and `/api/schedule/scheduled`
-8. Check `/api/status` to verify schedule is running
-
-## Frontend development
-
-A new single‑page application is located in the `frontend/` directory. It was scaffolded with Vite, React 18, React Router and Tailwind CSS. The backend serves the production build as static files so everything can run under one domain (see **Hosting** below).
-
-### Getting started
+Or use the dev compose stack:
 
 ```bash
-cd frontend
-npm install          # or yarn
-npm run dev          # starts Vite dev server on localhost:5173
+docker compose -f docker-compose.dev.yml up
 ```
 
-During development the React app provides the following routes:
+---
 
-- `/` – dashboard with status and quick links
-- `/campaigns` – list, reorder, pause/duplicate/delete
-- `/campaigns/add` – form to create a campaign
-- `/campaigns/:id` – campaign details (sequences, leads, etc.; under construction)
-- `/inboxes` – manage sending inboxes with add/edit/delete, including Gmail OAuth flow
-- `/schedule` – (placeholder)
-- `/settings` – (placeholder)
+## Environment Variables
 
-As you build new functionality you can add new React components under `frontend/src/pages`.
+| Variable | Required | Description |
+|---|---|---|
+| `DATABASE_URL` | Auto (docker-compose sets it) | PostgreSQL connection string |
+| `BASE_URL` | Yes | Full URL including protocol (e.g. `https://yourdomain.com`) |
+| `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID |
+| `GOOGLE_CLIENT_SECRET` | Yes | Google OAuth client secret |
+| `CADDY_HOST` | For HTTPS | Domain name for Caddy's auto-TLS (e.g. `yourdomain.com`) |
+| `QUICKLY_MODE` | No | `production` (default in Docker) or `development` |
 
-During development the app proxies `/api` requests to `http://localhost:8000`, so you can run the FastAPI server side‑by‑side.  Static assets (`/assets/*`) are served directly by Vite, and the unibox APIs live under `/api/unibox` so you don’t need any special bypass rules in the proxy.
+See `.env.example` for the full list with comments.
 
-### Building for production
+---
 
-```bash
-cd frontend
-npm run build        # outputs static files to frontend/dist
-```
+## Tech Stack
 
-Copy or serve the contents of `frontend/dist` from the backend's `static/` directory (see hosting instructions).
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite, Tailwind CSS |
+| Backend | Python 3.12, FastAPI, SQLAlchemy (async) |
+| Database | PostgreSQL 15 |
+| Email | Gmail API (OAuth2) |
+| Deployment | Docker, Caddy (auto HTTPS) |
+| Scheduling | APScheduler (in-process) |
 
-### Hosting (single domain)
-
-1. **Build the frontend** as shown above.
-2. **Move the build**: either copy `frontend/dist/*` into `static/` at the project root or configure the backend to mount just the asset directory and use explicit routes for the SPA entrypoint.  The latter avoids interference with `/api` paths by preventing a catch‑all static mount.
-
-   ```python
-   # app/main.py
-   from fastapi.staticfiles import StaticFiles, FileResponse
-   BASE_DIR = Path(__file__).resolve().parent.parent
-
-   # serve static assets only
-   app.mount(
-       "/assets",
-       StaticFiles(directory=str(BASE_DIR / "frontend" / "dist" / "assets")),
-       name="assets",
-   )
-
-   @app.get("/", response_class=FileResponse)
-   def index():
-       return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
-
-   @app.get("/{full_path:path}", response_class=FileResponse)
-   def spa(request: Request, full_path: str):
-       # return index.html for any non-API/asset path so client-side routing works
-       if request.url.path.startswith("/api") or request.url.path.startswith("/assets"):
-           raise HTTPException(status_code=404)
-       return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
-   ```
-
-   In production you can now run the backend on a single domain and all
-   navigation refreshes (e.g. `/campaigns`, `/unibox`) will serve the
-   React application while `/api/*` continues to hit the API.
-
-3. **Run the backend**: `uvicorn app.main:app --host 0.0.0.0 --port 8000` (or via Gunicorn/Uvicorn for production). All UI traffic and API traffic share the same origin (`https://yourdomain.com`).
-
-4. **Reverse proxy (optional)**: In production you can put Nginx, Caddy, or Cloudflare Tunnel in front of the FastAPI process. Configure a catch‑all that forwards `/api` to the FastAPI app and serves static files for all other requests. Example Nginx snippet:
-
-   ```nginx
-   server {
-       listen 80;
-       server_name example.com;
-
-       location /api/ {
-           proxy_pass http://127.0.0.1:8000/api/;
-           proxy_set_header Host $host;
-       }
-
-       location / {
-           root /path/to/project/frontend/dist;
-           try_files $uri $uri/ /index.html;
-       }
-   }
-   ```
-
-5. **Single domain benefit**: cookies, OAuth callbacks and relative links all work without cross‑origin complications.
-
-You can continue serving the legacy Jinja templates during the migration by keeping both `app.mount("/static", ...)` and the template routes, or you may delete them once the React UI covers all pages.
+---
 
 ## Template Variables
 
 Use these in email subject and body:
-- `{{name}}` - Lead's name
-- `{{email}}` - Lead's email
-- `{{company}}` - From lead's custom_data
-- `{{title}}` - From lead's custom_data
-- Any other key from lead's `custom_data` object.
+
+| Variable | Source |
+|---|---|
+| `{{name}}` | Lead name |
+| `{{email}}` | Lead email |
+| `{{company}}` | Lead `custom_data.company` |
+| `{{title}}` | Lead `custom_data.title` |
+| Any other key | Lead `custom_data.*` |
+
+---
+
+## Running Tests
+
+```bash
+# Fast  in-memory SQLite (default)
+pytest
+
+# Full  PostgreSQL
+set TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/test_quickly
+pytest
+```
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [docs/INSTALL.md](docs/INSTALL.md) | Full installation & deployment guide |
+| [docs/API.md](docs/API.md) | Complete API reference |
+| [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | Webhook events, payloads & examples |
+| [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) | Contributing guidelines |
+
+---
+
+## License
+
+MIT

@@ -13,6 +13,21 @@ log = logging.getLogger("quickly.routes")
 router = APIRouter(prefix="/api/inboxes", tags=["inboxes"])
 
 
+def _normalise_tracking_domain(raw: str | None) -> str:
+    """Strip scheme, trailing slashes and paths from a user-supplied tracking domain.
+    Returns a clean hostname string, or "" if the input is blank.
+    """
+    if not raw:
+        return ""
+    d = raw.strip().lower()
+    for prefix in ("https://", "http://"):
+        if d.startswith(prefix):
+            d = d[len(prefix):]
+    # keep only the hostname part
+    d = d.split("/")[0].split("?")[0]
+    return d
+
+
 @router.get("", response_model=list[InboxResponse])
 async def list_inboxes(db: AsyncSession = Depends(get_db)):
     # fetch all inboxes first
@@ -42,12 +57,15 @@ async def list_inboxes(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=InboxResponse)
 async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
+    # Normalise tracking domain: strip scheme, paths, whitespace
+    td = _normalise_tracking_domain(data.tracking_domain)
     inbox = Inbox(
         email=data.email,
         display_name=data.display_name,
         max_emails_per_day=data.max_emails_per_day,
         wait_minutes_between=data.wait_minutes_between,
         provider=data.provider,
+        tracking_domain=td or None,
     )
     db.add(inbox)
     await db.flush()
@@ -103,6 +121,8 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
             # provider switch may indicate credentials revoked / toggle-off
             capacity_changed = True
         inbox.provider = data.provider
+    if data.tracking_domain is not None:
+        inbox.tracking_domain = _normalise_tracking_domain(data.tracking_domain) or None
     await db.flush()
     
     # If capacity or timing changed, recalculate queue globally rather than

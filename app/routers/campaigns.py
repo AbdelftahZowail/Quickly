@@ -54,6 +54,12 @@ def _campaign_to_response(
         stop_on_reply=campaign.stop_on_reply,
         paused=campaign.paused if hasattr(campaign, 'paused') else False,
         priority=campaign.priority if hasattr(campaign, 'priority') else 0,
+        track_opens=bool(getattr(campaign, 'track_opens', False)),
+        track_clicks=bool(getattr(campaign, 'track_clicks', False)),
+        add_unsubscribe_header=bool(getattr(campaign, 'add_unsubscribe_header', True)),
+        send_first_as_text=bool(getattr(campaign, 'send_first_as_text', False)),
+        send_all_as_text=bool(getattr(campaign, 'send_all_as_text', False)),
+        timezone=getattr(campaign, 'timezone', None),
         created_at=campaign.created_at,
         stats=stats,
     )
@@ -84,14 +90,25 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
     # gather aggregate stats in a few grouped queries
     stats_map: dict[int, dict] = {}
     if campaign_ids:
-        # lead counts
+        # lead counts.  only active leads are considered for progress; a
+        # replied/unsubscribed/bounced lead will have its status changed and
+        # therefore no longer contributes to the denominator used by the
+        # frontend progress bar.  (``CampaignLead`` rows are not deleted so we
+        # can still reference the historical total if needed elsewhere, but
+        # analytics should focus on remaining work.)
+        from app.models import Lead
         res = await db.execute(
             select(CampaignLead.campaign_id, func.count())
-            .where(CampaignLead.campaign_id.in_(campaign_ids))
+            .join(Lead, CampaignLead.lead_id == Lead.id)
+            .where(
+                CampaignLead.campaign_id.in_(campaign_ids),
+                Lead.status == "active",
+            )
             .group_by(CampaignLead.campaign_id)
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["total_leads"] = cnt
+
         # email counts
         res = await db.execute(
             select(EmailLog.campaign_id, func.count())
@@ -100,6 +117,22 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["emails_sent"] = cnt
+
+        # pending scheduled emails (queue slots)
+        res = await db.execute(
+            select(CampaignLead.campaign_id, func.count(QueueSlot.id))
+            .join(QueueSlot, QueueSlot.campaign_lead_id == CampaignLead.id)
+            # only slots for active leads contribute; slots for replied/unsubscribed
+            # leads should already have been removed but keep the filter for safety.
+            .join(Lead, CampaignLead.lead_id == Lead.id)
+            .where(
+                CampaignLead.campaign_id.in_(campaign_ids),
+                Lead.status == "active",
+            )
+            .group_by(CampaignLead.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["scheduled"] = cnt
         # open counts
         res = await db.execute(
             select(EmailLog.campaign_id, func.count())
@@ -180,6 +213,12 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         stop_on_reply=data.stop_on_reply,
         paused=data.paused,
         priority=data.priority,
+        track_opens=data.track_opens,
+        track_clicks=data.track_clicks,
+        add_unsubscribe_header=data.add_unsubscribe_header,
+        send_first_as_text=data.send_first_as_text,
+        send_all_as_text=data.send_all_as_text,
+        timezone=data.timezone,
     )
     db.add(campaign)
     await db.flush()
@@ -242,11 +281,16 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     # compute stats for single campaign
     stats: dict = {}
-    # lead count
+    # lead count – only active leads contribute to progress
+    from app.models import Lead
     res = await db.execute(
         select(func.count())
         .select_from(CampaignLead)
-        .where(CampaignLead.campaign_id == campaign_id)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            Lead.status == "active",
+        )
     )
     stats["total_leads"] = res.scalar() or 0
     # emails
@@ -256,6 +300,18 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         .where(EmailLog.campaign_id == campaign_id)
     )
     stats["emails_sent"] = res.scalar() or 0
+    # scheduled
+    res = await db.execute(
+        select(func.count(QueueSlot.id))
+        .select_from(QueueSlot)
+        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            Lead.status == "active",
+        )
+    )
+    stats["scheduled"] = res.scalar() or 0
     # replies
     res = await db.execute(
         select(func.count())
@@ -390,6 +446,19 @@ async def update_campaign(
         # rebuild globally.
         from app.routers.schedule import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
+    # Tracking and delivery options (no queue recalculation needed)
+    if data.track_opens is not None:
+        campaign.track_opens = data.track_opens
+    if data.track_clicks is not None:
+        campaign.track_clicks = data.track_clicks
+    if data.add_unsubscribe_header is not None:
+        campaign.add_unsubscribe_header = data.add_unsubscribe_header
+    if data.send_first_as_text is not None:
+        campaign.send_first_as_text = data.send_first_as_text
+    if data.send_all_as_text is not None:
+        campaign.send_all_as_text = data.send_all_as_text
+    if data.timezone is not None:
+        campaign.timezone = data.timezone if data.timezone else None
     await db.flush()
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
@@ -437,6 +506,7 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
             subject=seq.subject,
             body=seq.body,
             wait_days_after_previous=seq.wait_days_after_previous,
+            is_html=seq.is_html,
         )
         db.add(new_seq)
     
@@ -470,6 +540,7 @@ async def create_sequence(
         subject=data.subject,
         body=data.body,
         wait_days_after_previous=data.wait_days_after_previous,
+        is_html=data.is_html,
     )
     db.add(seq)
     await db.flush()
@@ -504,6 +575,8 @@ async def update_sequence(
         seq.subject = data.subject
     if data.body is not None:
         seq.body = data.body
+    if 'is_html' in data.model_fields_set:
+        seq.is_html = data.is_html
     if data.wait_days_after_previous is not None:
         seq.wait_days_after_previous = data.wait_days_after_previous
         await db.flush()
@@ -562,7 +635,12 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
     )
     rows = result.all()
     lead_ids = [lead.id for _cl, lead in rows]
+
     last_sent_map: dict[int, int] = {}
+    opened_set: set[int] = set()
+    clicked_set: set[int] = set()
+    replied_set: set[int] = set()
+
     if lead_ids:
         last_sent_result = await db.execute(
             select(EmailLog.lead_id, func.max(EmailLog.sequence_index).label("last_index"))
@@ -573,10 +651,47 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             .group_by(EmailLog.lead_id)
         )
         last_sent_map = {r.lead_id: r.last_index for r in last_sent_result.all()}
+
+        # leads that opened at least one email in this campaign
+        opened_result = await db.execute(
+            select(EmailLog.lead_id)
+            .where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+                EmailLog.opened == True,
+            )
+            .distinct()
+        )
+        opened_set = {r[0] for r in opened_result.all()}
+
+        # leads that clicked at least one link in this campaign
+        clicked_result = await db.execute(
+            select(EmailLog.lead_id)
+            .where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+                EmailLog.clicked == True,
+            )
+            .distinct()
+        )
+        clicked_set = {r[0] for r in clicked_result.all()}
+
+        # leads that replied in this campaign
+        replied_result = await db.execute(
+            select(LeadReply.lead_id)
+            .where(
+                LeadReply.campaign_id == campaign_id,
+                LeadReply.lead_id.in_(lead_ids),
+            )
+            .distinct()
+        )
+        replied_set = {r[0] for r in replied_result.all()}
+
     seq_count_result = await db.execute(
         select(func.count(Sequence.id)).where(Sequence.campaign_id == campaign_id)
     )
     total_sequences = seq_count_result.scalar() or 0
+
     def stage_label(lead_id: int) -> str:
         last_index = last_sent_map.get(lead_id, -1)
         if total_sequences == 0:
@@ -585,6 +700,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
         if next_step >= total_sequences:
             return "Complete"
         return f"Step {next_step + 1}"
+
     return [
         {
             "campaign_lead_id": cl.id,
@@ -592,11 +708,173 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "email": lead.email,
             "name": lead.name,
             "status": lead.status,
+            "custom_data": lead.custom_data or {},
             "enrolled_at": cl.enrolled_at.isoformat(),
             "stage": stage_label(lead.id),
+            "opened": lead.id in opened_set,
+            "clicked": lead.id in clicked_set,
+            "replied": lead.id in replied_set,
         }
         for cl, lead in rows
     ]
+
+
+class PreviewRequest(BaseModel):
+    sequence_id: int
+    lead_id: int | None = None
+
+
+@router.post("/{campaign_id}/preview")
+async def preview_email(
+    campaign_id: int,
+    data: PreviewRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Render a sequence email for preview (with optional lead variable substitution)."""
+    seq_result = await db.execute(
+        select(Sequence).where(
+            Sequence.id == data.sequence_id,
+            Sequence.campaign_id == campaign_id,
+        )
+    )
+    seq = seq_result.scalar_one_or_none()
+    if not seq:
+        raise HTTPException(404, "Sequence not found")
+
+    camp_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = camp_result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+
+    from app.sender import render_body, get_lead_data
+
+    # Build substitution data – fall back to placeholder strings when no lead given.
+    lead_data: dict = {"name": "{{name}}", "email": "{{email}}"}
+    if data.lead_id:
+        lead_result = await db.execute(select(Lead).where(Lead.id == data.lead_id))
+        lead = lead_result.scalar_one_or_none()
+        if lead:
+            lead_data = get_lead_data(lead)
+
+    rendered_body = render_body(seq.body or "", lead_data)
+    rendered_subject = render_body(seq.subject or "", lead_data)
+
+    # For HTML sequences inject tracking with a placeholder log id so that
+    # tracking URLs look realistic (they won't resolve until a real send).
+    tracking_urls_note = None
+    if seq.is_html and (campaign.track_clicks or campaign.track_opens):
+        try:
+            from app.settings_manager import settings as app_settings
+            from app.tracking import inject_tracking_html
+            tracking_base = (app_settings.tracking_base_url or "").rstrip("/")
+            if tracking_base:
+                rendered_body, _pairs = inject_tracking_html(
+                    rendered_body,
+                    email_log_id=0,
+                    tracking_base=tracking_base,
+                    track_opens=campaign.track_opens,
+                    track_clicks=campaign.track_clicks,
+                )
+                tracking_urls_note = "Tracking URLs use placeholder log id=0 (preview only)"
+        except Exception:
+            pass  # non-fatal; show untracked version
+
+    return {
+        "subject": rendered_subject,
+        "body": rendered_body,
+        "is_html": bool(seq.is_html),
+        "sequence_position": seq.position,
+        "tracking_note": tracking_urls_note,
+    }
+
+
+class TestEmailRequest(BaseModel):
+    sequence_id: int
+    lead_id: int | None = None
+    to_email: str
+
+
+@router.post("/{campaign_id}/send-test")
+async def send_test_email(
+    campaign_id: int,
+    data: TestEmailRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a rendered test email to the specified address using the campaign's first inbox."""
+    import asyncio
+
+    seq_result = await db.execute(
+        select(Sequence).where(
+            Sequence.id == data.sequence_id,
+            Sequence.campaign_id == campaign_id,
+        )
+    )
+    seq = seq_result.scalar_one_or_none()
+    if not seq:
+        raise HTTPException(404, "Sequence not found")
+
+    camp_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = camp_result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+
+    # Get the first inbox for this campaign
+    inbox_res = await db.execute(
+        select(Inbox)
+        .join(CampaignInbox, Inbox.id == CampaignInbox.inbox_id)
+        .where(CampaignInbox.campaign_id == campaign_id)
+        .order_by(CampaignInbox.position, CampaignInbox.inbox_id)
+        .limit(1)
+    )
+    inbox = inbox_res.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(400, "No inboxes configured for this campaign")
+
+    from app.sender import render_body, get_lead_data
+
+    lead_data: dict = {"name": "Test User", "email": data.to_email}
+    if data.lead_id:
+        lead_result = await db.execute(select(Lead).where(Lead.id == data.lead_id))
+        lead = lead_result.scalar_one_or_none()
+        if lead:
+            lead_data = get_lead_data(lead)
+
+    rendered_body = render_body(seq.body or "", lead_data)
+    rendered_subject = render_body(seq.subject or "(no subject)", lead_data)
+
+    # Get Gmail account if needed
+    gmail_account = None
+    if getattr(inbox, "provider", "") == "gmail":
+        from app.models import GmailAccount
+        ga_result = await db.execute(
+            select(GmailAccount).where(GmailAccount.email == inbox.email)
+        )
+        gmail_account = ga_result.scalar_one_or_none()
+
+    from app.sender import send_email
+
+    result = await asyncio.get_event_loop().run_in_executor(
+        None,
+        lambda: send_email(
+            to_email=data.to_email,
+            subject=f"[TEST] {rendered_subject}",
+            body=rendered_body,
+            from_email=inbox.email or "",
+            from_name=inbox.display_name or "",
+            is_html=bool(seq.is_html),
+            provider=getattr(inbox, "provider", "resend") or "resend",
+            gmail_account=gmail_account,
+        ),
+    )
+
+    if not result:
+        raise HTTPException(500, "Failed to send test email — check inbox configuration")
+
+    log.info(
+        "send_test_email: campaign=%s sequence=%s to=%s inbox=%s",
+        campaign_id, data.sequence_id, data.to_email, inbox.email,
+    )
+    return {"ok": True, "message_id": result.message_id}
 
 
 @router.get("/{campaign_id}/queue")

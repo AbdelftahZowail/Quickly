@@ -1,5 +1,7 @@
 """Background job: send due emails from the queue."""
 import logging
+import re
+import secrets
 from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,9 +18,10 @@ from app.models import (
     EmailLog,
     LeadReply,
     GmailAccount,
+    LeadUnsubscribeToken,
 )
-from app.sender import send_email, render_body, get_lead_data, SendResult
-from app.webhooks import maybe_fire_email_event
+from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure
+from app.webhooks import fire_webhook_event
 from app.routers.gmail_oauth import refresh_access_token
 from app.app_settings import get_google_oauth_credentials
 from app import time as time_provider
@@ -60,6 +63,11 @@ async def run_send_job():
         # Pre-fetch Google OAuth credentials once for all Gmail inboxes
         g_client_id, g_client_secret = await get_google_oauth_credentials(session)
 
+        # Fallback tracking base URL (used when an inbox has no custom domain)
+        from app.settings_manager import settings as _settings
+        from app.app_settings import get_inbox_tracking_base
+        _fallback_tracking_base = _settings.base_url.rstrip("/")
+
         for inbox in inboxes:
             # compute how many emails already sent today so we enforce a hard
             # daily cap rather than only relying on ``sent_this_inbox`` below.
@@ -76,7 +84,7 @@ async def run_send_job():
             if quota_remaining <= 0:
                 # we would break the daily limit even before sending a single
                 # message; skip this inbox entirely and notify the webhook.
-                await maybe_fire_email_event(
+                await fire_webhook_event(
                     session,
                     "daily_limit",
                     {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
@@ -85,30 +93,28 @@ async def run_send_job():
 
             # For Gmail inboxes, pre-fetch and refresh the access token
             gmail_token = ""
-            inbox_provider = getattr(inbox, "provider", "") or settings.email_provider or ""
-            if inbox_provider == "gmail":
-                ga_result = await session.execute(
-                    select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
-                )
-                ga = ga_result.scalar_one_or_none()
-                if ga:
-                    # Refresh token if expired (or within 5 min of expiry)
-                    if ga.token_expiry and ga.token_expiry <= time_provider.utcnow():
-                        refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
-                        if refreshed:
-                            await session.flush()
-                        else:
-                            log.error("Gmail token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
-                            await maybe_fire_email_event(
-                                session,
-                                "token_expired",
-                                {"inbox_id": inbox.id, "inbox_email": inbox.email},
-                            )
-                            continue
-                    gmail_token = ga.access_token
-                else:
-                    log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
-                    continue
+            ga_result = await session.execute(
+                select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
+            )
+            ga = ga_result.scalar_one_or_none()
+            if ga:
+                # Refresh token if expired (or within 5 min of expiry)
+                if ga.token_expiry and ga.token_expiry <= time_provider.utcnow():
+                    refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
+                    if refreshed:
+                        await session.flush()
+                    else:
+                        log.error("Gmail token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
+                        await fire_webhook_event(
+                            session,
+                            "token_expired",
+                            {"inbox_id": inbox.id, "inbox_email": inbox.email},
+                        )
+                        continue
+                gmail_token = ga.access_token
+            else:
+                log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
+                continue
 
             result = await session.execute(
                 select(QueueSlot, CampaignLead, Campaign, Lead, Sequence)
@@ -134,6 +140,9 @@ async def run_send_job():
 
             # compute last sent timestamp so we can enforce the wait-minutes
             last_sent_time = None
+
+            # Per-inbox tracking base URL — custom domain takes priority
+            inbox_tracking_base = get_inbox_tracking_base(inbox, _fallback_tracking_base)
             last_sent_res = await session.execute(
                 select(EmailLog.sent_at)
                 .where(EmailLog.inbox_id == inbox.id)
@@ -145,7 +154,7 @@ async def run_send_job():
             for slot, cl, campaign, lead, sequence in rows:
                 # HARD LIMIT: daily quota
                 if sent_this_inbox >= quota_remaining:
-                    await maybe_fire_email_event(
+                    await fire_webhook_event(
                         session,
                         "daily_limit",
                         {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
@@ -158,7 +167,7 @@ async def run_send_job():
                     required = timedelta(minutes=inbox.wait_minutes_between)
                     # allow up to 20 second of slack before firing rate_limit
                     if delta + timedelta(seconds=20) < required:
-                        await maybe_fire_email_event(
+                        await fire_webhook_event(
                             session,
                             "rate_limit",
                             {
@@ -235,49 +244,178 @@ async def run_send_job():
                 # (same {{firstName}} / {{company}} etc. tokens as the body).
                 subject = render_body(subject, get_lead_data(lead))
 
-                body = render_body(sequence.body, get_lead_data(lead))
+                # ── Determine HTML mode ──────────────────────────────────────
+                # Priority: campaign-level overrides > per-sequence flag > auto-detect
+                if getattr(campaign, 'send_all_as_text', False):
+                    is_html = False
+                elif getattr(campaign, 'send_first_as_text', False) and slot.sequence_index == 0:
+                    is_html = False
+                elif sequence.is_html is not None:
+                    is_html = bool(sequence.is_html)
+                else:
+                    # Legacy auto-detect: scan the raw body for HTML tags.
+                    is_html = bool(re.search(r'<[a-zA-Z][^>]*>', sequence.body or ""))
+
+                # ── Unsubscribe token (fetch or create) ──────────────────────
+                unsub_token_res = await session.execute(
+                    select(LeadUnsubscribeToken).where(
+                        LeadUnsubscribeToken.lead_id == lead.id,
+                        LeadUnsubscribeToken.campaign_id == campaign.id,
+                    )
+                )
+                unsub_row = unsub_token_res.scalar_one_or_none()
+                if unsub_row is None:
+                    unsub_row = LeadUnsubscribeToken(
+                        lead_id=lead.id,
+                        campaign_id=campaign.id,
+                        token=secrets.token_urlsafe(32),
+                    )
+                    session.add(unsub_row)
+                    await session.flush()  # get the token persisted
+
+                unsub_url = f"{inbox_tracking_base}/u/{unsub_row.token}"
+
+                # Build lead data dict with built-in unsubscribe_link variable
+                lead_data = get_lead_data(lead)
+                lead_data["unsubscribe_link"] = unsub_url
+
+                body = render_body(sequence.body, lead_data)
                 from_addr = inbox.email
                 from_name = inbox.display_name or ""
-                is_html = (sequence.body or "").strip().lower().startswith("<")
 
+                # ── phase 1: pre-create EmailLog to get an ID for tracking ──
+                email_log_entry = EmailLog(
+                    lead_id=lead.id,
+                    campaign_id=campaign.id,
+                    inbox_id=inbox.id,
+                    sequence_index=slot.sequence_index,
+                    subject=subject,
+                    message_id="",      # filled in after successful send
+                    thread_id=prev_thread_id,
+                )
+                session.add(email_log_entry)
+                await session.flush()  # acquire email_log_entry.id
+
+                # ── phase 2: inject open/click tracking into HTML bodies ────
+                send_body = body
+                do_track = is_html and (
+                    getattr(campaign, 'track_opens', False)
+                    or getattr(campaign, 'track_clicks', False)
+                )
+                if do_track:
+                    from app.tracking import inject_tracking_html
+                    from app.models import TrackedLink as _TrackedLink
+                    send_body, link_pairs = inject_tracking_html(
+                        body,
+                        email_log_entry.id,
+                        inbox_tracking_base,
+                        track_opens=getattr(campaign, 'track_opens', False),
+                        track_clicks=getattr(campaign, 'track_clicks', False),
+                    )
+                    for _token, _url in link_pairs:
+                        session.add(
+                            _TrackedLink(
+                                email_log_id=email_log_entry.id,
+                                token=_token,
+                                original_url=_url,
+                            )
+                        )
+
+                # Unsubscribe header
+                list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
+
+                # ── phase 3: send ────────────────────────────────────────────
                 result = send_email(
                     to_email=lead.email,
                     subject=subject,
-                    body=body,
+                    body=send_body,
                     from_email=from_addr,
                     from_name=from_name,
                     reply_to_msg_id=reply_to_msg_id,
                     references=references_chain,
                     is_html=is_html,
-                    provider=inbox_provider,
+                    provider="gmail",
                     gmail_access_token=gmail_token,
                     gmail_account=ga,
                     thread_id=prev_thread_id,
+                    list_unsubscribe_url=list_unsub_url,
                 )
-                if not result and inbox_provider == "gmail":
-                    # send failure on a Gmail inbox: likely token issue
-                    await maybe_fire_email_event(
-                        session,
-                        "token_expired",
-                        {"inbox_id": inbox.id, "inbox_email": inbox.email, "lead_id": lead.id},
+
+                # ── Handle permanent failure (bounce / auth) ─────────────────
+                if isinstance(result, SendFailure):
+                    log.warning(
+                        "Permanent send failure for lead_id=%s inbox=%s: [%s] %s",
+                        lead.id, inbox.email, result.error_type, result.message,
                     )
-                if result:
-                    email_log_entry = EmailLog(
-                        lead_id=lead.id,
-                        campaign_id=campaign.id,
-                        inbox_id=inbox.id,  # Track which inbox sent this for inbox persistence
-                        sequence_index=slot.sequence_index,
-                        subject=subject,
-                        message_id=result.message_id,
-                        thread_id=result.thread_id,
-                    )
-                    session.add(email_log_entry)
-                    await session.delete(slot)
-                    sent_this_inbox += 1
-                    total_sent += 1
-                    quota_remaining -= 1
-                    # update last_sent_time for rate-limit comparisons
-                    last_sent_time = now
+                    # Delete the pre-created log entry
+                    await session.delete(email_log_entry)
+
+                    # Mark lead as bounced and delete remaining queue slots
+                    if result.error_type in ("bounce", "invalid_recipient"):
+                        lead.status = "bounced"
+                        # Delete ALL remaining queue slots for this lead+campaign
+                        from sqlalchemy import delete as sql_delete
+                        await session.execute(
+                            sql_delete(QueueSlot).where(
+                                QueueSlot.campaign_lead_id == cl.id,
+                            )
+                        )
+                        await fire_webhook_event(session, "email.bounced", {
+                            "lead_id": lead.id,
+                            "lead_email": lead.email,
+                            "campaign_id": campaign.id,
+                            "inbox_id": inbox.id,
+                            "error_type": result.error_type,
+                            "error_message": result.message,
+                            "timestamp": time_provider.utcnow().isoformat() + "Z",
+                        })
+                        await fire_webhook_event(session, "lead.status_changed", {
+                            "lead_id": lead.id,
+                            "lead_email": lead.email,
+                            "old_status": "active",
+                            "new_status": "bounced",
+                            "reason": result.message,
+                            "timestamp": time_provider.utcnow().isoformat() + "Z",
+                        })
+                    elif result.error_type in ("auth_failed", "permission_denied"):
+                        await fire_webhook_event(session, "token_expired", {
+                            "inbox_id": inbox.id,
+                            "inbox_email": inbox.email,
+                            "error": result.message,
+                        })
+                        # Stop processing this inbox — auth is broken
+                        break
+                    continue
+
+                if not result:
+                    # Transient failure — roll back the pre-created log; slot stays for retry
+                    await session.delete(email_log_entry)
+                    continue
+
+                # ── success: update log and consume the slot ─────────────────
+                email_log_entry.message_id = result.message_id
+                email_log_entry.thread_id = result.thread_id or prev_thread_id
+                await session.delete(slot)
+                sent_this_inbox += 1
+                total_sent += 1
+                quota_remaining -= 1
+                # update last_sent_time for rate-limit comparisons
+                last_sent_time = now
+
+                # Fire email.sent webhook
+                await fire_webhook_event(session, "email.sent", {
+                    "email_log_id": email_log_entry.id,
+                    "lead_id": lead.id,
+                    "lead_email": lead.email,
+                    "campaign_id": campaign.id,
+                    "inbox_id": inbox.id,
+                    "inbox_email": inbox.email,
+                    "subject": subject,
+                    "sequence_index": slot.sequence_index,
+                    "message_id": result.message_id,
+                    "thread_id": result.thread_id,
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
 
         await session.commit()
 

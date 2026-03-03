@@ -129,7 +129,7 @@ async def make_inbox(
     max_emails_per_day: int = 50,
     wait_minutes_between: int = 5,
     display_name: str = "",
-    provider: str = "resend",
+    provider: str = "gmail",
 ) -> Inbox:
     inbox = Inbox(
         email=email,

@@ -7,7 +7,6 @@ apscheduler>=3.10
 pydantic>=2.5
 pydantic-settings>=2.1
 python-dotenv>=1.0
-resend>=2.0
 httpx>=0.24
 # Gmail API client libraries for OAuth2 and service access
 google-api-python-client>=2.0

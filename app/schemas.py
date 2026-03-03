@@ -2,6 +2,7 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional, Dict, Any, List
 from datetime import datetime, time
+from app.models import WEBHOOK_EVENT_TYPES
 
 
 class LeadCreate(BaseModel):
@@ -33,7 +34,8 @@ class InboxCreate(BaseModel):
     display_name: str = ""
     max_emails_per_day: int = 50
     wait_minutes_between: int = 5
-    provider: str = "resend"  # resend | smtp | gmail
+    provider: str = "gmail"  # gmail (only supported provider)
+    tracking_domain: Optional[str] = None  # custom hostname for tracking links
 
 
 class InboxUpdate(BaseModel):
@@ -41,6 +43,7 @@ class InboxUpdate(BaseModel):
     max_emails_per_day: Optional[int] = None
     wait_minutes_between: Optional[int] = None
     provider: Optional[str] = None
+    tracking_domain: Optional[str] = None  # set to "" to clear
 
 
 class InboxResponse(BaseModel):
@@ -50,6 +53,7 @@ class InboxResponse(BaseModel):
     max_emails_per_day: int
     wait_minutes_between: int
     provider: str
+    tracking_domain: Optional[str] = None
     created_at: datetime
     # how many emails have been sent from this inbox **today** (UTC)
     sent_today: int = 0
@@ -63,12 +67,14 @@ class SequenceCreate(BaseModel):
     subject: Optional[str] = None
     body: str
     wait_days_after_previous: int = 0
+    is_html: Optional[bool] = None  # None = auto-detect (legacy), True = HTML, False = plain
 
 
 class SequenceUpdate(BaseModel):
     subject: Optional[str] = None
     body: Optional[str] = None
     wait_days_after_previous: Optional[int] = None
+    is_html: Optional[bool] = None
 
 
 class SequenceResponse(BaseModel):
@@ -78,6 +84,7 @@ class SequenceResponse(BaseModel):
     subject: Optional[str]
     body: str
     wait_days_after_previous: int
+    is_html: Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -93,6 +100,16 @@ class CampaignCreate(BaseModel):
     stop_on_reply: bool = True
     paused: bool = False
     priority: int = 0  # Lower value = processed first in priority scheduling
+    # Tracking (off by default for better deliverability)
+    track_opens: bool = False
+    track_clicks: bool = False
+    # Unsubscribe header
+    add_unsubscribe_header: bool = True
+    # Plain-text options
+    send_first_as_text: bool = False
+    send_all_as_text: bool = False
+    # Timezone (IANA name e.g. "America/New_York"); None = user's local timezone
+    timezone: Optional[str] = None
 
 
 class CampaignUpdate(BaseModel):
@@ -105,6 +122,12 @@ class CampaignUpdate(BaseModel):
     stop_on_reply: Optional[bool] = None
     paused: Optional[bool] = None
     priority: Optional[int] = None  # Lower value = processed first in priority scheduling
+    track_opens: Optional[bool] = None
+    track_clicks: Optional[bool] = None
+    add_unsubscribe_header: Optional[bool] = None
+    send_first_as_text: Optional[bool] = None
+    send_all_as_text: Optional[bool] = None
+    timezone: Optional[str] = None
 
 
 class CampaignStats(BaseModel):
@@ -115,11 +138,23 @@ class CampaignStats(BaseModel):
     later when we want open rates, positive replies, click rate, etc.  They
     default to zero when no data exists.  ``open_rate`` and ``click_rate``
     are expressed as floats between 0.0 and 1.0 and currently always zero.
+
+    ``scheduled`` is the number of outstanding queue slots for the campaign.
+    When a lead replies we delete its remaining slots; including this value
+    allows the frontend to compute progress based on the sum of sent +
+    scheduled emails rather than assuming every enrolled lead will receive
+    every sequence.  Without it the progress bar would still show "incomplete"
+    after a reply even though no further messages will be sent.
     """
     total_leads: int = 0
     emails_sent: int = 0
     replies: int = 0
     sequences: int = 0
+    # ``scheduled`` counts pending QueueSlot rows for this campaign.  The
+    # frontend uses it along with ``emails_sent`` to calculate completion
+    # percent, which ensures replied leads (whose slots are deleted) no
+    # longer drag down the progress bar.
+    scheduled: int = 0
     open_rate: float = 0.0
     click_rate: float = 0.0
 
@@ -138,6 +173,12 @@ class CampaignResponse(BaseModel):
     stop_on_reply: bool
     paused: bool
     priority: int
+    track_opens: bool = False
+    track_clicks: bool = False
+    add_unsubscribe_header: bool = True
+    send_first_as_text: bool = False
+    send_all_as_text: bool = False
+    timezone: Optional[str] = None
     created_at: datetime
 
     # new stats object; the frontend can always rely on ``stats`` being
@@ -185,3 +226,39 @@ class EmailLogResponse(BaseModel):
 class MarkReplied(BaseModel):
     lead_id: int
     campaign_id: int
+
+
+# ---------------------------------------------------------------------------
+# Webhook schemas
+# ---------------------------------------------------------------------------
+
+class WebhookCreate(BaseModel):
+    """Create a new outbound webhook endpoint."""
+    url: str
+    secret: str = ""
+    events: List[str] = list(WEBHOOK_EVENT_TYPES)  # subscribe to all by default
+    active: bool = True
+    description: str = ""
+
+
+class WebhookUpdate(BaseModel):
+    """Partial update for an existing webhook."""
+    url: Optional[str] = None
+    secret: Optional[str] = None
+    events: Optional[List[str]] = None
+    active: Optional[bool] = None
+    description: Optional[str] = None
+
+
+class WebhookResponse(BaseModel):
+    id: int
+    url: str
+    secret: str
+    events: List[str]
+    active: bool
+    description: str
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
