@@ -498,7 +498,8 @@ class TestReserveSlotsForLead:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        start = date(2026, 3, 2)  # Monday
+        start = date(2026, 3, 9)  # Monday
+
         await reserve_slots_for_lead(
             session, cl.id, campaign,
             inboxes=[(inbox.id, inbox.max_emails_per_day, inbox.wait_minutes_between)],
@@ -515,9 +516,14 @@ class TestReserveSlotsForLead:
 
         date_0 = slots[0].scheduled_date.date()
         date_1 = slots[1].scheduled_date.date()
-        # Seq 0 on Monday 3/2, Seq 1 should be 2 business days later = Wednesday 3/4
-        assert date_0 == date(2026, 3, 2)
-        assert date_1 == date(2026, 3, 4)
+
+        # Seq 0 on Monday 3/9, Seq 1 should be 2 business days later = Wednesday 3/11
+
+        assert date_0 == date(2026, 3, 9)
+
+        assert date_1 == date(2026, 3, 11)
+
+
 
     async def test_skips_already_sent_sequences(self, session):
         """If last_sent_sequence_index=1, only sequences with index > 1 should be scheduled."""
@@ -636,7 +642,7 @@ class TestRoundRobinAndCapacity:
             inboxes=[(inbox.id, 2, 5)],
             sequences=seqs,
             lead_id=lead.id,
-            start_date=date(2026, 3, 2),  # Monday
+            start_date=date(2026, 3, 9),  # Monday
         )
 
         result = await session.execute(
@@ -646,11 +652,13 @@ class TestRoundRobinAndCapacity:
         # All 4 sequences get scheduled; the inbox-full follow-ups overflow to the next business day
         assert len(slots) == 4
         # First two fit on the start date
-        assert slots[0].scheduled_date.date() == date(2026, 3, 2)
-        assert slots[1].scheduled_date.date() == date(2026, 3, 2)
+        assert slots[0].scheduled_date.date() == date(2026, 3, 9)
+        assert slots[1].scheduled_date.date() == date(2026, 3, 9)
         # Remaining two overflow to the next business day
-        assert slots[2].scheduled_date.date() == date(2026, 3, 3)
-        assert slots[3].scheduled_date.date() == date(2026, 3, 3)
+        assert slots[2].scheduled_date.date() == date(2026, 3, 10)
+        assert slots[3].scheduled_date.date() == date(2026, 3, 10)
+
+
 
     async def test_sending_window_overflow_to_next_day(self, session):
         """When estimated send time exceeds sending_hours_end for follow-ups,
@@ -675,9 +683,8 @@ class TestRoundRobinAndCapacity:
             inboxes=[(inbox.id, inbox.max_emails_per_day, inbox.wait_minutes_between)],
             sequences=seqs,
             lead_id=lead.id,
-            start_date=date(2026, 3, 2),  # Monday
+            start_date=date(2026, 3, 9),  # Monday
         )
-
         result = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id).order_by(QueueSlot.sequence_index)
         )
@@ -686,9 +693,10 @@ class TestRoundRobinAndCapacity:
 
         # First slot is on the start date; overflowing follow-ups are scheduled at end-of-window
         dates = [s.scheduled_date.date() for s in slots]
-        assert dates[0] == date(2026, 3, 2)
+        assert dates[0] == date(2026, 3, 9)
+
         # ensure at least one slot on the start date is scheduled at the window end (forced behavior)
-        end_times = [s.scheduled_date.time() for s in slots if s.scheduled_date.date() == date(2026, 3, 2)]
+        end_times = [s.scheduled_date.time() for s in slots if s.scheduled_date.date() == date(2026, 3, 9)]
         assert any(t == time(9, 10) for t in end_times)
 
 
@@ -891,7 +899,9 @@ class TestMultipleLeadsMultipleCampaigns:
         lead_b = await make_lead(session, email="leadb@test.com")
         cl_b = await make_campaign_lead(session, camp_b.id, lead_b.id)
 
-        start = date(2026, 3, 2)
+        start = date(2026, 3, 9)
+
+
 
         # Reserve for campaign A first — fills 3 slots on day 1
         await reserve_slots_for_lead(
@@ -1346,18 +1356,22 @@ class TestApiRecalculationTriggers:
         cl1 = await make_campaign_lead(session, campaign.id, lead1.id)
         lead2 = await make_lead(session)
         cl2 = await make_campaign_lead(session, campaign.id, lead2.id)
-        await reserve_slots_for_new_leads_bulk(session, [cl1.id, cl2.id], campaign.id, start_date=date(2026,3,2))
+        await reserve_slots_for_new_leads_bulk(session, [cl1.id, cl2.id], campaign.id, start_date=date(2026,3,9))
+
         slots = await session.execute(select(QueueSlot).order_by(QueueSlot.scheduled_date))
         dates = [s.scheduled_date.date() for s in slots.scalars().all()]
-        assert dates[0] == date(2026,3,2)
-        assert dates[1] == date(2026,3,3)
+        assert dates[0] == date(2026,3,9)
+        assert dates[1] == date(2026,3,10)
+
+
 
         # delete the first lead; after a full recalculation the remaining
         # lead should be scheduled earlier than the original March 3 date
         await delete_lead(lead1.id, db=session)
         slots2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id))
         new_date = slots2.scalars().one().scheduled_date.date()
-        assert new_date < date(2026,3,3)
+        assert new_date < date(2026,3,10)
+
 
     async def test_inbox_capacity_update_recalculates(self, session):
         # inbox with cap=1 then bump to 2 should pull second lead earlier
@@ -1371,12 +1385,14 @@ class TestApiRecalculationTriggers:
         lead2 = await make_lead(session)
         cl2 = await make_campaign_lead(session, campaign.id, lead2.id)
 
-        await reserve_slots_for_new_leads_bulk(session, [cl1.id, cl2.id], campaign.id, start_date=date(2026,3,2))
-        # second lead moved out to 3/3
+        await reserve_slots_for_new_leads_bulk(session, [cl1.id, cl2.id], campaign.id, start_date=date(2026,3,9))
+
+        # second lead moved out to  3/10
         slot2 = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id)
         )
-        assert slot2.scalars().one().scheduled_date.date() == date(2026,3,3)
+        assert slot2.scalars().one().scheduled_date.date() == date(2026,3,10)
+
 
         # bump inbox capacity and update via router
         await update_inbox(inbox.id, InboxUpdate(max_emails_per_day=2), db=session)
@@ -1384,8 +1400,10 @@ class TestApiRecalculationTriggers:
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id)
         )
         new_date = slot2b.scalars().one().scheduled_date.date()
-        # should have moved earlier than the original March 3 slot
-        assert new_date < date(2026,3,3)
+                # should have moved earlier than the original March 10 slot
+        assert new_date < date(2026,3,10)
+
+
 
     # sequence-related API operations should also recompute globally
     async def test_sequence_create_triggers_global_recalc(self, session):
@@ -1762,7 +1780,7 @@ class TestScheduledTimes:
             inboxes=[(inbox.id, inbox.max_emails_per_day, inbox.wait_minutes_between)],
             sequences=seqs,
             lead_id=lead.id,
-            start_date=date(2026, 3, 2),
+            start_date=date(2026, 3, 9),
         )
 
         result = await session.execute(
@@ -1791,7 +1809,7 @@ class TestScheduledTimes:
             inboxes=[(inbox.id, inbox.max_emails_per_day, inbox.wait_minutes_between)],
             sequences=seqs,
             lead_id=lead.id,
-            start_date=date(2026, 3, 2),
+            start_date=date(2026, 3, 9),
         )
 
         result = await session.execute(

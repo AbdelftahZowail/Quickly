@@ -83,6 +83,7 @@ async def test_add_opens_setting_endpoint(session):
     campaign = await make_campaign(session)
     lead = await make_lead(session)
     log = await make_email_log(session, lead.id, campaign.id)
+    log_id = log.id  # save before expiring
     await session.commit()
 
     with TestClient(app) as client:
@@ -92,14 +93,17 @@ async def test_add_opens_setting_endpoint(session):
         assert data["added"] == 1
         assert data["total"] == 1
 
+    # expire the session cache so we read fresh data committed by the endpoint
+    session.expire_all()
+
     # inspect database to confirm open event was written and flag toggled
     result = await session.execute(select(EmailOpen))
     opens = result.scalars().all()
     assert len(opens) == 1
-    assert opens[0].email_log_id == log.id
+    assert opens[0].email_log_id == log_id
 
     # refresh the log row
-    result = await session.execute(select(EmailLog).where(EmailLog.id == log.id))
+    result = await session.execute(select(EmailLog).where(EmailLog.id == log_id))
     refreshed = result.scalar_one()
     assert refreshed.opened is True
 

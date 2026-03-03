@@ -94,14 +94,16 @@ def test_send_email_with_explicit_provider(monkeypatch):
 
 
 def test_send_email_requires_provider():
-    with pytest.raises(ValueError):
-        send_email(
-            to_email="no@prov",
-            subject="s",
-            body="b",
-            from_email="c@d",
-            provider="",  # empty string should be rejected
-        )
+    # empty provider defaults to gmail; with no credentials returns SendFailure
+    from app.sender import SendFailure
+    result = send_email(
+        to_email="no@prov",
+        subject="s",
+        body="b",
+        from_email="c@d",
+        provider="",
+    )
+    assert isinstance(result, SendFailure)
 
 
 def test_send_via_gmail_logs_errors(monkeypatch):

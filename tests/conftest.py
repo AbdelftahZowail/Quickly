@@ -88,6 +88,11 @@ async def engine():
     # was the cause of intermittent ``no such table`` errors when running
     # the full suite.
     from app import database as _adb
+    # Save originals so we can restore them after the test.  Without this,
+    # the next test that calls TestClient(app) would find app.database.engine
+    # pointing to a disposed engine, causing init_db() to hang.
+    _original_engine = _adb.engine
+    _original_session_maker = _adb.AsyncSessionLocal
     _adb.engine = eng
     _adb.AsyncSessionLocal = async_sessionmaker(
         eng, class_=AsyncSession, expire_on_commit=False, autocommit=False, autoflush=False
@@ -98,6 +103,16 @@ async def engine():
     async with eng.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
     await eng.dispose()
+    # Restore the original engine/sessionmaker so subsequent tests that use
+    # TestClient(app) (and thus trigger init_db()) don't get a dead engine.
+    _adb.engine = _original_engine
+    _adb.AsyncSessionLocal = _original_session_maker
+    # Recreate the schema on the original engine so that tests which use
+    # TestClient(app) without the engine fixture find the tables ready.
+    # (drop_all above also clears the shared in-memory SQLite used by the
+    # original engine, so we need to re-populate it here.)
+    async with _original_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
 
 @pytest_asyncio.fixture
