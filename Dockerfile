@@ -41,6 +41,10 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # expose the port our FastAPI server listens on
 EXPOSE 8000
 
+# production builds default to production mode; override with
+# QUICKLY_MODE=development in your .env / environment if needed.
+ENV QUICKLY_MODE=production
+
 # default command; environment variables (DATABASE_URL etc.) are supplied
 # at runtime rather than baked into the image
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

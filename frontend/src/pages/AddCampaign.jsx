@@ -13,6 +13,14 @@ export default function AddCampaign() {
     sending_hours_start: '09:00',
     sending_hours_end: '17:00',
     stop_on_reply: true,
+    // Tracking (off by default)
+    track_opens: false,
+    track_clicks: false,
+    // Unsubscribe
+    add_unsubscribe_header: true,
+    // sending format
+    send_first_as_text: false,
+    send_all_as_text: false,
   });
   const [message, setMessage] = useState(null);
   const navigate = useNavigate();
@@ -148,6 +156,62 @@ export default function AddCampaign() {
             />
             <span className="text-sm">Stop sending sequence when lead replies</span>
           </label>
+        </div>
+
+        {/* Tracking */}
+        <div className="border-t pt-3">
+          <p className="text-sm font-semibold text-gray-700 mb-1">Tracking</p>
+          <div className="space-y-1 pl-1">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" name="track_opens" checked={form.track_opens} onChange={handleChange} />
+              <span className="text-sm">Track email opens</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input type="checkbox" name="track_clicks" checked={form.track_clicks} onChange={handleChange} />
+              <span className="text-sm">Track link clicks</span>
+            </label>
+          </div>
+        </div>
+
+        {/* Unsubscribe */}
+        <div className="border-t pt-3">
+          <p className="text-sm font-semibold text-gray-700 mb-1">Unsubscribe</p>
+          <div className="space-y-1 pl-1">
+            <label className="flex items-center gap-2">
+              <input type="checkbox" name="add_unsubscribe_header" checked={form.add_unsubscribe_header} onChange={handleChange} />
+              <span className="text-sm">Add List-Unsubscribe header (recommended)</span>
+            </label>
+          </div>
+        </div>
+
+        {/* Sending format */}
+        <div className="border-t pt-3">
+          <p className="text-sm font-semibold text-gray-700 mb-1">Sending format</p>
+          <div className="space-y-1 pl-1">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                name="send_first_as_text"
+                checked={form.send_first_as_text}
+                disabled={form.send_all_as_text}
+                onChange={handleChange}
+              />
+              <span className="text-sm">Send first email as plain text (improves deliverability)</span>
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                name="send_all_as_text"
+                checked={form.send_all_as_text}
+                onChange={e => setForm(f => ({
+                  ...f,
+                  send_all_as_text: e.target.checked,
+                  send_first_as_text: e.target.checked ? false : f.send_first_as_text,
+                }))}
+              />
+              <span className="text-sm">Send all emails as plain text</span>
+            </label>
+          </div>
         </div>
         <div className="flex gap-2">
           <Button type="submit" variant="default">Create campaign</Button>

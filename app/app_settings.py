@@ -21,13 +21,8 @@ GMAIL_PUSH_TOPIC_KEY = "gmail_push_topic"
 GMAIL_PUSH_WEBHOOK_TOKEN_KEY = "gmail_push_webhook_token"
 GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY = "gmail_reply_sync_interval_minutes"
 
-# webhook configuration for email events (limits, token issues, etc.)
-EMAIL_EVENTS_WEBHOOK_URL_KEY = "email_events_webhook_url"
-EMAIL_EVENTS_WEBHOOK_TOKEN_KEY = "email_events_webhook_token"
-
-# dedicated webhook fired when a lead replies
-LEAD_REPLY_WEBHOOK_URL_KEY = "lead_reply_webhook_url"
-LEAD_REPLY_WEBHOOK_TOKEN_KEY = "lead_reply_webhook_token"
+# custom tracking domain (hostname only, e.g. "mail.yourclient.com")
+TRACKING_DOMAIN_KEY = "tracking_domain"
 
 
 # Generic helpers --------------------------------------------------------------
@@ -84,57 +79,6 @@ async def get_test_mode(db: AsyncSession) -> bool:
     """Return whether test mode is enabled."""
     value = await get_setting(db, TEST_MODE_KEY)
     return value and value.lower() in ("true", "1", "yes")
-
-
-# email events webhook helpers -------------------------------------------------
-async def get_email_event_webhook_config(db: AsyncSession) -> dict:
-    """Return configuration for the optional outbound webhook triggered on
-    hard limit or token expiration events.
-
-    The returned dictionary mirrors the structure our frontend uses for the
-    Gmail sync config so it can be rendered and edited in the same settings UI
-    if desired.
-    """
-    url = await get_setting(db, EMAIL_EVENTS_WEBHOOK_URL_KEY) or ""
-    token = await get_setting(db, EMAIL_EVENTS_WEBHOOK_TOKEN_KEY) or ""
-    return {
-        "webhook_url": url,
-        "webhook_url_configured": bool(url),
-        "webhook_token": token,
-        "webhook_token_configured": bool(token),
-    }
-
-
-async def save_email_event_webhook_config(
-    db: AsyncSession, webhook_url: str, webhook_token: str
-) -> None:
-    """Persist outbound webhook configuration for email events."""
-    await put_setting(db, EMAIL_EVENTS_WEBHOOK_URL_KEY, webhook_url.strip())
-    await put_setting(db, EMAIL_EVENTS_WEBHOOK_TOKEN_KEY, webhook_token.strip())
-    await db.flush()
-
-
-# Lead reply webhook helpers --------------------------------------------------
-
-async def get_lead_reply_webhook_config(db: AsyncSession) -> dict:
-    """Return configuration for the dedicated lead-reply webhook."""
-    url = await get_setting(db, LEAD_REPLY_WEBHOOK_URL_KEY) or ""
-    token = await get_setting(db, LEAD_REPLY_WEBHOOK_TOKEN_KEY) or ""
-    return {
-        "webhook_url": url,
-        "webhook_url_configured": bool(url),
-        "webhook_token": token,
-        "webhook_token_configured": bool(token),
-    }
-
-
-async def save_lead_reply_webhook_config(
-    db: AsyncSession, webhook_url: str, webhook_token: str
-) -> None:
-    """Persist the dedicated lead-reply webhook configuration."""
-    await put_setting(db, LEAD_REPLY_WEBHOOK_URL_KEY, webhook_url.strip())
-    await put_setting(db, LEAD_REPLY_WEBHOOK_TOKEN_KEY, webhook_token.strip())
-    await db.flush()
 
 
 async def set_test_mode(db: AsyncSession, enabled: bool) -> None:
@@ -200,3 +144,26 @@ async def save_gmail_sync_config(
     await put_setting(db, GMAIL_PUSH_WEBHOOK_TOKEN_KEY, webhook_token.strip())
     await put_setting(db, GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY, str(max(1, int(sync_interval_minutes))))
     await db.flush()
+
+
+# Tracking domain helpers ------------------------------------------------------
+
+async def get_tracking_base_url(db: AsyncSession) -> str:
+    """Return the app-level fallback base URL used when an inbox has no custom domain.
+
+    Tracking domains are now per-inbox (``Inbox.tracking_domain``).  This
+    function remains for backward-compatibility but no longer queries the DB.
+    """
+    return settings.base_url.rstrip("/")
+
+
+def get_inbox_tracking_base(inbox, fallback_base_url: str) -> str:
+    """Return the tracking base URL for *inbox*.
+
+    If ``inbox.tracking_domain`` is set, returns ``https://<tracking_domain>``.
+    Otherwise falls back to *fallback_base_url* (the app's own base URL).
+    """
+    td = getattr(inbox, "tracking_domain", None)
+    if td:
+        return f"https://{td}"
+    return fallback_base_url.rstrip("/")

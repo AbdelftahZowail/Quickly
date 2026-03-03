@@ -46,7 +46,7 @@ async def main():
                 dummy_inbox = Inbox(
                     email=f"test_inbox_{i}@example.com",
                     display_name=f"Test Inbox {i}",
-                    provider="resend",
+                    provider="gmail",
                     max_emails_per_day=10,
                     wait_minutes_between=10
                 )

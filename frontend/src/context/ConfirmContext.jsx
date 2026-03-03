@@ -1,12 +1,10 @@
 import { createContext, useContext, useState, useCallback } from 'react';
-import { useDarkMode } from './DarkModeContext';
 import { Button } from '../components/ui/Button';
 
 const ConfirmContext = createContext(null);
 
 export function ConfirmProvider({ children }) {
   const [dialog, setDialog] = useState({ visible: false, message: '', resolve: null });
-  const { darkMode } = useDarkMode();
 
   const confirm = useCallback((message) => {
     return new Promise((res) => {
@@ -19,20 +17,17 @@ export function ConfirmProvider({ children }) {
     setDialog({ visible: false, message: '', resolve: null });
   };
 
-  // decide background color explicitly to override any media query
-  const dialogBg = darkMode ? '#2d3748' /* gray-800 */ : '#ffffff';
-
   return (
     <ConfirmContext.Provider value={confirm}>
       {children}
       {dialog.visible && (
-        <div data-darkreader-ignore className="fixed inset-0 bg-white bg-opacity-30 dark:bg-black dark:bg-opacity-50 backdrop-blur-sm flex items-center justify-center z-50">
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div
             data-darkreader-ignore
-            className="p-6 rounded-lg shadow-lg max-w-sm"
-            style={{ backgroundColor: dialogBg }}
+            className="p-6 rounded shadow max-w-sm w-full"
+            style={{ backgroundColor: 'white' }}
           >
-            <p className="mb-4 break-words text-gray-900 dark:text-gray-100" style={{ color: 'inherit' }}>{dialog.message}</p>
+            <p className="mb-4 break-words text-gray-800">{dialog.message}</p>
             <div className="flex justify-end gap-2">
               <Button variant="outline" size="sm" onClick={() => handleResult(false)}>
                 Cancel

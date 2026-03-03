@@ -52,22 +52,77 @@ jobs:
           tag_name: ${{ steps.tagger.outputs.TAG }}
           release_name: ${{ steps.tagger.outputs.TAG }}
           body: |
-            🖥️ **Run locally or on a VPS**
+            ## What's in this release
 
-            1. Install Docker Desktop
-            2. Download `docker-compose.yml`, `Caddyfile`, and `.env.example` from the files below
-            3. Rename `.env.example` to `.env` and fill in your API keys
-            4. For HTTPS: set `CADDY_HOST=yourdomain.com` in `.env`
-            5. Run `docker compose up`
-            6. Open `http://localhost` (or `https://yourdomain.com` if you set a domain)
+            Docker image: `azowail/quickly:${{ steps.tagger.outputs.TAG }}`
+            Also tagged as: `azowail/quickly:latest`
 
-            ☁️ **Deploy on Railway / Render**
+            ---
 
-            1. Create a new project
-            2. Deploy image `azowail/quickly:${{ steps.tagger.outputs.TAG }}` from Docker Hub
-            3. Add a Postgres plugin
-            4. Copy the variables from `.env.example` into your dashboard and fill them in
-            5. Done — you'll get a public URL
+            ## Setup Options
+
+            ### 🖥️ Option 1 — Self-hosted VPS (recommended)
+
+            Requires Docker and a domain pointed at your server.
+
+            ```bash
+            mkdir quickly && cd quickly
+            curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
+            curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
+            curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+            mv .env.example .env
+            # Edit .env — set CADDY_HOST, BASE_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+            docker compose up -d
+            ```
+
+            Caddy handles HTTPS automatically with Let's Encrypt. Open `https://yourdomain.com`.
+
+            **Required env vars:**
+            | Variable | Description |
+            |---|---|
+            | `CADDY_HOST` | Your domain (e.g. `yourdomain.com`) |
+            | `BASE_URL` | Full URL with protocol (e.g. `https://yourdomain.com`) |
+            | `GOOGLE_CLIENT_ID` | Google OAuth 2.0 client ID |
+            | `GOOGLE_CLIENT_SECRET` | Google OAuth 2.0 client secret |
+
+            ---
+
+            ### ☁️ Option 2 — PaaS (Railway, Render, Fly.io, etc.)
+
+            1. Create a new service using Docker image `azowail/quickly:${{ steps.tagger.outputs.TAG }}`
+            2. Add a managed PostgreSQL database; set its connection string as `DATABASE_URL`
+            3. Set `BASE_URL` to your platform's assigned URL
+            4. Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`
+            5. Deploy — no Caddyfile needed (the platform handles HTTPS)
+
+            ---
+
+            ### 🛠️ Option 3 — Local / developer setup
+
+            ```bash
+            git clone https://github.com/azowail/quickly.git
+            cd quickly
+            cp .env.example .env   # fill in GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL
+            docker compose -f docker-compose.dev.yml up
+            ```
+
+            Or run manually:
+            ```bash
+            pip install -r requirements.txt
+            uvicorn app.main:app --reload   # backend on :8000
+            cd frontend && npm install && npm run dev   # frontend on :5173
+            ```
+
+            ---
+
+            ## After Launching
+
+            1. Open the app and go to **Inboxes** → add a Gmail account via OAuth
+            2. Create a campaign with sequences
+            3. Add leads — the queue engine handles scheduling automatically
+            4. Monitor sends in **Schedule** or via `GET /api/status`
+
+            > **Docs:** [INSTALL.md](https://github.com/azowail/quickly/blob/main/docs/INSTALL.md) · [API.md](https://github.com/azowail/quickly/blob/main/docs/API.md) · [WEBHOOKS.md](https://github.com/azowail/quickly/blob/main/docs/WEBHOOKS.md)
           draft: false
           prerelease: false
 

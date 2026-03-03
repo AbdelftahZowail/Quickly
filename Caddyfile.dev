@@ -1,0 +1,45 @@
+# Caddyfile.dev — development variant of the Caddy configuration.
+#
+# Used by docker-compose.dev.yml to test tracking-domain routing locally.
+# The backend service is called "backend" in the dev compose, so we reference
+# that instead of "app" (production name).
+#
+# How to test custom tracking domains locally
+# -------------------------------------------
+# 1. Start the stack:  docker compose -f docker-compose.dev.yml up
+# 2. Point a real (sub)domain to your public IP via DNS, or edit /etc/hosts
+#    to map the hostname to 127.0.0.1.
+# 3. Add the tracking_domain to the inbox via the Inboxes UI.
+# 4. Send an email — the pixel / click URLs will use the custom hostname.
+# 5. For HTTPS (on_demand_tls) to work you need a publicly reachable server;
+#    for local-only testing HTTP on port 80 is sufficient.
+
+{
+    on_demand_tls {
+        ask http://backend:8000/api/caddy/ask
+    }
+}
+
+# Primary entry point — HTTP on :80 for local dev (no certificate needed).
+# Override with CADDY_HOST=yourdomain.com in .env for HTTPS.
+{$CADDY_HOST::80} {
+    reverse_proxy backend:8000
+}
+
+# localhost — serve with a Caddy-managed internal (self-signed) certificate
+# so that https://localhost works in dev without consulting the ask endpoint
+# or the public ACME CA.
+localhost {
+    tls internal
+    reverse_proxy backend:8000
+}
+
+# Catch-all for custom tracking domains arriving on :443.
+# Caddy will provision an SSL cert automatically if the domain is approved
+# by /api/caddy/ask (i.e. it matches an inbox's tracking_domain setting).
+:443 {
+    tls {
+        on_demand
+    }
+    reverse_proxy backend:8000
+}

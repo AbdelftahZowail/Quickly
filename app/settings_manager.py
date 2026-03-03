@@ -9,7 +9,6 @@ python-dotenv automatically.
 """
 from dotenv import load_dotenv
 import logging
-from typing import Literal
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # load environment variables from .env file if present
@@ -36,23 +35,6 @@ class Settings:
         
         # Base URL (used by Google redirect calculation, links, etc.)
         self.base_url: str = os.getenv("BASE_URL", "http://localhost:8000")
-        
-        # Email provider
-        # Historically this default was used by send_email when no provider was
-        # specified.  Today individual inbox records carry their own provider and
-        # callers should pass that value; the global setting is mostly kept for
-        # backwards compatibility and for display in the UI.
-        self.email_provider: Literal["resend", "smtp", "gmail"] = "resend"
-        
-        # Resend API
-        self.resend_api_key: str = ""
-        
-        # SMTP settings
-        self.smtp_host: str = "localhost"
-        self.smtp_port: int = 1025
-        self.smtp_user: str = ""
-        self.smtp_password: str = ""
-        self.smtp_use_tls: bool = False
         
         # Google OAuth (also stored in AppSetting for backward compat)
         self.google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -92,28 +74,11 @@ class Settings:
             self.database_url = data["database_url"]
         if "base_url" in data:
             self.base_url = data["base_url"]
-        if "email_provider" in data:
-            self.email_provider = data["email_provider"]
-        if "resend_api_key" in data:
-            self.resend_api_key = data["resend_api_key"]
-        if "smtp_host" in data:
-            self.smtp_host = data["smtp_host"]
-        if "smtp_port" in data:
-            self.smtp_port = int(data["smtp_port"])
-        if "smtp_user" in data:
-            self.smtp_user = data["smtp_user"]
-        if "smtp_password" in data:
-            self.smtp_password = data["smtp_password"]
-        if "smtp_use_tls" in data:
-            self.smtp_use_tls = str(data["smtp_use_tls"]).lower() in ("true", "1", "yes")
         # Google OAuth credentials are supplied exclusively via environment
         # variables (or a `.env` file) and are **not** read from the
         # database.  Prior releases stored them in the `app_setting` table,
         # but that behavior was removed so the process always uses the value
         # that was present when it started.
-        #
-        # The `Settings` constructor already reads the env vars so there is
-        # nothing to do here.
         if "queue_check_interval_minutes" in data:
             self.queue_check_interval_minutes = int(data["queue_check_interval_minutes"])
         if "test_mode" in data:
@@ -187,15 +152,6 @@ async def initialize_settings(db: AsyncSession):
         default_data = {
             "database_url": settings.database_url,
             "base_url": settings.base_url,
-            "email_provider": settings.email_provider,
-            "resend_api_key": settings.resend_api_key,
-            "smtp_host": settings.smtp_host,
-            "smtp_port": str(settings.smtp_port),
-            "smtp_user": settings.smtp_user,
-            "smtp_password": settings.smtp_password,
-            "smtp_use_tls": str(settings.smtp_use_tls),
-            # google_client_id/secret intentionally omitted; they are read from
-            # the environment and should never be written to the database.
             "queue_check_interval_minutes": str(settings.queue_check_interval_minutes),
             "test_mode": str(settings.test_mode),
             "time_offset_days": str(settings.time_offset_days),

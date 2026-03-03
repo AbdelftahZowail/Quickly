@@ -9,7 +9,7 @@ Covers:
 """
 import pytest
 from datetime import datetime, date, time, timedelta
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 import inspect
 
 from app.models import QueueSlot, EmailLog, EmailClick, CampaignLead, Lead
@@ -1470,7 +1470,11 @@ class TestCampaignStats:
     """Verify that campaign listing/get endpoints include aggregated metrics.
 
     These metrics drive the simplified analytics view on the frontend and are
-    intentionally kept basic (lead count, emails sent, replies, sequences).
+    intentionally kept basic (lead count, emails sent, replies, sequences), plus
+    the number of pending scheduled emails.  The latter field is used by the
+    frontend to compute progress as ``sent / (sent + scheduled)`` so that a
+    replied lead (whose remaining slots are deleted) no longer drags down the
+    progress bar.
     """
 
     async def test_list_and_get_include_counts(self, session):
@@ -1495,7 +1499,7 @@ class TestCampaignStats:
         await make_email_log(session, lead1.id, camp.id, sequence_index=1)
         await make_email_log(session, lead2.id, camp.id, sequence_index=0)
 
-        # one reply
+        # one reply (status itself doesn't matter for this basic test)
         session.add(LeadReply(lead_id=lead1.id, campaign_id=camp.id))
         await session.flush()
 
@@ -1506,12 +1510,72 @@ class TestCampaignStats:
         assert stats.sequences == 2
         assert stats.emails_sent == 3
         assert stats.replies == 1
+        # no queue slots were ever created in this test
+        assert stats.scheduled == 0
         # new fields default to zero
         assert getattr(stats, 'open_rate', 0) == 0
         assert getattr(stats, 'click_rate', 0) == 0
 
         res_get = await get_campaign(camp.id, db=session)
         assert res_get.stats == stats
+
+    async def test_stats_reflects_reply_and_slot_deletion(self, session):
+        """When a lead replies we clear its remaining slots; stats should
+        report zero pending scheduled emails so that progress appears complete.
+        """
+        from app.routers.campaigns import list_campaigns, get_campaign
+        from app.models import LeadReply, QueueSlot, CampaignLead, Lead
+        from datetime import datetime
+
+        camp = await make_campaign(session, name="stats-reply")
+        inbox = await make_inbox(session)
+        await make_campaign_inbox(session, camp.id, inbox.id)
+        # two sequences
+        await make_sequence(session, camp.id, position=0)
+        await make_sequence(session, camp.id, position=1)
+
+        # single lead
+        lead = await make_lead(session, email="reply@example.com")
+        await make_campaign_lead(session, camp.id, lead.id)
+
+        # simulate one sent email
+        await make_email_log(session, lead.id, camp.id, sequence_index=0)
+
+        # create a pending slot for the second sequence
+        cl_res = await session.execute(
+            select(CampaignLead.id).where(
+                CampaignLead.campaign_id == camp.id,
+                CampaignLead.lead_id == lead.id,
+            )
+        )
+        cl_id = cl_res.scalar_one()
+        session.add(QueueSlot(
+            campaign_lead_id=cl_id,
+            inbox_id=inbox.id,
+            sequence_index=1,
+            scheduled_date=datetime.utcnow(),
+            position_in_day=1,
+        ))
+        await session.flush()
+
+        # ensure stats before reply show one scheduled email
+        before = (await list_campaigns(db=session))[0].stats
+        assert before.emails_sent == 1
+        assert before.scheduled == 1
+
+        # now simulate reply: mark lead replied, record LeadReply, delete slots
+        lead.status = "replied"
+        session.add(LeadReply(lead_id=lead.id, campaign_id=camp.id))
+        await session.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl_id))
+        await session.flush()
+
+        after_list = (await list_campaigns(db=session))[0].stats
+        assert after_list.emails_sent == 1
+        assert after_list.scheduled == 0
+        # lead should no longer be counted as "active"
+        assert after_list.total_leads == 0
+        after_get = (await get_campaign(camp.id, db=session)).stats
+        assert after_get == after_list
 
 
 class TestCampaignsHasLeads:

@@ -6,9 +6,37 @@
 #   - VPS with a domain:  set CADDY_HOST=yourdomain.com in .env — Caddy will
 #                         automatically obtain and renew a Let's Encrypt certificate.
 #
-# For custom tracking domains (future feature), add additional site blocks or
-# use on_demand_tls once your FastAPI /api/caddy/ask endpoint is ready.
+# Custom tracking domains:
+#   Users add a CNAME from their domain (e.g. mail.client.com) to your
+#   server's hostname.  Caddy asks /api/caddy/ask before provisioning a
+#   certificate; only domains registered in the Quickly settings are approved.
+#   Configure your tracking domain at Settings → Custom Tracking Domain.
 
+# ── Global configuration ─────────────────────────────────────────────────────
+{
+    # Before issuing a certificate for any hostname, Caddy asks this endpoint.
+    # The app returns 200 (allow) or 403 (deny).
+    on_demand_tls {
+        ask http://app:8000/api/caddy/ask
+    }
+}
+
+# ── Primary site block ────────────────────────────────────────────────────────
+# When CADDY_HOST is unset the site binds to :80 (no TLS, local dev).
+# When CADDY_HOST=yourdomain.com Caddy auto-provisions a Let's Encrypt cert.
 {$CADDY_HOST::80} {
+    reverse_proxy app:8000
+}
+
+# ── Custom tracking domain catch-all ─────────────────────────────────────────
+# Handles any other hostname that CNAME-points to this server (e.g. a user's
+# custom tracking domain).  Certificates are provisioned on first request via
+# on_demand_tls above, so no manual cert management is required.
+# This block is effectively inactive when running on :80 (local dev with no
+# inbound HTTPS traffic).
+:443 {
+    tls {
+        on_demand
+    }
     reverse_proxy app:8000
 }

@@ -24,20 +24,42 @@ body {
 
 /* base form/button/link/table styles to harmonize the UI */
 button {
-  @apply inline-flex items-center justify-center font-medium rounded-md focus:outline-none focus:ring-2 focus:ring-offset-2;
+  @apply inline-flex items-center justify-center font-medium rounded-md;
+}
+
+/* Remove focus outlines on mouse click globally; keep them for keyboard nav */
+*:focus {
+  outline: none !important;
+  box-shadow: none !important;
+}
+*:focus-visible {
+  outline: 2px solid theme('colors.teal.500') !important;
+  outline-offset: 2px;
 }
 
 
 a { @apply text-teal-500 hover:underline; }
 
 input[type="text"], input[type="email"], input[type="number"], input[type="password"], select, textarea {
-  @apply block w-full rounded-md border-gray-300 shadow-sm focus:ring-teal-500 focus:border-teal-500;
+  @apply block w-full rounded-md border-gray-300 shadow-sm;
+}
+input[type="text"]:focus-visible, input[type="email"]:focus-visible,
+input[type="number"]:focus-visible, input[type="password"]:focus-visible,
+select:focus-visible, textarea:focus-visible {
+  @apply ring-teal-500 border-teal-500;
 }
 
 /* make table cells easier to scan */
 table { @apply w-full border-collapse; }
 table th, table td { @apply px-2 py-1 border border-gray-200 text-left; }
 table tr:nth-child(even){ @apply bg-gray-50; }
+
+/* prevent page-level horizontal scroll; tables scroll inside their container */
+html, body { overflow-x: hidden; }
+.overflow-auto, .overflow-x-auto { -webkit-overflow-scrolling: touch; }
+
+/* Ensure page content doesn't overflow horizontally */
+.p-6, .p-8 { max-width: 100%; overflow-x: hidden; }
 
 /* custom utilities */
 /* .card utility removed in favor of Card component */
@@ -90,6 +112,51 @@ html, body, #root {
   height: 100%;
 }
 
+/* ── Custom slim scrollbars ─────────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-button {
+  display: none;
+  height: 0;
+  width: 0;
+}
+/* Light mode: soft, low-contrast thumb */
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 0, 0, 0.26);
+}
+/* Dark mode: slightly lighter than the background */
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.30);
+}
+/* Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+.dark * {
+  scrollbar-color: rgba(255, 255, 255, 0.14) transparent;
+}
+
+/* Remove focus outlines inside recharts SVG */
+.recharts-wrapper *:focus,
+.recharts-wrapper *:focus-visible,
+.recharts-surface:focus,
+.recharts-surface:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
 
 /* simple spinner */
 .loader {
