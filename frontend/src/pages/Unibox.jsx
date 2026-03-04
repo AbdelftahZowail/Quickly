@@ -49,6 +49,39 @@ function makeReplySubject(subject) {
   return /^re:/i.test(clean) ? clean : `Re: ${clean}`;
 }
 
+/**
+ * Build a quoted-reply HTML block following RFC 2646 / email client conventions.
+ * The block uses a <details> element so it renders collapsed by default in
+ * email clients that support it (most modern webmail / HTML viewers), and falls
+ * back to a visible blockquote in plain clients.
+ */
+function buildQuotedBlock(messages) {
+  if (!messages || messages.length === 0) return '';
+  // Use the last received message as the primary quote target
+  const lastReceived = [...messages].reverse().find(m => m.direction === 'received') || messages[messages.length - 1];
+  const from = lastReceived?.from || '';
+  const ts = lastReceived?.timestamp ? new Date(lastReceived.timestamp).toLocaleString() : '';
+  const header = [from && `From: ${from}`, ts && `Date: ${ts}`].filter(Boolean).join(' &nbsp;|&nbsp; ');
+
+  const bodyHtml = lastReceived?.body_html?.trim()
+    ? DOMPurify.sanitize(lastReceived.body_html, {
+        USE_PROFILES: { html: true },
+        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
+      })
+    : (lastReceived?.body_plain || lastReceived?.snippet || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+
+  if (!bodyHtml) return '';
+
+  return `<details style="margin-top:12px;">
+<summary style="cursor:pointer;color:#6b7280;font-size:0.8em;user-select:none;">&#8230; On ${ts || 'a previous date'}, ${from || 'recipient'} wrote:</summary>
+<blockquote style="margin:8px 0 0 0;padding:8px 12px;border-left:3px solid #d1d5db;color:#374151;font-size:0.9em;">
+  <div style="font-size:0.8em;color:#9ca3af;margin-bottom:6px;">${header}</div>
+  ${bodyHtml}
+</blockquote>
+</details>`;
+}
+
 function buildHtmlDoc(html) {
   const safeHtml = DOMPurify.sanitize(html || '', {
     USE_PROFILES: { html: true },
@@ -127,6 +160,9 @@ export default function Unibox() {
     { value: 'bounced', label: 'Bounced' },
     { value: 'interested', label: 'Interested' },
     { value: 'not_interested', label: 'Not Interested' },
+    { value: 'out_of_office', label: 'Out of Office' },
+    { value: 'wrong_person', label: 'Wrong Person' },
+    { value: 'auto_reply', label: 'Auto Reply' },
   ];
 
   const STATUS_COLORS = {
@@ -136,6 +172,9 @@ export default function Unibox() {
     bounced: 'bg-red-50 text-red-600 border-red-200',
     interested: 'bg-teal-50 text-teal-700 border-teal-200',
     not_interested: 'bg-orange-50 text-orange-700 border-orange-200',
+    out_of_office: 'bg-sky-50 text-sky-700 border-sky-200',
+    wrong_person: 'bg-purple-50 text-purple-700 border-purple-200',
+    auto_reply: 'bg-slate-50 text-slate-600 border-slate-200',
   };
 
   // load one page of conversations.  when `append` is true we merge the
@@ -213,11 +252,13 @@ export default function Unibox() {
       const lastReceived = [...messages].reverse().find(m => m.direction === 'received');
       const fallback = messages[messages.length - 1];
       const replyTo = extractEmailAddress(lastReceived?.from || fallback?.from || '');
+      const quotedBlock = buildQuotedBlock(messages);
       setCompose({
         to_email: replyTo,
         subject: makeReplySubject(data?.subject || ''),
         body: '',
-        is_html: false,
+        is_html: true,
+        quoted_html: quotedBlock,
       });
 
       // no explicit view mode state needed; rendering will choose based on msg fields
@@ -419,6 +460,18 @@ export default function Unibox() {
       return;
     }
 
+    // Build final body: wrap user text in a <p> then append the quoted block
+    const userText = compose.body;
+    let finalBody = userText;
+    let finalIsHtml = compose.is_html;
+    if (compose.quoted_html) {
+      // Escape user's plain text and combine with the quoted block as HTML
+      const escapedText = userText
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+      finalBody = `<p style="margin:0 0 8px 0;">${escapedText}</p>${compose.quoted_html}`;
+      finalIsHtml = true;
+    }
+
     setSending(true);
     try {
       await uniboxRequest('/unibox/send', {
@@ -428,9 +481,9 @@ export default function Unibox() {
           inbox_id: selectedThread.inbox_id,
           to_email: compose.to_email.trim(),
           subject: compose.subject,
-          body: compose.body,
+          body: finalBody,
           thread_id: selectedThread.thread_id,
-          is_html: compose.is_html,
+          is_html: finalIsHtml,
         }),
       });
       notify({ type: 'success', message: 'Reply sent.' });
@@ -618,10 +671,22 @@ export default function Unibox() {
                       <textarea
                         value={compose.body}
                         onChange={e => setCompose(c => ({ ...c, body: e.target.value }))}
-                        className="w-full min-h-[180px] resize-y rounded-xl border-gray-300 shadow-sm focus:ring-teal-500 focus:border-teal-500"
+                        className="w-full min-h-[180px] resize-y rounded-xl border border-gray-300 shadow-sm focus:ring-teal-500 focus:border-teal-500 p-2 text-sm"
                         placeholder="Write your reply..."
                         required
                       />
+                      {/* Quoted message preview — collapsed by default */}
+                      {compose.quoted_html && (
+                        <details className="mt-2 text-xs text-gray-500">
+                          <summary className="cursor-pointer select-none hover:text-gray-700">
+                            &#8230; quoted message will be appended (collapsed for recipient)
+                          </summary>
+                          <div
+                            className="mt-2 pl-3 border-l-2 border-gray-300 text-gray-600 text-xs max-h-40 overflow-y-auto"
+                            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(compose.quoted_html) }}
+                          />
+                        </details>
+                      )}
                       <div className="mt-3 flex items-center justify-end gap-2">
                         <Button
                           type="button"

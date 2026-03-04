@@ -201,15 +201,22 @@ async def _completion_with_temperature_handling(
 _REPLY_CLASSIFIER_SYSTEM_PROMPT = """\
 You are an email reply classifier for a cold-email outreach tool.
 
-You will be given the original email that was sent to the lead, followed by the
-lead's reply.  Using both pieces of context, classify the reply as one of:
+You will be given the conversation thread (original email + any follow-ups) with
+timestamps, followed by the lead's latest reply.  Using all of this context,
+classify the lead's reply as one of:
 
   - "interested"     — the lead shows positive engagement: wants more info,
                        schedules a call, asks questions about the offer, etc.
   - "not_interested" — the lead declines, asks to be removed, says "unsubscribe",
                        gives a negative/neutral response, or shows no intent to engage.
+  - "out_of_office"  — the reply is an automatic out-of-office/vacation autoresponder.
+  - "wrong_person"   — the lead indicates they are not the right contact (e.g.
+                       "you have the wrong person", "I don't handle this", etc.).
+  - "auto_reply"     — the reply is a generic automated acknowledgement that is NOT
+                       an out-of-office (e.g. ticket confirmation, CRM auto-reply).
 
-Respond with ONLY one word: interested  OR  not_interested
+Respond with ONLY one of these exact values:
+  interested  |  not_interested  |  out_of_office  |  wrong_person  |  auto_reply
 Do NOT include any other text, explanation, or punctuation.
 """
 
@@ -219,11 +226,13 @@ async def classify_reply(
     reply_text: str,
     email_subject: str = "",
     email_body: str = "",
-) -> Literal["interested", "not_interested"] | None:
-    """Classify *reply_text* as interested/not_interested using the reply_classifier feature.
+    thread_messages: list[dict] | None = None,
+) -> Literal["interested", "not_interested", "out_of_office", "wrong_person", "auto_reply"] | None:
+    """Classify *reply_text* using the reply_classifier feature.
 
-    Optionally accepts the original *email_subject* and *email_body* to give the
-    AI more context about what the lead is responding to.
+    Accepts the original *email_subject* and *email_body* for basic context, or
+    a richer *thread_messages* list (``[{"from": ..., "timestamp": ...,
+    "body": ...}, ...]``) to include the full conversation thread with timestamps.
 
     Returns ``None`` if the feature is disabled, settings are incomplete, or the
     provider call fails.  The caller must handle ``None`` gracefully.
@@ -237,16 +246,27 @@ async def classify_reply(
     if not (enabled and provider and model and api_key):
         return None
 
-    # Build user message — include original email for context when available
+    # Build user message — prefer full thread context when available
     parts: list[str] = []
-    if email_subject or email_body:
+    if thread_messages:
+        parts.append("=== CONVERSATION THREAD ===")
+        for msg in thread_messages:
+            ts = msg.get("timestamp", "")
+            frm = msg.get("from", "")
+            body = (msg.get("body") or "")[:1500]
+            header = f"[{ts}] {frm}" if ts else frm
+            parts.append(f"--- {header} ---")
+            parts.append(body)
+            parts.append("")
+    elif email_subject or email_body:
         parts.append("=== ORIGINAL EMAIL SENT ===")
         if email_subject:
             parts.append(f"Subject: {email_subject}")
         if email_body:
             parts.append(email_body[:2000])
         parts.append("")
-        parts.append("=== LEAD'S REPLY ===")
+
+    parts.append("=== LEAD'S LATEST REPLY ===")
     parts.append(reply_text[:4000])
     user_content = "\n".join(parts)
 
@@ -263,8 +283,15 @@ async def classify_reply(
             temperature=0,
         )
         raw = response.choices[0].message.content.strip().lower()
+        # Check in order: multi-word values first to avoid substring collisions
         if "not_interested" in raw:
             return "not_interested"
+        if "out_of_office" in raw:
+            return "out_of_office"
+        if "wrong_person" in raw:
+            return "wrong_person"
+        if "auto_reply" in raw:
+            return "auto_reply"
         if "interested" in raw:
             return "interested"
         log.warning(
