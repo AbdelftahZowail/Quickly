@@ -152,6 +152,19 @@ async def init_db():
             except OperationalError:
                 pass
 
+            # Sequence: preview/preheader text for HTML emails
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS sequence
+                        ADD COLUMN IF NOT EXISTS preview_text varchar(512);
+                        """
+                    )
+                )
+            except OperationalError:
+                pass
+
             # CampaignLead: AI interest classification fields
             try:
                 await conn.execute(
@@ -199,6 +212,11 @@ async def init_db():
             # Sequence explicit HTML flag
             try:
                 await conn.execute(text("ALTER TABLE sequence ADD COLUMN is_html BOOLEAN"))
+            except Exception:
+                pass
+            # Sequence preview text
+            try:
+                await conn.execute(text("ALTER TABLE sequence ADD COLUMN preview_text VARCHAR(512)"))
             except Exception:
                 pass
             # CampaignLead: AI interest classification fields

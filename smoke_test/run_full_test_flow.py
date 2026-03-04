@@ -24,14 +24,25 @@ above, but you are welcome to edit the file if you need alternative timing or
 additional logging.
 """
 
+import os
+import sys
 import asyncio
 
-from app.database import AsyncSessionLocal
+# Ensure the project root is on sys.path when the script is executed directly
+# (consistent with other smoke_test helpers such as populate_test_data.py).
+# When running via `python smoke_test/run_full_test_flow.py`, the interpreter
+# adds `smoke_test` to sys.path which hides the `app` package.  Prepend the
+# workspace root so imports like ``from app...`` succeed.
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from app.database import AsyncSessionLocal, init_db
 from app import time as time_provider
 
-# use FastAPI test client for endpoint calls
-from fastapi.testclient import TestClient
-from app.main import app
+# We'll call endpoint logic directly instead of using TestClient to avoid
+# async loop conflicts.  Import the route handlers we need.
+from app.routers.schedule import recalculate_all_campaigns, validate_queue
+
+# TestClient is no longer required; we invoke handlers directly
 
 # import the helpers from the existing scripts
 import populate_test_data
@@ -46,41 +57,26 @@ async def _reset_time_offset() -> None:
 
 
 async def _recalculate_all() -> None:
-    """Trigger the recalculation endpoint on the running application.
+    """Invoke the recalc handler directly against a DB session.
 
-    This uses FastAPI's TestClient so we don't need a live server process; the
-    same startup events (DB initialization, etc.) run automatically.
+    This skips HTTP and avoids any loop/thread issues.  Output mirrors the
+    JSON returned by the API.
     """
-    print("-> requesting /api/schedule/recalculate-all")
+    print("-> performing global recalculation")
+    async with AsyncSessionLocal() as session:
+        result = await recalculate_all_campaigns(session)
 
-    def sync_call():
-        with TestClient(app) as client:
-            resp = client.post("/api/schedule/recalculate-all")
-            resp.raise_for_status()
-            return resp.json()
-
-    result = await asyncio.to_thread(sync_call)
-    # the endpoint already logs details; print a concise summary here
     print(f"-> recalculation complete: strategy={result.get('strategy')} "
           f"processed={result.get('campaigns_processed')} "
           f"slots={result.get('total_slots')} (initial {result.get('initial_slots')})")
 
 
 async def _validate() -> bool:
-    """POST to the validation endpoint and display its result.
+    """Run the queue validator directly and print results."""
+    print("-> running scheduled-queue validation")
+    async with AsyncSessionLocal() as session:
+        data = await validate_queue(session)
 
-    Returns True if the endpoint reported errors (mirrors previous return type).
-    """
-    print("-> requesting /api/schedule/validate-queue")
-
-    def sync_call():
-        with TestClient(app) as client:
-            resp = client.post("/api/schedule/validate-queue")
-            resp.raise_for_status()
-            return resp.json()
-
-    data = await asyncio.to_thread(sync_call)
-    # emulate validator output for human readability
     total_slots = data.get("total_slots_checked")
     issues = data.get("issues", [])
     print(f"-> validated {total_slots} slots, found {len(issues)} issue(s)")
@@ -110,6 +106,9 @@ async def _simulate_two_days() -> None:
 
 async def main() -> None:
     validation_failed = False
+    # make sure database is initialized (tables/migrations)
+    await init_db()
+
     # 1. delete existing test data and reset time
     print("STEP 1: cleanup old test data")
     await populate_test_data.delete_test_data()

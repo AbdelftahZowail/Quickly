@@ -1263,7 +1263,7 @@ const QUILL_FORMATS = [
   'list','bullet','link','blockquote','code-block',
 ];
 
-function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, isFirstSequence, campaign, required }) {
+function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewText, onPreviewTextChange, isFirstSequence, campaign, required }) {
   const [copiedVar, setCopiedVar] = useState(null);
   const notify = useNotify();
 
@@ -1315,6 +1315,22 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, isFirstSe
           rows={5}
           placeholder="Email body…"
         />
+      )}
+      {effectiveHtml && (
+        <div className="mt-2">
+          <label className="block text-xs font-medium text-gray-500 mb-1">
+            Preview text
+            <span className="ml-1 font-normal text-gray-400">— shown as the inbox snippet and in push notifications</span>
+          </label>
+          <input
+            type="text"
+            maxLength={150}
+            value={previewText || ''}
+            onChange={e => onPreviewTextChange(e.target.value)}
+            className="w-full border rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300 placeholder-gray-400"
+            placeholder="Optional — leave blank to use the email body text"
+          />
+        </div>
       )}
       <p className="mt-1 text-xs text-gray-500 flex flex-wrap items-center gap-1">
         <span>Variables:</span>
@@ -1507,7 +1523,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
   const confirm     = useConfirm();
   const loadingCtrl = useLoading();
   const [pos, setPos] = useState(sequences.length);
-  const [form, setForm] = useState({ subject: '', body: '', wait_days_after_previous: 0, is_html: false });
+  const [form, setForm] = useState({ subject: '', body: '', wait_days_after_previous: 0, is_html: false, preview_text: '' });
   const [msg,  setMsg]  = useState(null);
   const [editing,         setEditing]         = useState(null);
   const [originalEditing, setOriginalEditing] = useState(null);
@@ -1526,7 +1542,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
   const selectedSeq = selectedIdx !== null && sequences[selectedIdx] ? sequences[selectedIdx] : null;
 
   const openEdit = (seq) => {
-    const copy = { ...seq, is_html: seq.is_html ?? false };
+    const copy = { ...seq, is_html: seq.is_html ?? false, preview_text: seq.preview_text ?? '' };
     setEditing(copy);
     setOriginalEditing(copy);
     setEditDirty(false);
@@ -1550,7 +1566,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
     e.preventDefault();
     try {
       await api.post(`/campaigns/${campaignId}/sequences`, { ...form, position: pos });
-      setForm({ subject: '', body: '', wait_days_after_previous: 0, is_html: false });
+      setForm({ subject: '', body: '', wait_days_after_previous: 0, is_html: false, preview_text: '' });
       setMsg({ type: 'success', text: 'Sequence added' });
       setShowAddForm(false);
       refresh();
@@ -1688,7 +1704,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
-                <SequenceBodyEditor value={editing.body} onChange={val => updateEditing({ body: val })} isHtml={editing.is_html ?? false} onIsHtmlChange={v => updateEditing({ is_html: v })} isFirstSequence={editing.position === 0} campaign={campaign} required />
+                <SequenceBodyEditor value={editing.body} onChange={val => updateEditing({ body: val })} isHtml={editing.is_html ?? false} onIsHtmlChange={v => updateEditing({ is_html: v })} previewText={editing.preview_text ?? ''} onPreviewTextChange={v => updateEditing({ preview_text: v })} isFirstSequence={editing.position === 0} campaign={campaign} required />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Wait days after previous step</label>
@@ -1746,7 +1762,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
-                <SequenceBodyEditor value={form.body} onChange={val => setForm(f => ({ ...f, body: val }))} isHtml={form.is_html} onIsHtmlChange={v => setForm(f => ({ ...f, is_html: v }))} isFirstSequence={pos === 0} campaign={campaign} required />
+                <SequenceBodyEditor value={form.body} onChange={val => setForm(f => ({ ...f, body: val }))} isHtml={form.is_html} onIsHtmlChange={v => setForm(f => ({ ...f, is_html: v }))} previewText={form.preview_text ?? ''} onPreviewTextChange={v => setForm(f => ({ ...f, preview_text: v }))} isFirstSequence={pos === 0} campaign={campaign} required />
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Wait days after previous step</label>

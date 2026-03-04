@@ -305,6 +305,15 @@ async def run_send_job():
                 lead_data["unsubscribe_link"] = unsub_url
 
                 body = render_body(sequence.body, lead_data)
+                # Inject hidden preheader so email clients show the custom preview text.
+                if is_html and getattr(sequence, 'preview_text', None):
+                    rendered_preview = render_body(sequence.preview_text, lead_data)
+                    preheader = (
+                        '<div style="display:none !important; visibility:hidden; '
+                        'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
+                        f'{rendered_preview}</div>'
+                    )
+                    body = preheader + body
                 from_addr = inbox.email
                 from_name = inbox.display_name or ""
 
