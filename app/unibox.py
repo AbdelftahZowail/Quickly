@@ -523,10 +523,46 @@ async def _classify_and_notify_bg(
             if not await is_ai_enabled(session):
                 return
 
-            # Look up the original email for extra context
+            # Fetch full thread messages for richer AI context
+            thread_messages: list[dict] = []
+            if thread_id:
+                from app.models import GmailMessage as _GM
+                import json as _json
+                msgs_res = await session.execute(
+                    select(_GM)
+                    .where(_GM.thread_id == thread_id)
+                    .order_by(_GM.internal_date.asc())
+                )
+                for gm in msgs_res.scalars().all():
+                    ts_ms = gm.internal_date
+                    ts_str = ""
+                    if ts_ms:
+                        from datetime import datetime as _dt
+                        try:
+                            ts_str = _dt.utcfromtimestamp(ts_ms / 1000.0).strftime("%Y-%m-%d %H:%M UTC")
+                        except Exception:
+                            ts_str = str(ts_ms)
+                    # Extract From header
+                    frm = ""
+                    try:
+                        headers = _json.loads(gm.headers_json or "[]")
+                        for h in headers:
+                            if isinstance(h, dict) and h.get("name", "").lower() == "from":
+                                frm = h.get("value", "")
+                                break
+                    except Exception:
+                        pass
+                    body = gm.body_plain or ""
+                    if not body and gm.body_html:
+                        # Strip basic HTML tags for plain text fallback
+                        import re as _re
+                        body = _re.sub(r'<[^>]+>', ' ', gm.body_html)
+                    thread_messages.append({"from": frm, "timestamp": ts_str, "body": body})
+
+            # Fallback: look up the original email subject/body if no thread messages
             email_subject = ""
             email_body = ""
-            if thread_id and lead_id:
+            if not thread_messages and thread_id and lead_id:
                 from app.models import Sequence as _Seq
                 first_log_res = await session.execute(
                     select(EmailLog)
@@ -554,9 +590,13 @@ async def _classify_and_notify_bg(
                 session, reply_text,
                 email_subject=email_subject,
                 email_body=email_body,
+                thread_messages=thread_messages or None,
             )
             if classification is None:
                 return  # classifier failed — normal webhook already sent
+
+            # Statuses that should pause sending and delete queue slots
+            _PAUSE_STATUSES = {"not_interested", "wrong_person", "out_of_office"}
 
             # Update CampaignLead.interest_status (and optionally pause sending)
             from app.models import CampaignLead as _CL
@@ -570,7 +610,7 @@ async def _classify_and_notify_bg(
                 cl = cl_res.scalar_one_or_none()
                 if cl:
                     cl.interest_status = classification
-                    if classification == "not_interested":
+                    if classification in _PAUSE_STATUSES:
                         cl.sending_paused = True
                         # Delete remaining queue slots to stop sending
                         from sqlalchemy import delete as _del
@@ -596,8 +636,6 @@ async def _classify_and_notify_bg(
 
     except Exception as exc:
         log.warning("Background AI classification task failed: %s", exc)
-    except Exception as exc:
-        log.warning("Background lead-reply webhook task failed: %s", exc)
 
 
 async def _upsert_thread(

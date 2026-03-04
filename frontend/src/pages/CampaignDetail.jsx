@@ -318,6 +318,9 @@ const BADGE_STYLES = {
   clicked:        'bg-orange-100 text-orange-700',
   interested:     'bg-green-100 text-green-700',
   not_interested: 'bg-rose-100 text-rose-700',
+  out_of_office:  'bg-sky-100 text-sky-700',
+  wrong_person:   'bg-purple-100 text-purple-700',
+  auto_reply:     'bg-slate-100 text-slate-600',
   paused:         'bg-yellow-100 text-yellow-700',
 };
 
@@ -576,9 +579,9 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                   <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">
                     {new Date(l.enrolled_at).toLocaleDateString()}
                   </td>
-                  {/* Sending toggle */}
+                  {/* Sending toggle + interest status dropdown */}
                   <td className="px-4 py-2.5 whitespace-nowrap">
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <button
                         className={`text-xs font-medium px-2 py-1 rounded transition-colors ${
                           l.sending_paused
@@ -598,30 +601,31 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                       >
                         {l.sending_paused ? 'Paused' : 'Active'}
                       </button>
-                      {l.interest_status && (
-                        <span
-                          className={`text-[10px] rounded px-1.5 py-0.5 font-medium cursor-pointer ${
-                            l.interest_status === 'interested'
-                              ? 'bg-green-100 text-green-700 hover:bg-green-200'
-                              : 'bg-rose-100 text-rose-700 hover:bg-rose-200'
-                          }`}
-                          title={`AI classified as ${l.interest_status}. Click to toggle.`}
-                          onClick={async () => {
-                            const newStatus = l.interest_status === 'interested' ? 'not_interested' : 'interested';
-                            const newPaused = newStatus === 'not_interested';
-                            try {
-                              await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
-                                interest_status: newStatus,
-                                sending_paused: newPaused,
-                              });
-                              notify({ type: 'success', message: `Marked as ${newStatus.replace('_', ' ')}` });
-                              refresh();
-                            } catch (err) { notify({ type: 'error', message: err.message }); }
-                          }}
-                        >
-                          {l.interest_status === 'interested' ? 'Interested' : 'Not Interested'}
-                        </span>
-                      )}
+                      <select
+                        className={`text-[10px] font-medium rounded px-1.5 py-0.5 border cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-300 ${BADGE_STYLES[l.interest_status] || 'bg-gray-50 text-gray-500 border-gray-200'}`}
+                        value={l.interest_status || ''}
+                        title="AI classification — click to change or remove"
+                        onChange={async (e) => {
+                          const newStatus = e.target.value;
+                          const pauseStatuses = new Set(['not_interested', 'wrong_person', 'out_of_office']);
+                          const newPaused = pauseStatuses.has(newStatus) ? true : undefined;
+                          try {
+                            await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
+                              interest_status: newStatus,
+                              ...(newPaused !== undefined && { sending_paused: newPaused }),
+                            });
+                            notify({ type: 'success', message: newStatus ? `Marked as ${newStatus.replace(/_/g, ' ')}` : 'Status cleared' });
+                            refresh();
+                          } catch (err) { notify({ type: 'error', message: err.message }); }
+                        }}
+                      >
+                        <option value="">— no status —</option>
+                        <option value="interested">Interested</option>
+                        <option value="not_interested">Not Interested</option>
+                        <option value="out_of_office">Out of Office</option>
+                        <option value="wrong_person">Wrong Person</option>
+                        <option value="auto_reply">Auto Reply</option>
+                      </select>
                     </div>
                   </td>
                   {/* custom data columns — inline editable */}

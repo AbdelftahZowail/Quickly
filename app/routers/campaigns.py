@@ -785,9 +785,10 @@ async def patch_campaign_lead(
     if not cl:
         raise HTTPException(404, "Campaign-lead enrolment not found")
 
+    VALID_INTEREST_STATUSES = {"interested", "not_interested", "out_of_office", "wrong_person", "auto_reply", ""}
     if payload.interest_status is not None:
-        if payload.interest_status not in ("interested", "not_interested", ""):
-            raise HTTPException(400, "interest_status must be 'interested', 'not_interested', or empty string to clear")
+        if payload.interest_status not in VALID_INTEREST_STATUSES:
+            raise HTTPException(400, f"interest_status must be one of: {', '.join(sorted(VALID_INTEREST_STATUSES - {''}))}, or empty string to clear")
         cl.interest_status = payload.interest_status if payload.interest_status else None
 
     if payload.sending_paused is not None:

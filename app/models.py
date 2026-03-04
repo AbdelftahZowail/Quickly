@@ -130,7 +130,8 @@ class CampaignLead(Base):
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     enrolled_at = Column(DateTime, default=_utcnow)
-    # AI classification: null = not yet classified, "interested", "not_interested"
+    # AI classification: null = not yet classified, "interested", "not_interested",
+    # "out_of_office", "wrong_person", "auto_reply"
     interest_status = Column(String(32), nullable=True, default=None)
     # Whether sending is paused for this specific campaign-lead pair
     # (e.g. auto-paused by AI classifier when marked not_interested)
@@ -440,6 +441,9 @@ WEBHOOK_EVENT_TYPES = [
     "lead.status_changed", # A lead's status was changed (any status transition)
     "lead.interested",     # AI classified a lead's reply as interested
     "lead.not_interested", # AI classified a lead's reply as not interested
+    "lead.out_of_office",  # AI classified a lead's reply as out-of-office
+    "lead.wrong_person",   # AI classified a lead's reply as wrong person
+    "lead.auto_reply",     # AI classified a lead's reply as an automated reply
     "daily_limit",         # An inbox hit its daily sending limit
     "rate_limit",          # A rate limit violation was detected
     "token_expired",       # A Gmail OAuth token could not be refreshed
