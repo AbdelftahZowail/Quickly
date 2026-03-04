@@ -6,6 +6,7 @@ import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import { useNotify } from '../context/NotificationContext';
 import { useUniboxNotifications } from '../context/UniboxNotificationsContext';
+import { buildHtmlReply, escapeHtml, formatAttributionDate } from '../utils/emailQuote';
 
 const PAGE_SIZE = 25;
 const OLDER_WINDOW_DAYS = 7;
@@ -49,37 +50,29 @@ function makeReplySubject(subject) {
   return /^re:/i.test(clean) ? clean : `Re: ${clean}`;
 }
 
+/** Extract display name from a "Name <email>" header value. */
+function extractFromName(headerValue) {
+  if (!headerValue) return '';
+  const angleMatch = headerValue.match(/^"?([^"<]*?)"?\s*<[^>]+>/);
+  if (angleMatch?.[1]?.trim()) return angleMatch[1].trim();
+  // fall back to the part before the @ sign
+  return headerValue.split('@')[0] || headerValue;
+}
+
 /**
- * Build a quoted-reply HTML block following RFC 2646 / email client conventions.
- * The block uses a <details> element so it renders collapsed by default in
- * email clients that support it (most modern webmail / HTML viewers), and falls
- * back to a visible blockquote in plain clients.
+ * Build the `originalEmail` object from the last received message in the thread.
+ * This is fed into buildHtmlReply / buildPlainTextReply.
  */
-function buildQuotedBlock(messages) {
-  if (!messages || messages.length === 0) return '';
-  // Use the last received message as the primary quote target
-  const lastReceived = [...messages].reverse().find(m => m.direction === 'received') || messages[messages.length - 1];
-  const from = lastReceived?.from || '';
-  const ts = lastReceived?.timestamp ? new Date(lastReceived.timestamp).toLocaleString() : '';
-  const header = [from && `From: ${from}`, ts && `Date: ${ts}`].filter(Boolean).join(' &nbsp;|&nbsp; ');
-
-  const bodyHtml = lastReceived?.body_html?.trim()
-    ? DOMPurify.sanitize(lastReceived.body_html, {
-        USE_PROFILES: { html: true },
-        FORBID_TAGS: ['script', 'iframe', 'object', 'embed', 'form', 'input', 'button', 'textarea', 'select', 'link', 'meta', 'base'],
-      })
-    : (lastReceived?.body_plain || lastReceived?.snippet || '')
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-
-  if (!bodyHtml) return '';
-
-  return `<details style="margin-top:12px;">
-<summary style="cursor:pointer;color:#6b7280;font-size:0.8em;user-select:none;">&#8230; On ${ts || 'a previous date'}, ${from || 'recipient'} wrote:</summary>
-<blockquote style="margin:8px 0 0 0;padding:8px 12px;border-left:3px solid #d1d5db;color:#374151;font-size:0.9em;">
-  <div style="font-size:0.8em;color:#9ca3af;margin-bottom:6px;">${header}</div>
-  ${bodyHtml}
-</blockquote>
-</details>`;
+function buildOriginalEmailFromMsg(msg) {
+  if (!msg) return null;
+  return {
+    fromName: extractFromName(msg.from || ''),
+    fromAddress: extractEmailAddress(msg.from || ''),
+    date: msg.timestamp ? new Date(msg.timestamp) : new Date(),
+    plainBody: msg.body_plain || msg.snippet || '',
+    // If no HTML body available, wrap the plain text so quoting still looks right
+    htmlBody: msg.body_html || `<div dir="ltr">${escapeHtml(msg.body_plain || msg.snippet || '')}</div>`,
+  };
 }
 
 function buildHtmlDoc(html) {
@@ -136,7 +129,8 @@ export default function Unibox() {
     to_email: '',
     subject: '',
     body: '',
-    is_html: false,
+    originalEmail: null, // { fromName, fromAddress, date, plainBody, htmlBody }
+    includeQuote: false,
   });
   const [sending, setSending] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -252,13 +246,13 @@ export default function Unibox() {
       const lastReceived = [...messages].reverse().find(m => m.direction === 'received');
       const fallback = messages[messages.length - 1];
       const replyTo = extractEmailAddress(lastReceived?.from || fallback?.from || '');
-      const quotedBlock = buildQuotedBlock(messages);
+      const originalEmail = buildOriginalEmailFromMsg(lastReceived || fallback || null);
       setCompose({
         to_email: replyTo,
         subject: makeReplySubject(data?.subject || ''),
         body: '',
-        is_html: true,
-        quoted_html: quotedBlock,
+        originalEmail,
+        includeQuote: Boolean(originalEmail),
       });
 
       // no explicit view mode state needed; rendering will choose based on msg fields
@@ -460,16 +454,17 @@ export default function Unibox() {
       return;
     }
 
-    // Build final body: wrap user text in a <p> then append the quoted block
-    const userText = compose.body;
-    let finalBody = userText;
-    let finalIsHtml = compose.is_html;
-    if (compose.quoted_html) {
-      // Escape user's plain text and combine with the quoted block as HTML
-      const escapedText = userText
-        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
-      finalBody = `<p style="margin:0 0 8px 0;">${escapedText}</p>${compose.quoted_html}`;
+    let finalBody;
+    let finalIsHtml;
+
+    if (compose.includeQuote && compose.originalEmail) {
+      // Build proper Gmail-style HTML + plain-text reply with quoting
+      const replyHtml = `<div dir="ltr">${escapeHtml(compose.body).replace(/\n/g, '<br>')}</div>`;
+      finalBody = buildHtmlReply(replyHtml, compose.originalEmail.htmlBody, compose.originalEmail);
       finalIsHtml = true;
+    } else {
+      finalBody = compose.body;
+      finalIsHtml = false;
     }
 
     setSending(true);
@@ -675,18 +670,48 @@ export default function Unibox() {
                         placeholder="Write your reply..."
                         required
                       />
-                      {/* Quoted message preview — collapsed by default */}
-                      {compose.quoted_html && (
-                        <details className="mt-2 text-xs text-gray-500">
-                          <summary className="cursor-pointer select-none hover:text-gray-700">
-                            &#8230; quoted message will be appended (collapsed for recipient)
-                          </summary>
-                          <div
-                            className="mt-2 pl-3 border-l-2 border-gray-300 text-gray-600 text-xs max-h-40 overflow-y-auto"
-                            dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(compose.quoted_html) }}
-                          />
-                        </details>
+
+                      {/* Gmail-style quoted message — collapsed, with ✕ to remove */}
+                      {compose.originalEmail && (
+                        <div className="mt-2">
+                          {compose.includeQuote ? (
+                            <div className="flex items-start gap-2">
+                              {/* The "..." toggle button — mirrors Gmail's look */}
+                              <button
+                                type="button"
+                                className="mt-0.5 inline-flex items-center justify-center w-7 h-4 bg-[#f1f3f4] hover:bg-[#e8eaed] border border-[#dadce0] rounded-[3px] text-[#444746] text-sm font-bold leading-none cursor-pointer select-none flex-shrink-0"
+                                onClick={() => setCompose(c => ({ ...c, includeQuote: false }))}
+                                title="Remove quoted message"
+                              >
+                                ✕
+                              </button>
+                              <div className="flex-1 min-w-0">
+                                {/* Attribution line matching Gmail */}
+                                <div className="text-xs text-gray-500 mb-1">
+                                  On {formatAttributionDate(compose.originalEmail.date instanceof Date ? compose.originalEmail.date : new Date(compose.originalEmail.date))}{' '}
+                                  {compose.originalEmail.fromName || compose.originalEmail.fromAddress} &lt;{compose.originalEmail.fromAddress}&gt; wrote:
+                                </div>
+                                {/* Quoted body preview — truncated */}
+                                <blockquote className="border-l-[3px] border-[#ccc] ml-0 pl-3 text-xs text-gray-500 max-h-16 overflow-hidden">
+                                  {compose.originalEmail.plainBody
+                                    ? compose.originalEmail.plainBody.slice(0, 300)
+                                    : '(no body)'}
+                                  {(compose.originalEmail.plainBody?.length || 0) > 300 && '…'}
+                                </blockquote>
+                              </div>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              className="text-xs text-gray-400 hover:text-teal-600 transition-colors"
+                              onClick={() => setCompose(c => ({ ...c, includeQuote: true }))}
+                            >
+                              + Include quoted message
+                            </button>
+                          )}
+                        </div>
                       )}
+
                       <div className="mt-3 flex items-center justify-end gap-2">
                         <Button
                           type="button"
