@@ -22,7 +22,7 @@ def _mask_secret(val: str) -> str:
         return ""
     if len(val) <= 4:
         return "****"
-    return val[0] + "***" + val[-1]
+    return val[:2] + "***" + val[-2:]
 from app.app_settings import (
     get_gmail_sync_config,
     save_gmail_sync_config,
@@ -35,6 +35,7 @@ from sqlalchemy import select
 from app.models import EmailLog, EmailOpen, Webhook, WEBHOOK_EVENT_TYPES
 from app.schemas import WebhookCreate, WebhookUpdate, WebhookResponse
 from app.webhooks import fire_webhook_event
+from app.ai_classifier import verify_ai_key, get_supported_providers, get_models_for_provider
 
 log = logging.getLogger("quickly.settings")
 
@@ -131,21 +132,154 @@ async def test_webhook(
     webhook_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Fire a synthetic test event to a specific webhook."""
+    """Fire a synthetic test event to a specific webhook.
+
+    Accepts an optional JSON body with ``event`` to simulate a specific event
+    type.  When omitted, fires a generic ``test`` event for backward
+    compatibility.
+    """
     result = await db.execute(select(Webhook).where(Webhook.id == webhook_id))
     wh = result.scalar_one_or_none()
     if not wh:
         raise HTTPException(404, "Webhook not found")
+
+    from fastapi import Request as _Req
+    # We'll just accept raw JSON body inline
+    import datetime as _dt
+    return await _test_webhook_inner(wh)
+
+
+async def _test_webhook_inner(wh):
     import datetime as _dt
     test_data = {
         "webhook_id": wh.id,
         "test": True,
         "timestamp": _dt.datetime.utcnow().isoformat() + "Z",
     }
-    # Fire directly to this one webhook regardless of its event subscriptions
     from app.webhooks import _post_webhook
     success = await _post_webhook(wh, "test", test_data)
     return {"ok": success}
+
+
+# ── Simulated event sample payloads ──────────────────────────────────────────
+_SAMPLE_PAYLOADS: dict[str, dict] = {
+    "email.sent": {
+        "email_log_id": 999,
+        "lead_id": 1,
+        "lead_email": "prospect@example.com",
+        "campaign_id": 1,
+        "inbox_id": 1,
+        "inbox_email": "outreach@gmail.com",
+        "subject": "Quick question about your project",
+        "sequence_index": 0,
+        "message_id": "<test-msg-id@mail.gmail.com>",
+        "thread_id": "test-thread-001",
+    },
+    "email.opened": {
+        "email_log_id": 999,
+        "lead_id": 1,
+        "campaign_id": 1,
+        "ip_address": "203.0.113.1",
+    },
+    "email.clicked": {
+        "email_log_id": 999,
+        "lead_id": 1,
+        "campaign_id": 1,
+        "original_url": "https://yoursite.com/demo",
+        "ip_address": "203.0.113.1",
+    },
+    "email.bounced": {
+        "lead_id": 1,
+        "lead_email": "bad@nonexistent.com",
+        "campaign_id": 1,
+        "inbox_id": 1,
+        "error_type": "bounce",
+        "error_message": "Gmail rejected the message (400): address not found",
+    },
+    "lead.replied": {
+        "lead_id": 1,
+        "lead_email": "prospect@example.com",
+        "lead_name": "Alice Long",
+        "thread_id": "test-thread-001",
+        "inbox_id": 1,
+        "inbox_email": "outreach@gmail.com",
+        "message_id": "<test-reply@mail.gmail.com>",
+    },
+    "lead.unsubscribed": {
+        "lead_id": 1,
+        "lead_email": "prospect@example.com",
+        "campaign_id": 1,
+    },
+    "lead.status_changed": {
+        "lead_id": 1,
+        "lead_email": "prospect@example.com",
+        "old_status": "active",
+        "new_status": "bounced",
+        "reason": "Gmail rejected the message",
+    },
+    "lead.interested": {
+        "lead_id": 1,
+        "lead_email": "prospect@example.com",
+        "lead_name": "Alice Long",
+        "campaign_id": 1,
+        "classification": "interested",
+        "reply_snippet": "Yes, I'd love to learn more about your product!",
+    },
+    "lead.not_interested": {
+        "lead_id": 1,
+        "lead_email": "prospect@example.com",
+        "lead_name": "Alice Long",
+        "campaign_id": 1,
+        "classification": "not_interested",
+        "reply_snippet": "Please remove me from your list.",
+    },
+    "daily_limit": {
+        "inbox_id": 1,
+        "inbox_email": "outreach@gmail.com",
+        "date": "2026-01-15",
+    },
+    "rate_limit": {
+        "inbox_id": 1,
+        "inbox_email": "outreach@gmail.com",
+        "last_sent": "2026-01-15T10:25:00Z",
+        "now": "2026-01-15T10:27:00Z",
+        "wait_minutes": 5,
+    },
+    "token_expired": {
+        "inbox_id": 1,
+        "inbox_email": "outreach@gmail.com",
+    },
+}
+
+
+class _TestWebhookEvent(BaseModel):
+    event: str
+
+
+@router.post("/webhooks/{webhook_id}/test-event")
+async def test_webhook_with_event(
+    webhook_id: int,
+    payload: _TestWebhookEvent,
+    db: AsyncSession = Depends(get_db),
+):
+    """Fire a simulated event with realistic sample data to a specific webhook.
+
+    Pass ``{"event": "email.sent"}`` (or any valid event type) to see exactly
+    what the webhook payload will look like for that event.
+    """
+    if payload.event not in WEBHOOK_EVENT_TYPES:
+        raise HTTPException(400, f"Unknown event type: {payload.event}")
+    result = await db.execute(select(Webhook).where(Webhook.id == webhook_id))
+    wh = result.scalar_one_or_none()
+    if not wh:
+        raise HTTPException(404, "Webhook not found")
+    import datetime as _dt
+    sample = dict(_SAMPLE_PAYLOADS.get(payload.event, {}))
+    sample["test"] = True
+    sample["timestamp"] = _dt.datetime.utcnow().isoformat() + "Z"
+    from app.webhooks import _post_webhook
+    success = await _post_webhook(wh, payload.event, sample)
+    return {"ok": success, "event": payload.event, "payload_preview": sample}
 
 
 
@@ -377,3 +511,177 @@ async def verify_tracking_domain(domain: str):
             last_error = str(exc)
 
     return {"ok": False, "error": last_error}
+
+
+# ---------------------------------------------------------------------------
+# AI Settings — feature-based (each feature has its own provider/model/key)
+# ---------------------------------------------------------------------------
+
+from app.ai_classifier import FEATURES as _AI_FEATURES
+
+class _AiFeaturePayload(_BaseModel):
+    enabled: bool = False
+    provider: str = ""
+    model: str = ""
+    api_key: str = ""  # empty means "keep the existing stored key"
+
+
+class _AiVerifyPayload(_BaseModel):
+    provider: str = ""
+    model: str = ""
+    api_key: str = ""
+
+
+def _build_feature_response(feature_id: str, rows: dict[str, str]) -> dict:
+    """Build the response dict for a single AI feature."""
+    meta = _AI_FEATURES.get(feature_id, {})
+    prefix = f"ai_{feature_id}_"
+    raw_key = rows.get(f"{prefix}api_key", "")
+    return {
+        "id": feature_id,
+        "label": meta.get("label", feature_id),
+        "description": meta.get("description", ""),
+        "enabled": rows.get(f"{prefix}enabled", "false").lower() in ("true", "1", "yes"),
+        "provider": rows.get(f"{prefix}provider", ""),
+        "model": rows.get(f"{prefix}model", ""),
+        "api_key_set": bool(raw_key),
+        "api_key_masked": _mask_secret(raw_key),
+    }
+
+
+@router.get("/ai")
+async def get_all_ai_settings(db: AsyncSession = Depends(get_db)):
+    """Return settings for every AI feature.
+
+    Response shape:
+    ``{"features": [{id, label, description, enabled, provider, model,
+                     api_key_set, api_key_masked}, ...]}``
+    """
+    from app.models import AppSetting
+    result = await db.execute(
+        select(AppSetting).where(AppSetting.key.like("ai_%"))
+    )
+    rows = {r.key: r.value for r in result.scalars().all()}
+    features = [_build_feature_response(fid, rows) for fid in _AI_FEATURES]
+    return {"features": features}
+
+
+@router.get("/ai/providers")
+async def list_ai_providers():
+    """Return all supported AI providers, most popular first."""
+    return {"providers": get_supported_providers()}
+
+
+@router.get("/ai/providers/{provider}/models")
+async def list_ai_models(
+    provider: str,
+    api_key: str = "",
+    db: AsyncSession = Depends(get_db),
+):
+    """Fetch available models for the given provider.
+
+    Pass ``?api_key=<key>`` to use an unsaved key (e.g. while the user is
+    still filling the form).  When omitted the endpoint tries to find a
+    stored key for any feature that has that provider configured.
+    """
+    from app.models import AppSetting
+
+    resolved_key = api_key.strip()
+    if not resolved_key:
+        # Fall back: look for any stored key for this provider
+        result = await db.execute(
+            select(AppSetting).where(AppSetting.key.like("ai_%_api_key"))
+        )
+        keys = [r.value for r in result.scalars().all() if r.value]
+        resolved_key = keys[0] if keys else ""
+
+    if not resolved_key:
+        return {"models": [], "error": "Provide an API key to fetch models"}
+
+    try:
+        models = await get_models_for_provider(provider, resolved_key)
+        return {"models": models}
+    except Exception as exc:
+        return {"models": [], "error": f"Could not fetch models: {exc}"}
+
+
+@router.get("/ai/{feature_id}")
+async def get_ai_feature_settings(
+    feature_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return settings for a single AI feature."""
+    if feature_id not in _AI_FEATURES:
+        raise HTTPException(404, f"Unknown AI feature: {feature_id}")
+    from app.models import AppSetting
+    result = await db.execute(
+        select(AppSetting).where(AppSetting.key.like(f"ai_{feature_id}_%"))
+    )
+    rows = {r.key: r.value for r in result.scalars().all()}
+    return _build_feature_response(feature_id, rows)
+
+
+@router.post("/ai/{feature_id}")
+async def save_ai_feature_settings(
+    feature_id: str,
+    payload: _AiFeaturePayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save settings for a single AI feature."""
+    if feature_id not in _AI_FEATURES:
+        raise HTTPException(404, f"Unknown AI feature: {feature_id}")
+    from app.settings_manager import save_setting_to_db
+
+    prefix = f"ai_{feature_id}_"
+    await save_setting_to_db(db, f"{prefix}enabled", str(payload.enabled).lower())
+    await save_setting_to_db(db, f"{prefix}provider", payload.provider.strip())
+    await save_setting_to_db(db, f"{prefix}model", payload.model.strip())
+    if payload.api_key.strip():
+        await save_setting_to_db(db, f"{prefix}api_key", payload.api_key.strip())
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/ai/{feature_id}/verify")
+async def verify_ai_feature_settings(
+    feature_id: str,
+    payload: _AiVerifyPayload,
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify credentials for a single AI feature by sending a test prompt.
+
+    Any field left empty is filled from the stored DB value for that feature,
+    so the user does not have to re-enter a key that is already saved.
+    """
+    if feature_id not in _AI_FEATURES:
+        raise HTTPException(404, f"Unknown AI feature: {feature_id}")
+
+    provider = payload.provider.strip()
+    model = payload.model.strip()
+    api_key = payload.api_key.strip()
+
+    if not provider or not model or not api_key:
+        from app.models import AppSetting
+        prefix = f"ai_{feature_id}_"
+        result = await db.execute(
+            select(AppSetting).where(AppSetting.key.like(f"{prefix}%"))
+        )
+        stored = {r.key[len(prefix):]: r.value for r in result.scalars().all()}
+        if not provider:
+            provider = stored.get("provider", "")
+        if not model:
+            model = stored.get("model", "")
+        if not api_key:
+            api_key = stored.get("api_key", "")
+
+    missing = []
+    if not provider:
+        missing.append("provider")
+    if not model:
+        missing.append("model")
+    if not api_key:
+        missing.append("API key")
+    if missing:
+        return {"ok": False, "error": f"Please provide: {', '.join(missing)}"}
+
+    return await verify_ai_key(provider=provider, model=model, api_key=api_key)

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useCallback } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import { Button } from '../components/ui/Button';
 
 const ConfirmContext = createContext(null);
@@ -17,6 +17,14 @@ export function ConfirmProvider({ children }) {
     setDialog({ visible: false, message: '', resolve: null });
   };
 
+  // Escape key = cancel
+  useEffect(() => {
+    if (!dialog.visible) return;
+    const onKey = (e) => { if (e.key === 'Escape') handleResult(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dialog.visible]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <ConfirmContext.Provider value={confirm}>
       {children}
@@ -24,7 +32,7 @@ export function ConfirmProvider({ children }) {
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div
             data-darkreader-ignore
-            className="p-6 rounded shadow max-w-sm w-full"
+            className="p-6 rounded-xl shadow-lg w-full max-w-sm mx-auto"
             style={{ backgroundColor: 'white' }}
           >
             <p className="mb-4 break-words text-gray-800">{dialog.message}</p>

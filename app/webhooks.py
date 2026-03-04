@@ -35,8 +35,35 @@ def _build_headers(secret: str | None) -> dict[str, str]:
     return headers
 
 
+
+
+def _sanitize_for_webhook(value: Any) -> Any:
+    """Recursively strip angle-bracket characters from strings.
+
+    Webhook payloads are passed to external endpoints and we want to make
+    sure they never contain ``"<"`` or ``">"`` characters, so that downstream
+    systems cannot inadvertently interpret them as markup.  The function
+    handles nested dictionaries and lists as well as plain strings; other
+    values are returned unchanged.
+    """
+    if isinstance(value, str):
+        # remove both opening and closing angle brackets
+        return value.replace("<", "").replace(">", "")
+    elif isinstance(value, dict):
+        return {k: _sanitize_for_webhook(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [_sanitize_for_webhook(v) for v in value]
+    else:
+        return value
+
+
 async def _post_webhook(wh: Webhook, event_type: str, data: dict[str, Any]) -> bool:
     """POST a single payload to one webhook.  Returns ``True`` on success."""
+    # sanitize the inputs before generating JSON so that outgoing payloads
+    # have no forbidden characters.
+    event_type = _sanitize_for_webhook(event_type)
+    data = _sanitize_for_webhook(data)
+
     timestamp = time_provider.utcnow().isoformat() + "Z"
     payload = {"event": event_type, "data": data, "timestamp": timestamp}
     headers = _build_headers(wh.secret)

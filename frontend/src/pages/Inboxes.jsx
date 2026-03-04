@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -128,6 +128,8 @@ export default function Inboxes() {
   const [editMsg, setEditMsg] = useState(null);
   const [showAdd, setShowAdd] = useState(false); // controls add modal
   const confirm = useConfirm();
+  const addBackdropDown = useRef(false);
+  const editBackdropDown = useRef(false);
   const notify = useNotify();
 
   const load = async () => {
@@ -221,6 +223,7 @@ export default function Inboxes() {
   const saveEdit = async (e) => {
     e.preventDefault();
     if (!editing) return;
+    setEditDirty(false); // save in progress — don't treat as unsaved
     try {
       const body = {
         display_name: editing.display_name,
@@ -236,6 +239,18 @@ export default function Inboxes() {
       setEditMsg({ type: 'error', text: e.message });
     }
   };
+
+  // Escape to close modals
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key !== 'Escape') return;
+      if (showEditWarning) { setShowEditWarning(false); }
+      else if (showAdd) { setShowAdd(false); setMessage(null); }
+      else if (editing) tryCloseEdit();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [showEditWarning, showAdd, editing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const deleteInbox = async (id, email) => {
     const ok = await confirm(`Delete inbox "${email}"?`);
@@ -310,8 +325,12 @@ export default function Inboxes() {
 
       {/* add modal */}
       {showAdd && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => { setShowAdd(false); setMessage(null); }}>
-          <div data-darkreader-ignore className="p-6 rounded shadow max-w-md w-full max-h-[90vh] overflow-y-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onMouseDown={e => { addBackdropDown.current = e.target === e.currentTarget; }}
+          onClick={() => { if (addBackdropDown.current) { setShowAdd(false); setMessage(null); } }}
+        >
+          <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
             <h2 className="text-xl font-semibold mb-2">Add Inbox</h2>
             {message && <div className={message.type === 'error' ? 'text-red-600' : 'text-green-600'}>{message.text}</div>}
             <form onSubmit={submit} className="space-y-4">
@@ -369,8 +388,12 @@ export default function Inboxes() {
 
       {/* edit modal */}
       {editing && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={tryCloseEdit}>
-          <div data-darkreader-ignore className="p-6 rounded shadow max-w-md w-full max-h-[90vh] overflow-y-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onMouseDown={e => { editBackdropDown.current = e.target === e.currentTarget; }}
+          onClick={() => { if (editBackdropDown.current) tryCloseEdit(); }}
+        >
+          <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
             <h2 className="text-xl font-semibold mb-2">Edit Inbox</h2>
             {editMsg && <div className={editMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}>{editMsg.text}</div>}
             <form onSubmit={saveEdit} className="space-y-4">
@@ -418,8 +441,8 @@ export default function Inboxes() {
 
       {/* Unsaved changes warning for inbox edit */}
       {showEditWarning && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]">
-          <div data-darkreader-ignore className="rounded shadow p-6 max-w-sm w-full mx-4" style={{ backgroundColor: 'white' }}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
+          <div data-darkreader-ignore className="rounded-xl shadow-lg p-6 w-full max-w-sm mx-auto" style={{ backgroundColor: 'white' }}>
             <h3 className="font-semibold text-gray-800 mb-1">Discard changes?</h3>
             <p className="text-sm text-gray-500 mb-4">You have unsaved changes. Closing will discard them.</p>
             <div className="flex gap-2 justify-end">

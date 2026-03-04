@@ -258,3 +258,34 @@ async def test_post_webhook_payload_contains_event_and_data():
     assert payload["event"] == "email.sent"
     assert payload["data"]["lead_id"] == 99
     assert "timestamp" in payload
+
+
+@pytest.mark.asyncio
+async def test_post_webhook_strips_angle_brackets_from_strings():
+    """Any ``<`` or ``>`` characters in event or data should be removed."""
+    wh = Webhook(id=1, url="https://example.com/hook", secret="", events=[], active=True)
+    mock_client = _make_mock_client(status_code=200)
+
+    with patch("app.webhooks.httpx.AsyncClient", return_value=mock_client):
+        await _post_webhook(
+            wh,
+            "email<.sent>",
+            {
+                "foo": "bar>1<2",
+                "nested": {"inner<": "<value>"},
+                "lst": ["a<", "b>", {"c<d": "e>f"}],
+            },
+        )
+
+    payload = mock_client.post.call_args.kwargs["json"]
+    # event_type cleaned
+    assert "<" not in payload["event"]
+    assert ">" not in payload["event"]
+    # simple string key/value cleaned
+    assert payload["data"]["foo"] == "bar12"
+    # nested dict cleaned
+    assert payload["data"]["nested"]["inner<"] == "value"
+    # list entries cleaned
+    assert payload["data"]["lst"][0] == "a"
+    assert payload["data"]["lst"][1] == "b"
+    assert payload["data"]["lst"][2]["c<d"] == "ef"

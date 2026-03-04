@@ -5,6 +5,10 @@ import secrets
 from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None  # type: ignore[assignment,misc]
 
 from app.settings_manager import settings
 from app.database import AsyncSessionLocal
@@ -36,14 +40,31 @@ last_send_job_sent_count: int = 0
 
 
 
-def _in_sending_window(now: datetime, campaign: Campaign) -> bool:
-    """Check if now is within campaign's sending days and hours."""
-    if campaign.sending_days is None or now.weekday() not in campaign.sending_days:
+def _in_sending_window(now_utc: datetime, campaign: Campaign) -> bool:
+    """Check if *now_utc* falls within the campaign's sending days and hours.
+
+    The campaign's ``sending_hours_start`` / ``sending_hours_end`` are expressed
+    in its configured timezone (e.g. Africa/Cairo).  We convert ``now_utc`` to
+    that timezone before comparing so the gate-check is always correct regardless
+    of which UTC offset the server runs at.
+    """
+    tz_name = getattr(campaign, "timezone", None)
+    if ZoneInfo and tz_name:
+        try:
+            tz = ZoneInfo(tz_name)
+            # now_utc is a naive datetime from time_provider.now() which
+            # returns server-local time; in Docker that equals UTC.
+            now_local = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).replace(tzinfo=None)
+        except Exception:
+            now_local = now_utc
+    else:
+        now_local = now_utc
+
+    if campaign.sending_days is None or now_local.weekday() not in campaign.sending_days:
         return False
     start = _parse_time(campaign.sending_hours_start or "09:00")
     end = _parse_time(campaign.sending_hours_end or "17:00")
-    t = now.time()
-    return start <= t <= end
+    return start <= now_local.time() <= end
 
 
 async def run_send_job():
@@ -185,6 +206,10 @@ async def run_send_job():
                     break
 
                 if lead.status not in ("active",):
+                    continue
+                # Skip leads whose sending is paused for this campaign
+                # (e.g. marked not_interested by the AI classifier).
+                if getattr(cl, 'sending_paused', False):
                     continue
                 if campaign.stop_on_reply:
                     reply_check = await session.execute(

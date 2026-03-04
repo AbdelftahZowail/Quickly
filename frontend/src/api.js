@@ -17,4 +17,17 @@ export const api = {
   put: (path, data) => request(path, { method: 'PUT', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }),
   patch: (path, data) => request(path, { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }),
   del: (path) => request(path, { method: 'DELETE' }),
+  upload: async (path, file) => {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(API_ROOT + path, { method: 'POST', body: form });
+    if (!res.ok) {
+      const text = await res.text();
+      const err = new Error(text || res.statusText);
+      err.status = res.status;
+      throw err;
+    }
+    return res.json();
+  },
+  download: (path) => fetch(API_ROOT + path, { method: 'GET' }),
 };

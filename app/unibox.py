@@ -502,6 +502,104 @@ async def _fire_lead_reply_webhook_bg(data: dict[str, Any]) -> None:
         log.warning("Background lead-reply webhook task failed: %s", exc)
 
 
+async def _classify_and_notify_bg(
+    lead_id: int,
+    lead_email: str,
+    lead_name: str,
+    campaign_ids: list[int],
+    reply_text: str,
+    thread_id: str = "",
+) -> None:
+    """Background task: classify a lead reply with AI and fire interest webhooks.
+
+    On classification failure the normal lead.replied webhook was already sent,
+    so we simply log and move on.
+    """
+    try:
+        from app.ai_classifier import classify_reply, is_ai_enabled
+        from app.webhooks import fire_webhook_event
+
+        async with AsyncSessionLocal() as session:
+            if not await is_ai_enabled(session):
+                return
+
+            # Look up the original email for extra context
+            email_subject = ""
+            email_body = ""
+            if thread_id and lead_id:
+                from app.models import Sequence as _Seq
+                first_log_res = await session.execute(
+                    select(EmailLog)
+                    .where(
+                        EmailLog.thread_id == thread_id,
+                        EmailLog.lead_id == lead_id,
+                    )
+                    .order_by(EmailLog.sent_at.asc())
+                    .limit(1)
+                )
+                first_log = first_log_res.scalar_one_or_none()
+                if first_log:
+                    email_subject = first_log.subject or ""
+                    seq_res = await session.execute(
+                        select(_Seq).where(
+                            _Seq.campaign_id == first_log.campaign_id,
+                            _Seq.position == first_log.sequence_index,
+                        )
+                    )
+                    seq = seq_res.scalar_one_or_none()
+                    if seq:
+                        email_body = seq.body or ""
+
+            classification = await classify_reply(
+                session, reply_text,
+                email_subject=email_subject,
+                email_body=email_body,
+            )
+            if classification is None:
+                return  # classifier failed — normal webhook already sent
+
+            # Update CampaignLead.interest_status (and optionally pause sending)
+            from app.models import CampaignLead as _CL
+            for camp_id in campaign_ids:
+                cl_res = await session.execute(
+                    select(_CL).where(
+                        _CL.lead_id == lead_id,
+                        _CL.campaign_id == camp_id,
+                    )
+                )
+                cl = cl_res.scalar_one_or_none()
+                if cl:
+                    cl.interest_status = classification
+                    if classification == "not_interested":
+                        cl.sending_paused = True
+                        # Delete remaining queue slots to stop sending
+                        from sqlalchemy import delete as _del
+                        from app.models import QueueSlot as _QS
+                        await session.execute(
+                            _del(_QS).where(_QS.campaign_lead_id == cl.id)
+                        )
+
+            await session.commit()
+
+            # Fire the appropriate webhook event
+            event_type = f"lead.{classification}"
+            for camp_id in campaign_ids:
+                webhook_data = {
+                    "lead_id": lead_id,
+                    "lead_email": lead_email,
+                    "lead_name": lead_name,
+                    "campaign_id": camp_id,
+                    "classification": classification,
+                    "reply_snippet": reply_text[:500],
+                }
+                await fire_webhook_event(session, event_type, webhook_data)
+
+    except Exception as exc:
+        log.warning("Background AI classification task failed: %s", exc)
+    except Exception as exc:
+        log.warning("Background lead-reply webhook task failed: %s", exc)
+
+
 async def _upsert_thread(
     db: AsyncSession,
     *,
@@ -716,6 +814,19 @@ async def _upsert_message_from_gmail(
                 )
                 # Webhook fires in the background after current transaction commits.
                 asyncio.create_task(_fire_lead_reply_webhook_bg(webhook_data))
+                # AI classification fires in a separate background task.
+                # It uses the body of the reply message for classification.
+                reply_body = body_plain or body_html or snippet or ""
+                asyncio.create_task(
+                    _classify_and_notify_bg(
+                        lead_id=lead.id,
+                        lead_email=from_email_addr,
+                        lead_name=lead.name or "",
+                        campaign_ids=campaign_ids,
+                        reply_text=reply_body,
+                        thread_id=thread_id,
+                    )
+                )
     # -----------------------------------------------------------------------
 
     # ---------- Sent-to-lead detection (outbound messages only) ----------
@@ -890,6 +1001,7 @@ async def list_unibox_conversations(
     page: int,
     page_size: int,
     leads_only: bool = False,
+    lead_status: str | None = None,
 ) -> dict[str, Any]:
     offset = (page - 1) * page_size
 
@@ -910,13 +1022,33 @@ async def list_unibox_conversations(
         .subquery()
     )
 
+    # Subquery: one lead per thread (the earliest email log entry)
+    lead_sq = (
+        select(
+            EmailLog.thread_id.label("thread_id"),
+            Lead.email.label("lead_email"),
+            Lead.status.label("lead_status"),
+            func.row_number()
+            .over(
+                partition_by=EmailLog.thread_id,
+                order_by=EmailLog.id,
+            )
+            .label("rn"),
+        )
+        .join(Lead, Lead.id == EmailLog.lead_id)
+        .where(EmailLog.thread_id.isnot(None))
+        .subquery()
+    )
+
     base_where = []
     if leads_only:
         base_where.append(GmailThread.is_lead_thread.is_(True))
+    if lead_status:
+        base_where.append(lead_sq.c.lead_status == lead_status)
 
     count_stmt = select(func.count()).select_from(GmailThread)
-    if base_where:
-        count_stmt = count_stmt.where(*base_where)
+    if leads_only:
+        count_stmt = count_stmt.where(GmailThread.is_lead_thread.is_(True))
     total = (await db.execute(count_stmt)).scalar_one() or 0
 
     stmt = (
@@ -930,6 +1062,8 @@ async def list_unibox_conversations(
             Inbox.email.label("account_email"),
             latest_message_sq.c.snippet.label("last_snippet"),
             latest_message_sq.c.headers_json.label("last_headers_json"),
+            lead_sq.c.lead_email.label("lead_email"),
+            lead_sq.c.lead_status.label("lead_status"),
         )
         .join(Inbox, Inbox.id == GmailThread.inbox_id)
         .outerjoin(
@@ -938,6 +1072,13 @@ async def list_unibox_conversations(
                 latest_message_sq.c.inbox_id == GmailThread.inbox_id,
                 latest_message_sq.c.thread_id == GmailThread.thread_id,
                 latest_message_sq.c.rn == 1,
+            ),
+        )
+        .outerjoin(
+            lead_sq,
+            and_(
+                lead_sq.c.thread_id == GmailThread.thread_id,
+                lead_sq.c.rn == 1,
             ),
         )
     )
@@ -967,6 +1108,8 @@ async def list_unibox_conversations(
                 "timestamp": timestamp,
                 "is_lead_thread": bool(row.is_lead_thread),
                 "unread_lead_reply": bool(row.unread_lead_reply),
+                "lead_email": row.lead_email or None,
+                "lead_status": row.lead_status or None,
             }
         )
 

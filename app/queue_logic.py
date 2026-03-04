@@ -5,6 +5,10 @@ from app import time as time_provider
 from typing import List, Optional, Tuple
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    ZoneInfo = None  # type: ignore[assignment,misc]  # Python < 3.9 fallback
 
 from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, EmailLog, CampaignInbox
 
@@ -46,6 +50,70 @@ def _time_to_minutes(t: time) -> int:
     return t.hour * 60 + t.minute
 
 
+# ── Timezone helpers ───────────────────────────────────────────────────────────
+
+def _get_tz(tz_name: Optional[str]):
+    """Return a ZoneInfo for tz_name, or None if unset / unavailable."""
+    if ZoneInfo is None or not tz_name:
+        return None
+    try:
+        return ZoneInfo(tz_name)
+    except Exception:
+        return None
+
+
+def _campaign_now(campaign) -> datetime:
+    """Return naive 'now' in the campaign's configured timezone.
+
+    Falls back to server-local time when no timezone is set on the campaign.
+    """
+    tz = _get_tz(getattr(campaign, "timezone", None))
+    if tz:
+        return datetime.now(tz=tz).replace(tzinfo=None)
+    return time_provider.now()
+
+
+def _to_utc_naive(naive_dt: datetime, campaign) -> datetime:
+    """Convert a naive campaign-tz datetime to naive UTC.
+
+    Returns *dt* unchanged when the campaign has no timezone configured
+    (server-local time is assumed to be UTC in that case).
+    """
+    tz = _get_tz(getattr(campaign, "timezone", None))
+    if tz and ZoneInfo:
+        try:
+            return naive_dt.replace(tzinfo=tz).astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+        except Exception:
+            pass
+    return naive_dt
+
+
+def _utc_bounds_for_campaign_day(day: date, campaign) -> tuple:
+    """Return naive-UTC (day_start, day_end) that bracket the given campaign-tz date.
+
+    For example, Africa/Cairo (UTC+2) March 4 → UTC 2026-03-03 22:00 … 2026-03-04 22:00.
+    Falls back to midnight-to-midnight naive when no timezone is set.
+
+    NOTE: timezones ahead of UTC by more than 12 h (Pacific/Kiritimati, etc.) can
+    cause the start bound to land on the *previous* UTC day; that edge-case is
+    accepted here since it only affects slot-counting accuracy, not correctness.
+    """
+    tz = _get_tz(getattr(campaign, "timezone", None))
+    if tz and ZoneInfo:
+        try:
+            utc = ZoneInfo("UTC")
+            start = datetime.combine(day, time(0, 0)).replace(tzinfo=tz).astimezone(utc).replace(tzinfo=None)
+            end = datetime.combine(day + timedelta(days=1), time(0, 0)).replace(tzinfo=tz).astimezone(utc).replace(tzinfo=None)
+            return start, end
+        except Exception:
+            pass
+    return datetime.combine(day, time(0, 0)), datetime.combine(day + timedelta(days=1), time(0, 0))
+
+
+# ── End timezone helpers ───────────────────────────────────────────────────────
+
+
+
 async def _next_available_send_time_today(
     session: AsyncSession,
     inbox_id: int,
@@ -55,11 +123,19 @@ async def _next_available_send_time_today(
     wait_minutes: int,
     now: datetime,
     cache: Optional[dict] = None,
+    campaign=None,
 ) -> Optional[datetime]:
     """
     Next available send time today that is >= now and within the sending window.
     Respects existing slots (no double-booking) and the wait_minutes grid.
     Returns None if no slot is left today (window ended or at capacity by time).
+
+    *day* and *now* are expressed in the campaign's local timezone (campaign-tz
+    naive datetimes).  When *campaign* has a timezone configured the DB query
+    uses proper UTC bounds so that previously-stored UTC slot times are
+    converted back to campaign-local minutes before conflict-checking.
+    The returned datetime is campaign-tz naive; callers must convert to UTC
+    via ``_to_utc_naive()`` before persisting.
     """
     start_t = _parse_time(sending_start)
     end_t = _parse_time(sending_end)
@@ -73,15 +149,24 @@ async def _next_available_send_time_today(
         else 0
     )
 
-    # Use cache if available (pre-seeded with scheduled minutes per inbox+day)
+    # Determine whether the campaign uses a non-UTC timezone.
+    tz = _get_tz(getattr(campaign, "timezone", None)) if campaign else None
+
+    # Skip the time cache for timezone-aware campaigns: the cache was
+    # pre-seeded with UTC minutes but we need campaign-local minutes.
+    use_time_cache = (tz is None)
     time_key = ("times", inbox_id, day)
-    if cache is not None and time_key in cache:
+    if use_time_cache and cache is not None and time_key in cache:
         existing_minutes = cache[time_key].copy()
-    elif cache is not None and ("_preseeded",) in cache:
+    elif use_time_cache and cache is not None and ("_preseeded",) in cache:
         existing_minutes = set()
     else:
-        day_start = datetime.combine(day, time(0, 0))
-        day_end = datetime.combine(day + timedelta(days=1), time(0, 0))
+        # Compute UTC day bounds (handles campaign timezone offset)
+        if campaign:
+            day_start, day_end = _utc_bounds_for_campaign_day(day, campaign)
+        else:
+            day_start = datetime.combine(day, time(0, 0))
+            day_end = datetime.combine(day + timedelta(days=1), time(0, 0))
         result = await session.execute(
             select(QueueSlot.scheduled_date).where(
                 QueueSlot.inbox_id == inbox_id,
@@ -91,8 +176,13 @@ async def _next_available_send_time_today(
         )
         existing_minutes = set()
         for (dt,) in result.all():
-            existing_minutes.add((dt.hour * 60 + dt.minute))
-        if cache is not None:
+            if tz and ZoneInfo:
+                # Stored times are UTC; convert to campaign-local for grid comparison
+                dt_local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz).replace(tzinfo=None)
+            else:
+                dt_local = dt
+            existing_minutes.add(dt_local.hour * 60 + dt_local.minute)
+        if use_time_cache and cache is not None:
             cache[time_key] = existing_minutes.copy()
 
     # First candidate: next slot on the grid that is >= max(now, start)
@@ -102,9 +192,11 @@ async def _next_available_send_time_today(
     candidate_min = start_min + k * wait_minutes
     while candidate_min <= end_min:
         if candidate_min not in existing_minutes and candidate_min >= now_min:
+            # Return campaign-tz naive datetime; caller converts to UTC
             return datetime.combine(day, time(candidate_min // 60, candidate_min % 60))
         candidate_min += wait_minutes
     return None
+
 
 
 def next_business_date(from_date: date, sending_days: List[int], delta_days: int) -> date:
@@ -356,7 +448,12 @@ async def reserve_slots_for_lead(
         inboxes = [inbox for inbox in inboxes if inbox[0] == locked_inbox_id]
         log.info("Using inbox persistence: lead %s locked to inbox %s", lead_id, locked_inbox_id)
 
-    today = time_provider.today()
+    # Use campaign-local time for scheduling so that campaigns configured in
+    # a non-UTC timezone (e.g. Africa/Cairo) schedule their first email at the
+    # correct local time.  The final scheduled_dt is converted to UTC before
+    # being stored so the send job (which runs in UTC) can compare correctly.
+    now = _campaign_now(campaign)
+    today = now.date()
     if start_date is None:
         start_date = today
     current_date = next_business_date(start_date, sending_days, 0)
@@ -366,15 +463,14 @@ async def reserve_slots_for_lead(
     round_robin = 0
 
     log.info(
-        "reserve_slots_for_lead: cl=%s campaign=%s inboxes=%s sequences=%d start=%s last_sent=%d",
-        campaign_lead_id, campaign.id, [i[0] for i in inboxes], len(to_schedule), start_date, last_sent_sequence_index,
+        "reserve_slots_for_lead: cl=%s campaign=%s tz=%s inboxes=%s sequences=%d start=%s last_sent=%d",
+        campaign_lead_id, campaign.id, getattr(campaign, 'timezone', None) or 'server-local',
+        [i[0] for i in inboxes], len(to_schedule), start_date, last_sent_sequence_index,
     )
 
     sending_start = campaign.sending_hours_start or "09:00"
     sending_end = campaign.sending_hours_end or "17:00"
     end_time = _parse_time(sending_end)
-    now = time_provider.now()
-    today = time_provider.today()
 
     # LOOKAHEAD OPTIMIZATION for new leads:
     # Find a start date (and inbox, if needed) where all follow-ups fit without exceeding capacity.
@@ -489,19 +585,20 @@ async def reserve_slots_for_lead(
 
                 scheduled_dt: datetime
                 if current_date == today:
-                    # Today: check if estimated time is in the past
+                    # Today: check if estimated time is in the past (campaign-local)
                     est_time = _estimated_send_time(sending_start, wait_min, pos)
                     if est_time <= now.time():
                         next_dt = await _next_available_send_time_today(
                             session, inbox_id, today,
                             sending_start, sending_end, wait_min, now,
-                            cache,
+                            cache, campaign=campaign,
                         )
                         if next_dt is not None:
-                            scheduled_dt = next_dt
+                            # next_dt is campaign-tz naive; convert to UTC for storage
+                            scheduled_dt = _to_utc_naive(next_dt, campaign)
                             log.info(
-                                "  -> using next slot today for seq=%d: %s (was past, now %s)",
-                                idx, scheduled_dt.strftime("%H:%M"), now.strftime("%H:%M"),
+                                "  -> using next slot today for seq=%d: %s campaign-local (was past, now %s)",
+                                idx, next_dt.strftime("%H:%M"), now.strftime("%H:%M"),
                             )
                         else:
                             # No slot left today (window ended or every grid point is taken).
@@ -516,7 +613,8 @@ async def reserve_slots_for_lead(
                                 current_date += timedelta(days=1)
                             continue
                     else:
-                        scheduled_dt = datetime.combine(current_date, est_time)
+                        # Campaign-local datetime → store as UTC
+                        scheduled_dt = _to_utc_naive(datetime.combine(current_date, est_time), campaign)
                 else:
                     # Future day: check if estimated time exceeds sending window
                     est_t = _estimated_send_time(sending_start, wait_min, pos)
@@ -533,7 +631,8 @@ async def reserve_slots_for_lead(
                             current_date += timedelta(days=1)
                         continue
                     else:
-                        scheduled_dt = datetime.combine(current_date, est_t)
+                        # Campaign-local datetime → store as UTC
+                        scheduled_dt = _to_utc_naive(datetime.combine(current_date, est_t), campaign)
 
                 slot = QueueSlot(
                     campaign_lead_id=campaign_lead_id,
@@ -543,21 +642,28 @@ async def reserve_slots_for_lead(
                     position_in_day=pos,
                 )
                 session.add(slot)
-                # Update caches immediately (count + scheduled times)
+                # Update caches immediately (count + scheduled times).
+                # For timezone-aware campaigns scheduled_dt is in UTC while the
+                # time cache stores campaign-local minutes; _next_available_send_time_today
+                # bypasses the time cache for those campaigns anyway, so we only
+                # write the time cache entry when there is no campaign timezone.
+                tz_name = getattr(campaign, "timezone", None) or None
                 if cache is not None:
                     cache_key = (inbox_id, current_date)
                     cache[cache_key] = cache.get(cache_key, pos - 1) + 1
-                    time_key = ("times", inbox_id, current_date)
-                    if time_key not in cache:
-                        cache[time_key] = set()
-                    cache[time_key].add(scheduled_dt.hour * 60 + scheduled_dt.minute)
+                    if not tz_name:
+                        time_key = ("times", inbox_id, current_date)
+                        if time_key not in cache:
+                            cache[time_key] = set()
+                        cache[time_key].add(scheduled_dt.hour * 60 + scheduled_dt.minute)
                 else:
                     # Without cache, must flush for subsequent queries to see this slot
                     await session.flush()
                 log.info(
-                    "  -> slot created: seq=%d date=%s inbox=%d pos=%d est_time=%s",
+                    "  -> slot created: seq=%d date=%s inbox=%d pos=%d local=%s utc=%s",
                     idx, current_date, inbox_id, pos,
                     _estimated_send_time(sending_start, wait_min, pos).strftime("%H:%M"),
+                    scheduled_dt.strftime("%H:%M"),
                 )
                 scheduled_dates.append(current_date)
                 # Update round-robin index
@@ -873,7 +979,8 @@ async def _recalculate_queue_for_campaign_leads(
         # Also count today's emails already sent (their QueueSlots were deleted after sending).
         # Without this, the capacity check sees only remaining unsent slots and allows
         # far too many new slots to be added today.
-        _today = time_provider.today()
+        # Use campaign-tz "today" so the count aligns with the date used when scheduling.
+        _today = _campaign_now(campaign).date()
         today_sent_result = await session.execute(
             select(EmailLog.inbox_id, func.count(EmailLog.id).label("sent_count"))
             .where(
@@ -915,7 +1022,7 @@ async def _recalculate_queue_for_campaign_leads(
             if ibx in available_inbox_ids:
                 preferred_inbox = ibx
 
-        start_date = last_sent_date_by_lead.get(cl.lead_id, time_provider.today())
+        start_date = last_sent_date_by_lead.get(cl.lead_id, _campaign_now(campaign).date())
 
         await reserve_slots_for_lead(
             session, cl.id, campaign, inboxes, sequences,

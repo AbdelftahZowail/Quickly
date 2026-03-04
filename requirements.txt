@@ -14,3 +14,4 @@ google-auth>=2.0
 google-auth-oauthlib>=0.8
 asyncpg>=0.27  # PostgreSQL async driver
 aiosqlite>=0.19  # required for test fallback to SQLite
+any-llm-sdk[all]>=1.9  # unified LLM provider interface for AI classification

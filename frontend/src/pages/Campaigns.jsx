@@ -156,6 +156,45 @@ export default function Campaigns() {
                 const replies = stats.replies || 0;
                 const replyRate = emailsSent > 0 ? Math.round((replies / emailsSent) * 100) : 0;
 
+                // Determine campaign state for display
+                // When paused: scheduled slots were cleared, so denom == emailsSent
+                // which makes percent = 100%, but it's misleading.
+                const isCompleted = !c.paused && scheduled === 0 && emailsSent > 0;
+                const isPaused = !!c.paused;
+
+                // For paused campaigns, compute progress against total leads
+                // to give a better sense of how far we got
+                const pausedPercent = isPaused && totalLeads > 0
+                  ? Math.round((emailsSent / totalLeads) * 100)
+                  : 0;
+
+                // Build a short reason line for paused / completed
+                const reasonParts = [];
+                if (replies > 0) reasonParts.push(`${replies} replied`);
+                const bounced = stats.bounced || 0;
+                if (bounced > 0) reasonParts.push(`${bounced} bounced`);
+                const unsubscribed = stats.unsubscribed || 0;
+                if (unsubscribed > 0) reasonParts.push(`${unsubscribed} unsub`);
+
+                // Status display
+                let statusLabel, statusClass;
+                if (isPaused) {
+                  statusLabel = 'Paused';
+                  statusClass = 'text-amber-600 font-bold';
+                } else if (isCompleted) {
+                  statusLabel = 'Completed';
+                  statusClass = 'text-blue-600 font-bold';
+                } else if (totalLeads === 0) {
+                  statusLabel = 'Draft';
+                  statusClass = 'text-gray-400 font-bold';
+                } else {
+                  statusLabel = 'Active';
+                  statusClass = 'text-green-600 font-bold';
+                }
+
+                // Progress bar colour
+                const barColor = isPaused ? 'bg-amber-400' : isCompleted ? 'bg-blue-500' : 'bg-teal-500';
+
                 return (
                   <tr
                     key={c.id}
@@ -175,10 +214,15 @@ export default function Campaigns() {
                       </>
                     )}
                     <td className="py-2">
-                      {c.paused ? (
+                      {isPaused ? (
                         <span className="text-gray-500">
                           {c.name}{' '}
-                          <span className="inline-block text-red-600 bg-red-100 px-1 py-0.5 text-xs font-bold rounded">PAUSED</span>
+                          <span className="inline-block text-amber-700 bg-amber-100 px-1 py-0.5 text-xs font-bold rounded">PAUSED</span>
+                        </span>
+                      ) : isCompleted ? (
+                        <span>
+                          <Link to={`/campaigns/${c.id}`} className="text-blue-500">{c.name}</Link>{' '}
+                          <span className="inline-block text-blue-600 bg-blue-100 px-1 py-0.5 text-xs font-bold rounded">DONE</span>
                         </span>
                       ) : (
                         <Link to={`/campaigns/${c.id}`} className="text-teal-500">
@@ -187,22 +231,27 @@ export default function Campaigns() {
                       )}
                     </td>
                     <td className="py-2">
-                      {c.paused ? (
-                        <span className="text-red-600 font-bold">Paused</span>
-                      ) : (
-                        <span className="text-green-600 font-bold">Active</span>
-                      )}
+                      <span className={statusClass}>{statusLabel}</span>
                     </td>
                     <td className="py-2 text-center">
                       <div className="w-32 inline-block bg-gray-200 rounded-full h-2 overflow-hidden">
                         <div
-                          className="bg-teal-500 h-2"
-                          style={{ width: `${percent}%` }}
+                          className={`${barColor} h-2`}
+                          style={{ width: `${isPaused ? pausedPercent : percent}%` }}
                         />
                       </div>
                       <div className="text-xs mt-1">
-                        {emailsSent} / {denom} ({percent}%)
+                        {isPaused ? (
+                          <span className="text-amber-700">{emailsSent} sent of {totalLeads} lead{totalLeads !== 1 ? 's' : ''}</span>
+                        ) : isCompleted ? (
+                          <span className="text-blue-600">{emailsSent} sent — complete</span>
+                        ) : (
+                          <span>{emailsSent} / {denom} ({percent}%)</span>
+                        )}
                       </div>
+                      {reasonParts.length > 0 && (
+                        <div className="text-[10px] text-gray-400 mt-0.5">{reasonParts.join(' · ')}</div>
+                      )}
                     </td>
                     <td className="py-2 text-center">
                       {replies} ({replyRate}%)

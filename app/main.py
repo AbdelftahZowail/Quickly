@@ -28,6 +28,7 @@ from app.routers import unibox as unibox_router
 from app.routers import tracking as tracking_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
+from app import time as time_provider
 
 
 @asynccontextmanager
@@ -162,9 +163,14 @@ async def api_status(request: Request):
     return {
         "schedule_running": schedule is not None and schedule.running,
         "queue_check_interval_minutes": settings.queue_check_interval_minutes,
-        "last_send_job_run": last_send_job_run.isoformat() if last_send_job_run else None,
+        "last_send_job_run": (last_send_job_run.isoformat() + "Z") if last_send_job_run else None,
         "last_send_job_sent_count": last_send_job_sent_count,
         "next_send_job_run": next_run,
+        # include a server timestamp so the frontend can display true server time
+        # (useful during development when the UI and backend may be running on
+        # different machines or when the clock is offset via time_offset_days).
+        # The 'Z' suffix lets browsers treat the value as UTC automatically.
+        "server_time": time_provider.now().isoformat() + "Z",
         "test_mode": settings.test_mode,
         "app_mode": os.environ.get("QUICKLY_MODE", "development").lower(),
     }
