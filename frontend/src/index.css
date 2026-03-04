@@ -58,8 +58,7 @@ table tr:nth-child(even){ @apply bg-gray-50; }
 html, body { overflow-x: hidden; }
 .overflow-auto, .overflow-x-auto { -webkit-overflow-scrolling: touch; }
 
-/* Ensure page content doesn't overflow horizontally */
-.p-6, .p-8 { max-width: 100%; overflow-x: hidden; }
+/* page-level horizontal overflow is handled by html, body { overflow-x: hidden } above */
 
 /* custom utilities */
 /* .card utility removed in favor of Card component */

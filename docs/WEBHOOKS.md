@@ -54,7 +54,13 @@ curl -X DELETE http://localhost:8000/api/settings/webhooks/1
 ### Test a Webhook
 
 ```bash
+# Generic test event
 curl -X POST http://localhost:8000/api/settings/webhooks/1/test
+
+# Simulate a specific event type (see exact payload format)
+curl -X POST http://localhost:8000/api/settings/webhooks/1/test-event \
+  -H "Content-Type: application/json" \
+  -d '{"event": "email.sent"}'
 ```
 
 ### Get Available Event Types
@@ -212,6 +218,42 @@ Fires when a lead's status transitions (e.g. active → bounced, active → unsu
 }
 ```
 
+### `lead.interested`
+
+Fires when the AI classifier determines a lead's reply shows positive interest. Requires AI features to be enabled in Settings.
+
+```json
+{
+  "event": "lead.interested",
+  "data": {
+    "lead_id": 42,
+    "lead_email": "prospect@example.com",
+    "lead_name": "Alice Long",
+    "campaign_id": 5,
+    "classification": "interested",
+    "reply_snippet": "Yes, I'd love to learn more about your product!"
+  }
+}
+```
+
+### `lead.not_interested`
+
+Fires when the AI classifier determines a lead's reply is negative or a rejection. The lead's sending is automatically paused for the campaign. Requires AI features to be enabled in Settings.
+
+```json
+{
+  "event": "lead.not_interested",
+  "data": {
+    "lead_id": 42,
+    "lead_email": "prospect@example.com",
+    "lead_name": "Alice Long",
+    "campaign_id": 5,
+    "classification": "not_interested",
+    "reply_snippet": "Please remove me from your list."
+  }
+}
+```
+
 ### `daily_limit`
 
 Fires when the send job is about to exceed an inbox's daily sending cap.
@@ -332,4 +374,5 @@ The webhook call is non-blocking and failure-safe, so adding new events to criti
 | `GET` | `/api/settings/webhooks/events` | List valid event types |
 | `PATCH` | `/api/settings/webhooks/{id}` | Update a webhook |
 | `DELETE` | `/api/settings/webhooks/{id}` | Delete a webhook |
-| `POST` | `/api/settings/webhooks/{id}/test` | Fire test event |
+| `POST` | `/api/settings/webhooks/{id}/test` | Fire generic test event |
+| `POST` | `/api/settings/webhooks/{id}/test-event` | Fire simulated event with sample data |

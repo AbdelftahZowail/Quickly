@@ -80,9 +80,10 @@ async def get_unibox(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=50, ge=1, le=200),
     leads_only: bool = Query(default=True),
+    lead_status: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
 ):
-    return await list_unibox_conversations(db, page=page, page_size=page_size, leads_only=leads_only)
+    return await list_unibox_conversations(db, page=page, page_size=page_size, leads_only=leads_only, lead_status=lead_status)
 
 
 @router.get("/status")

@@ -87,6 +87,7 @@ export default function Unibox() {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [leadsOnly, setLeadsOnly] = useState(true);
+  const [leadStatusFilter, setLeadStatusFilter] = useState(''); // '' = all statuses
   const [conversations, setConversations] = useState([]);
   const [total, setTotal] = useState(0);
   // pagination state used for incremental loading only (infinite scroll)
@@ -118,6 +119,25 @@ export default function Unibox() {
 
   const totalPages = useMemo(() => Math.max(1, Math.ceil(total / PAGE_SIZE)), [total]);
 
+  const LEAD_STATUSES = [
+    { value: '', label: 'All statuses' },
+    { value: 'active', label: 'Active' },
+    { value: 'replied', label: 'Replied' },
+    { value: 'unsubscribed', label: 'Unsubscribed' },
+    { value: 'bounced', label: 'Bounced' },
+    { value: 'interested', label: 'Interested' },
+    { value: 'not_interested', label: 'Not Interested' },
+  ];
+
+  const STATUS_COLORS = {
+    active: 'bg-blue-50 text-blue-700 border-blue-200',
+    replied: 'bg-green-50 text-green-700 border-green-200',
+    unsubscribed: 'bg-gray-100 text-gray-600 border-gray-300',
+    bounced: 'bg-red-50 text-red-600 border-red-200',
+    interested: 'bg-teal-50 text-teal-700 border-teal-200',
+    not_interested: 'bg-orange-50 text-orange-700 border-orange-200',
+  };
+
   // load one page of conversations.  when `append` is true we merge the
   // results onto the existing list, otherwise we replace the current
   // conversations (used for initial load and refreshing).
@@ -131,7 +151,7 @@ export default function Unibox() {
       }
       try {
         const data = await uniboxRequest(
-          `/unibox?page=${requestedPage}&page_size=${PAGE_SIZE}&leads_only=${leadsOnly}`,
+          `/unibox?page=${requestedPage}&page_size=${PAGE_SIZE}&leads_only=${leadsOnly}${leadStatusFilter ? `&lead_status=${encodeURIComponent(leadStatusFilter)}` : ''}`,
         );
         const items = data?.items || [];
         setTotal(data?.total || 0);
@@ -152,7 +172,7 @@ export default function Unibox() {
         listRequestInFlightRef.current = false;
       }
     },
-    [leadsOnly],
+    [leadsOnly, leadStatusFilter],
   );
 
   const loadThread = useCallback(async (threadId, inboxId) => {
@@ -460,9 +480,19 @@ export default function Unibox() {
               >
                 <span>{leadsOnly ? 'Leads' : 'All'}</span>
               </button>
-              <Button variant="outline" size="sm" onClick={triggerSync} disabled={syncing}>
+              {/* Lead status filter */}
+              <select
+                value={leadStatusFilter}
+                onChange={e => setLeadStatusFilter(e.target.value)}
+                className="text-xs border rounded-full px-2 py-1 bg-white text-gray-600 focus:outline-none focus:ring-1 focus:ring-teal-300"
+              >
+                {LEAD_STATUSES.map(s => (
+                  <option key={s.value} value={s.value}>{s.label}</option>
+                ))}
+              </select>
+              {/* <Button variant="outline" size="sm" onClick={triggerSync} disabled={syncing}>
                 {syncing ? 'Syncing...' : 'Sync now'}
-              </Button>
+              </Button> */}
             </div>
           </div>
 
@@ -500,13 +530,23 @@ export default function Unibox() {
                 >
                   <div className="flex items-center justify-between mb-1">
                     <div className="text-xs text-gray-500 truncate">{item.gmail_account}</div>
-                    {isUnread && (
-                      <span className="flex-shrink-0 ml-1 h-2 w-2 rounded-full bg-red-500" title="Unread reply from lead" />
-                    )}
+                    <div className="flex items-center gap-1.5 shrink-0 ml-1">
+                      {item.lead_status && (
+                        <span className={`text-[10px] border rounded-full px-1.5 py-0.5 font-medium ${STATUS_COLORS[item.lead_status] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
+                          {item.lead_status.replace(/_/g, ' ')}
+                        </span>
+                      )}
+                      {isUnread && (
+                        <span className="h-2 w-2 rounded-full bg-red-500" title="Unread reply from lead" />
+                      )}
+                    </div>
                   </div>
                   <div className={`truncate ${isUnread ? 'font-semibold text-gray-900' : 'font-medium'}`}>
                     {item.subject || '(no subject)'}
                   </div>
+                  {item.lead_email && (
+                    <div className="text-xs text-gray-500 truncate">→ {item.lead_email}</div>
+                  )}
                   <div className="text-sm text-gray-600 truncate">{item.last_message_snippet || ''}</div>
                   <div className="text-xs text-gray-400 mt-1">{formatDateTime(item.timestamp)}</div>
                 </Link>
@@ -559,7 +599,7 @@ export default function Unibox() {
                         </div>
                         {msg.body_html && msg.body_html.trim() ? (
                           <div className="w-full bg-white border border-gray-200 rounded min-h-[220px] overflow-auto">
-                            <EmailContent html={msg.body_html} />
+                            <EmailContent html={msg.body_html} stripTracking />
                           </div>
                         ) : (
                           <div className="text-sm whitespace-pre-wrap break-words">

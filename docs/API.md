@@ -29,7 +29,11 @@ All request/response bodies use `Content-Type: application/json`.
 
 ### `GET /api/status`
 
-Health check and scheduler status.
+Health check and scheduler status.  The SPA uses this endpoint for the
+<strong>Schedule</strong> page banner.  When running in development mode the
+response also carries a `server_time` field, which lets you verify the
+backend clock (useful when using a container or when the time is being
+manipulated via `time_offset_days`).
 
 **Response:**
 
@@ -40,6 +44,7 @@ Health check and scheduler status.
   "last_send_job_run": "2026-01-15T10:30:00Z",
   "last_send_job_sent_count": 5,
   "next_send_job_run": "2026-01-15T10:31:00Z",
+  "server_time": "2026-01-15T10:30:05Z",
   "test_mode": false,
   "app_mode": "production"
 }
@@ -688,6 +693,60 @@ Sent email history for a campaign.
 ### `POST /api/campaigns/{id}/recalculate-queue`
 
 Recalculate queue for a specific campaign after sequence or setting changes.
+
+---
+
+## AI Classification
+
+### `GET /api/settings/ai`
+
+Return the current AI classification settings. The API key is masked in the response.
+
+**Response:**
+
+```json
+{
+  "enabled": true,
+  "provider": "openai",
+  "model": "gpt-4o",
+  "api_key_set": true,
+  "api_key_masked": "s***k"
+}
+```
+
+### `POST /api/settings/ai`
+
+Save AI classification settings.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | Enable/disable AI classification |
+| `provider` | string | Provider name: openai, anthropic, mistral, cohere, groq, google, together |
+| `model` | string | Model name (e.g. gpt-4o, claude-sonnet-4-20250514) |
+| `api_key` | string | API key for the provider |
+
+### `POST /api/settings/ai/verify`
+
+Verify that AI credentials work by sending a test prompt.
+
+**Body:** `{"provider": "openai", "model": "gpt-4o", "api_key": "sk-..."}`
+
+**Response:** `{"ok": true}` or `{"ok": false, "error": "..."}`
+
+### `PATCH /api/campaigns/{id}/leads/{lead_id}`
+
+Update interest classification and sending status for a specific lead in a campaign.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `interest_status` | string\|null | "interested", "not_interested", or "" to clear |
+| `sending_paused` | bool\|null | Pause or resume sending for this lead |
+
+**Response:** `{"ok": true, "interest_status": "interested", "sending_paused": false}`
 
 ---
 

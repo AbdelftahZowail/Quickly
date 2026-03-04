@@ -309,13 +309,16 @@ export default function CampaignDetail() {
 
 // ─── Status badges ────────────────────────────────────────────────────────────
 const BADGE_STYLES = {
-  active:       'bg-emerald-100 text-emerald-700',
-  completed:    'bg-blue-100 text-blue-700',
-  unsubscribed: 'bg-gray-200 text-gray-600',
-  bounced:      'bg-red-100 text-red-700',
-  replied:      'bg-violet-100 text-violet-700',
-  opened:       'bg-amber-100 text-amber-700',
-  clicked:      'bg-orange-100 text-orange-700',
+  active:         'bg-emerald-100 text-emerald-700',
+  completed:      'bg-blue-100 text-blue-700',
+  unsubscribed:   'bg-gray-200 text-gray-600',
+  bounced:        'bg-red-100 text-red-700',
+  replied:        'bg-violet-100 text-violet-700',
+  opened:         'bg-amber-100 text-amber-700',
+  clicked:        'bg-orange-100 text-orange-700',
+  interested:     'bg-green-100 text-green-700',
+  not_interested: 'bg-rose-100 text-rose-700',
+  paused:         'bg-yellow-100 text-yellow-700',
 };
 
 function StatusBadge({ label }) {
@@ -335,6 +338,9 @@ function deriveStatuses(lead) {
   if (lead.replied) badges.push('replied');
   if (lead.opened)  badges.push('opened');
   if (lead.clicked) badges.push('clicked');
+  if (lead.interest_status === 'interested') badges.push('interested');
+  if (lead.interest_status === 'not_interested') badges.push('not_interested');
+  if (lead.sending_paused) badges.push('paused');
   return badges;
 }
 
@@ -348,6 +354,9 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const [msg, setMsg]     = useState(null);
   const [editCell, setEditCell] = useState(null); // { leadId, field }
   const [editValue, setEditValue] = useState('');
+  const [importing, setImporting] = useState(false);
+  const [showFormatInfo, setShowFormatInfo] = useState(false);
+  const fileInputRef = useRef(null);
 
   // All custom field names across all leads
   const customFields = useMemo(() => {
@@ -412,26 +421,116 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     }
   };
 
+  /* Enhanced bulk parser – supports:
+     1. email-per-line  (john@a.com)
+     2. comma-separated (john@a.com, jane@b.com)
+     3. tab-separated rows from Excel / Sheets copy-paste (email \t name \t company ...)
+     4. CSV-style rows with headers (email,name,company\njohn@a.com,John,Acme)
+  */
   const addBulk = async e => {
     e.preventDefault();
-    const emails = bulk.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
-    if (!emails.length) { setMsg({ type: 'error', text: 'No emails' }); return; }
+    const lines = bulk.split('\n').map(s => s.trim()).filter(Boolean);
+    if (!lines.length) { setMsg({ type: 'error', text: 'No data entered' }); return; }
+
+    // Detect if first line could be a header
+    const firstLine = lines[0];
+    const hasTabs = firstLine.includes('\t');
+    const sep = hasTabs ? '\t' : ',';
+    const cells = firstLine.split(sep).map(s => s.trim().toLowerCase());
+    const looksLikeHeader = cells.includes('email');
+
+    let payload;
+    if (looksLikeHeader) {
+      // Parse as tabular data with headers
+      const headers = cells;
+      const emailIdx = headers.indexOf('email');
+      const nameIdx = headers.indexOf('name');
+      payload = lines.slice(1).map(line => {
+        const parts = line.split(sep).map(s => s.trim());
+        const email = parts[emailIdx] || '';
+        const name = nameIdx >= 0 ? (parts[nameIdx] || '') : '';
+        const custom_data = {};
+        headers.forEach((h, i) => {
+          if (i !== emailIdx && i !== nameIdx && parts[i]) {
+            custom_data[h] = parts[i];
+          }
+        });
+        return { email, name: name || undefined, custom_data: Object.keys(custom_data).length ? custom_data : undefined };
+      }).filter(r => r.email);
+    } else {
+      // Simple mode – emails only (comma or newline separated)
+      const all = bulk.split(/[,\n]/).map(s => s.trim()).filter(Boolean);
+      payload = all.map(em => ({ email: em }));
+    }
+
+    if (!payload.length) { setMsg({ type: 'error', text: 'No valid emails found' }); return; }
+
     try {
-      await api.post(`/campaigns/${campaignId}/leads`, emails.map(em => ({ email: em })));
+      const res = await api.post(`/campaigns/${campaignId}/leads`, payload);
       setBulk('');
-      notify({ type: 'success', message: `${emails.length} lead(s) added` });
+      notify({ type: 'success', message: `${res.added || payload.length} lead(s) added` });
       refresh();
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
     }
   };
 
+  // ---- File import ----
+  const handleFileImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImporting(true);
+    try {
+      const res = await api.upload(`/campaigns/${campaignId}/leads/import`, file);
+      notify({ type: 'success', message: `Imported: ${res.added} added, ${res.already_enrolled} already enrolled, ${res.errors} errors` });
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message });
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  // ---- File export ----
+  const handleExport = async () => {
+    try {
+      const res = await api.download(`/campaigns/${campaignId}/leads/export`);
+      if (!res.ok) throw new Error('Export failed');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = res.headers.get('content-disposition')?.match(/filename="?(.+?)"?$/)?.[1] || 'leads.csv';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      notify({ type: 'error', message: err.message });
+    }
+  };
+
   return (
     <div className="space-y-6">
+      {/* Import / Export toolbar */}
+      <div className="flex flex-wrap items-center gap-3">
+        <Button size="sm" variant="outline" onClick={handleExport} disabled={!leads.length}>
+          <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" /></svg>
+          Export CSV
+        </Button>
+        <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" className="hidden" onChange={handleFileImport} />
+        <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={importing}>
+          <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 8l-4-4m0 0L8 8m4-4v12" /></svg>
+          {importing ? 'Importing…' : 'Import CSV'}
+        </Button>
+        <span className="text-xs text-gray-400 ml-1">{leads.length} lead{leads.length !== 1 ? 's' : ''}</span>
+      </div>
+
       {/* Leads table */}
       {leads.length === 0 ? (
         <div className="bg-gray-50 rounded-lg border border-dashed border-gray-300 p-8 text-center text-gray-400">
-          No leads enrolled yet. Add them below.
+          No leads enrolled yet. Add them below or import a CSV file.
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
@@ -443,6 +542,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Stage</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Enrolled</th>
+                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Sending</th>
                 {customFields.map(f => (
                   <th key={f} className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap capitalize">{f}</th>
                 ))}
@@ -475,6 +575,54 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                   {/* enrolled date */}
                   <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">
                     {new Date(l.enrolled_at).toLocaleDateString()}
+                  </td>
+                  {/* Sending toggle */}
+                  <td className="px-4 py-2.5 whitespace-nowrap">
+                    <div className="flex items-center gap-2">
+                      <button
+                        className={`text-xs font-medium px-2 py-1 rounded transition-colors ${
+                          l.sending_paused
+                            ? 'bg-yellow-100 text-yellow-700 hover:bg-yellow-200'
+                            : 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                        }`}
+                        onClick={async () => {
+                          try {
+                            await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
+                              sending_paused: !l.sending_paused,
+                            });
+                            notify({ type: 'success', message: l.sending_paused ? 'Sending resumed' : 'Sending paused' });
+                            refresh();
+                          } catch (err) { notify({ type: 'error', message: err.message }); }
+                        }}
+                        title={l.sending_paused ? 'Click to resume sending' : 'Click to pause sending'}
+                      >
+                        {l.sending_paused ? 'Paused' : 'Active'}
+                      </button>
+                      {l.interest_status && (
+                        <span
+                          className={`text-[10px] rounded px-1.5 py-0.5 font-medium cursor-pointer ${
+                            l.interest_status === 'interested'
+                              ? 'bg-green-100 text-green-700 hover:bg-green-200'
+                              : 'bg-rose-100 text-rose-700 hover:bg-rose-200'
+                          }`}
+                          title={`AI classified as ${l.interest_status}. Click to toggle.`}
+                          onClick={async () => {
+                            const newStatus = l.interest_status === 'interested' ? 'not_interested' : 'interested';
+                            const newPaused = newStatus === 'not_interested';
+                            try {
+                              await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
+                                interest_status: newStatus,
+                                sending_paused: newPaused,
+                              });
+                              notify({ type: 'success', message: `Marked as ${newStatus.replace('_', ' ')}` });
+                              refresh();
+                            } catch (err) { notify({ type: 'error', message: err.message }); }
+                          }}
+                        >
+                          {l.interest_status === 'interested' ? 'Interested' : 'Not Interested'}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   {/* custom data columns — inline editable */}
                   {customFields.map(f => {
@@ -527,7 +675,31 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
 
       {/* Add leads */}
       <div className="bg-white rounded-lg border border-gray-200 p-5">
-        <h3 className="font-semibold text-gray-800 mb-3">Add leads</h3>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-gray-800">Add leads</h3>
+          <button
+            className="text-gray-400 hover:text-teal-600 transition-colors"
+            onClick={() => setShowFormatInfo(v => !v)}
+            title="Accepted data formats"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          </button>
+        </div>
+
+        {showFormatInfo && (
+          <div className="mb-4 p-3 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-800 space-y-2">
+            <p className="font-semibold">Accepted formats for bulk paste:</p>
+            <ul className="list-disc pl-5 space-y-1 text-xs">
+              <li><strong>Emails only</strong> — one per line or comma-separated<br/><code className="bg-teal-100 px-1 rounded">john@a.com, jane@b.com</code></li>
+              <li><strong>Tab-separated (Excel / Sheets copy-paste)</strong> — first row = headers<br/><code className="bg-teal-100 px-1 rounded">email&nbsp;&nbsp;&nbsp;name&nbsp;&nbsp;&nbsp;company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com&nbsp;&nbsp;&nbsp;John&nbsp;&nbsp;&nbsp;Acme</code></li>
+              <li><strong>Comma-separated with headers</strong><br/><code className="bg-teal-100 px-1 rounded">email,name,company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com,John,Acme</code></li>
+            </ul>
+            <p className="text-xs text-teal-600 mt-1">Columns beyond <em>email</em> and <em>name</em> are saved as custom fields.</p>
+            <p className="font-semibold mt-2">CSV file import:</p>
+            <p className="text-xs">Upload a <code className="bg-teal-100 px-1 rounded">.csv</code> or <code className="bg-teal-100 px-1 rounded">.tsv</code> file with an <em>email</em> header column. Extra columns become custom fields.</p>
+          </div>
+        )}
+
         <div className="flex gap-2 mb-4">
           <Button size="sm" variant={mode==='single'?'default':'outline'} onClick={()=>setMode('single')}>Single</Button>
           <Button size="sm" variant={mode==='bulk'?'default':'outline'}   onClick={()=>setMode('bulk')}>Bulk paste</Button>
@@ -570,10 +742,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         {mode === 'bulk' && (
           <form onSubmit={addBulk} className="space-y-3">
             <div>
-              <label className="block text-sm text-gray-600 mb-1">Emails (one per line or comma-separated)</label>
+              <label className="block text-sm text-gray-600 mb-1">Paste leads — emails, CSV rows, or Excel copy-paste (see ⓘ above)</label>
               <textarea
-                rows={5}
+                rows={6}
                 className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                placeholder={"email,name,company\njohn@acme.com,John Doe,Acme Inc\njane@co.io,Jane Smith,Co"}
                 value={bulk}
                 onChange={e => setBulk(e.target.value)}
               />
@@ -597,16 +770,45 @@ const SERIES_LIST = [
 ];
 
 function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
-  const today = new Date().toISOString().slice(0, 10);
-  const past30 = new Date(); past30.setDate(past30.getDate()-30);
+  const today = new Date();
+  const localIso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+  const todayStr = localIso(today);
 
-  const [startDate, setStartDate] = useState(past30.toISOString().slice(0,10));
-  const [endDate,   setEndDate]   = useState(today);
+  // Date preset helpers
+  const presets = useMemo(() => {
+    const d = (offset) => { const t = new Date(today); t.setDate(t.getDate() + offset); return localIso(t); };
+    const monday = (dt) => { const t = new Date(dt); const day = t.getDay(); t.setDate(t.getDate() - (day === 0 ? 6 : day - 1)); return t; };
+    const lastWeekEnd = new Date(monday(today)); lastWeekEnd.setDate(lastWeekEnd.getDate() - 1);
+    const lastWeekStart = localIso(monday(lastWeekEnd));
+    const lastMonthStart = localIso(new Date(today.getFullYear(), today.getMonth() - 1, 1));
+    const lastMonthEnd = localIso(new Date(today.getFullYear(), today.getMonth(), 0));
+    return [
+      { label: 'Last 7 Days',  start: d(-6),          end: todayStr },
+      { label: 'Last Week',    start: lastWeekStart,  end: localIso(lastWeekEnd) },
+      { label: 'Last 30 Days', start: d(-29),         end: todayStr },
+      { label: 'Last Month',   start: lastMonthStart, end: lastMonthEnd },
+      { label: 'Last 90 Days', start: d(-89),         end: todayStr },
+    ];
+  }, [todayStr]);
+
+  const [activePreset, setActivePreset] = useState('Last 7 Days');
+  const defaultRange = presets.find(p => p.label === 'Last 7 Days') || presets[0];
+  const [startDate, setStartDate] = useState(defaultRange.start);
+  const [endDate,   setEndDate]   = useState(defaultRange.end);
   const [hide, setHide] = useState({
     sent: false, totalOpens: false, uniqueOpens: false,
     totalReplies: false, totalClicks: false, uniqueClicks: false,
   });
   const initializedRef = useRef(false);
+  const [zoomRange, setZoomRange] = useState({ start: 0, end: 0 });
+  const activeChartIdxRef = useRef(null);
+  const chartContainerRef = useRef(null);
+
+  const applyPreset = (preset) => {
+    setActivePreset(preset.label);
+    setStartDate(preset.start);
+    setEndDate(preset.end);
+  };
 
   const filteredSent = useMemo(() =>
     allSent.filter(e => {
@@ -619,6 +821,7 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
   );
 
   const chartData = useMemo(() => {
+    // Build lookup from actual data
     const map = {};
     const seenOpen = {}, seenClick = {};
     filteredSent.forEach(e => {
@@ -637,11 +840,23 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
       map[d].uniqueOpens  = seenOpen[d].size;
       map[d].uniqueClicks = seenClick[d].size;
     });
-    return Object.values(map).sort((a,b)=>a.date.localeCompare(b.date));
-  }, [filteredSent]);
+
+    // Fill every day in the range with zeros where no data exists
+    const result = [];
+    if (startDate && endDate) {
+      const cur = new Date(startDate + 'T00:00:00');
+      const end = new Date(endDate + 'T00:00:00');
+      while (cur <= end) {
+        const iso = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,'0')}-${String(cur.getDate()).padStart(2,'0')}`;
+        result.push(map[iso] || { date: iso, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 });
+        cur.setDate(cur.getDate() + 1);
+      }
+    }
+    return result;
+  }, [filteredSent, startDate, endDate]);
 
   useEffect(() => {
-    if (!initializedRef.current && chartData.length > 0) {
+    if (!initializedRef.current && chartData.length > 0 && chartData.some(d => SERIES_LIST.some(s => d[s.key] > 0))) {
       const nh = {};
       SERIES_LIST.forEach(s => { nh[s.key] = chartData.every(d => d[s.key] === 0); });
       setHide(p => ({ ...p, ...nh }));
@@ -649,7 +864,44 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
     }
   }, [chartData]);
 
+  // Reset zoom when chartData changes (new date range selected)
+  useEffect(() => {
+    setZoomRange({ start: 0, end: Math.max(0, chartData.length - 1) });
+  }, [chartData]);
+
+  // Attach wheel listener with passive:false so we can preventDefault
+  useEffect(() => {
+    const el = chartContainerRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      setZoomRange(prev => {
+        const len = chartData.length;
+        if (len <= 2) return prev;
+        const windowSize = prev.end - prev.start + 1;
+        const pivot = activeChartIdxRef.current ?? Math.floor((prev.start + prev.end) / 2);
+        const factor = e.deltaY < 0 ? 0.75 : 1.35;
+        const newSize = Math.max(3, Math.min(len, Math.round(windowSize * factor)));
+        const pivotRatio = windowSize > 1 ? (pivot - prev.start) / (windowSize - 1) : 0.5;
+        let newStart = Math.round(pivot - pivotRatio * (newSize - 1));
+        let newEnd = newStart + newSize - 1;
+        if (newStart < 0) { newStart = 0; newEnd = newSize - 1; }
+        if (newEnd >= len) { newEnd = len - 1; newStart = Math.max(0, len - newSize); }
+        return { start: newStart, end: newEnd };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [chartData]);
+
+  const displayData = chartData.slice(zoomRange.start, zoomRange.end + 1);
+  const handleChartMouseMove = (state) => {
+    if (state?.activeTooltipIndex != null)
+      activeChartIdxRef.current = zoomRange.start + state.activeTooltipIndex;
+  };
+
   const stats = campaign?.stats || {};
+  const rangeLeads   = new Set(filteredSent.map(e => e.lead_id).filter(Boolean)).size;
   const rangeSent    = chartData.reduce((a,d)=>a+d.sent, 0);
   const rangeOpens   = chartData.reduce((a,d)=>a+d.totalOpens, 0);
   const rangeReplies = chartData.reduce((a,d)=>a+d.totalReplies, 0);
@@ -658,15 +910,24 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
   const replyRate    = rangeSent > 0 ? Math.round(rangeReplies / rangeSent * 100) : 0;
   const clickRate    = rangeSent > 0 ? Math.round(rangeClicks  / rangeSent * 100) : 0;
 
+  // Format x-axis dates short
+  const formatXDate = (d) => {
+    if (!d) return '';
+    const parts = d.split('-');
+    return `${parseInt(parts[1])}/${parseInt(parts[2])}`;
+  };
+
   return (
     <div className="space-y-6">
-      {/* All-time KPIs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      {/* Range KPIs — all values reflect the selected date range */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
-          { label: 'Total Leads',   value: stats.total_leads  || 0 },
-          { label: 'Emails Sent',   value: stats.emails_sent  || 0 },
-          { label: 'Replies',       value: stats.replies      || 0 },
-          { label: 'Pending',       value: stats.scheduled    || 0 },
+          { label: 'Leads',      value: rangeLeads },
+          { label: 'Sent',       value: rangeSent },
+          { label: 'Replies',    value: rangeReplies },
+          { label: 'Open Rate',  value: `${openRate}%` },
+          { label: 'Reply Rate', value: `${replyRate}%` },
+          { label: 'Click Rate', value: `${clickRate}%` },
         ].map(({ label, value }) => (
           <Card key={label} className="p-4">
             <div className="text-xs text-gray-500 mb-1">{label}</div>
@@ -675,71 +936,80 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
         ))}
       </div>
 
-      {/* Date range */}
-      <div className="flex flex-wrap items-center gap-4">
-        <label className="flex items-center gap-2 text-sm text-gray-600">
-          From
-          <DatePicker value={startDate} onChange={setStartDate} />
-        </label>
-        <label className="flex items-center gap-2 text-sm text-gray-600">
-          To
-          <DatePicker value={endDate} onChange={setEndDate} />
-        </label>
-      </div>
-
-      {/* Range KPIs */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        {[
-          { label: 'Sent (range)',   value: rangeSent },
-          { label: 'Open Rate',      value: `${openRate}%` },
-          { label: 'Reply Rate',     value: `${replyRate}%` },
-          { label: 'Click Rate',     value: `${clickRate}%` },
-        ].map(({ label, value }) => (
-          <Card key={label} className="p-4">
-            <div className="text-xs text-gray-500 mb-1">{label}</div>
-            <div className="text-2xl font-bold text-gray-800">{value}</div>
-          </Card>
+      {/* Date range presets */}
+      <div className="flex flex-wrap items-center gap-2">
+        {presets.map(p => (
+          <button
+            key={p.label}
+            onClick={() => applyPreset(p)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+              activePreset === p.label
+                ? 'bg-teal-500 text-white border-teal-500'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-teal-300 hover:bg-teal-50'
+            }`}
+          >
+            {p.label}
+          </button>
         ))}
+        <button
+          onClick={() => setActivePreset('custom')}
+          className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+            activePreset === 'custom'
+              ? 'bg-teal-500 text-white border-teal-500'
+              : 'bg-white text-gray-600 border-gray-300 hover:border-teal-300 hover:bg-teal-50'
+          }`}
+        >
+          Custom
+        </button>
       </div>
 
-      {/* Chart */}
-      {chartData.length === 0 ? (
-        <Card className="p-10 text-center text-gray-400">No data for selected date range.</Card>
-      ) : (
-        <Card className="p-4">
-          <div style={{ width: '100%', height: 290 }}>
-            <ResponsiveContainer>
-              <ReAreaChart data={chartData} margin={{ top: 10, right: 20, left: 0, bottom: 30 }}>
-                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
-                <YAxis tick={{ fontSize: 11 }} />
-                <Tooltip wrapperStyle={{ zIndex: 1000 }} />
-                <CartesianGrid strokeDasharray="3 3" />
-                {SERIES_LIST.map(s => (
-                  <Area key={s.key} name={s.name} type="monotone" dataKey={s.key}
-                    stroke={s.stroke} fill={s.fill} hide={hide[s.key]} />
-                ))}
-                <Legend
-                  verticalAlign="bottom"
-                  content={() => (
-                    <div className="flex flex-wrap justify-center gap-3 mt-2">
-                      {SERIES_LIST.map(s => (
-                        <span
-                          key={s.key}
-                          onClick={() => setHide(p => ({ ...p, [s.key]: !p[s.key] }))}
-                          className={`flex items-center gap-1 cursor-pointer select-none text-xs transition-opacity ${hide[s.key]?'opacity-40':''}`}
-                        >
-                          <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: s.stroke }} />
-                          {s.name}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                />
-              </ReAreaChart>
-            </ResponsiveContainer>
-          </div>
-        </Card>
+      {activePreset === 'custom' && (
+        <div className="flex flex-wrap items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            From
+            <DatePicker value={startDate} onChange={v => { setStartDate(v); setActivePreset('custom'); }} />
+          </label>
+          <label className="flex items-center gap-2 text-sm text-gray-600">
+            To
+            <DatePicker value={endDate} onChange={v => { setEndDate(v); setActivePreset('custom'); }} />
+          </label>
+        </div>
       )}
+
+      {/* Chart — scroll to zoom, centered on hovered day */}
+      <Card className="p-4">
+        <div ref={chartContainerRef} style={{ width: '100%', height: 290 }}>
+          <ResponsiveContainer>
+            <ReAreaChart data={displayData} onMouseMove={handleChartMouseMove} margin={{ top: 10, right: 20, left: 0, bottom: 30 }}>
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={formatXDate} />
+              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+              <Tooltip wrapperStyle={{ zIndex: 1000 }} />
+              <CartesianGrid strokeDasharray="3 3" />
+              {SERIES_LIST.map(s => (
+                <Area key={s.key} name={s.name} type="monotone" dataKey={s.key}
+                  stroke={s.stroke} fill={s.fill} hide={hide[s.key]} />
+              ))}
+              <Legend
+                verticalAlign="bottom"
+                content={() => (
+                  <div className="flex flex-wrap justify-center gap-3 mt-2">
+                    {SERIES_LIST.map(s => (
+                      <span
+                        key={s.key}
+                        onClick={() => setHide(p => ({ ...p, [s.key]: !p[s.key] }))}
+                        className={`flex items-center gap-1 cursor-pointer select-none text-xs transition-opacity ${hide[s.key]?'opacity-40':''}`}
+                      >
+                        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: s.stroke }} />
+                        {s.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              />
+            </ReAreaChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
     </div>
   );
 }
@@ -765,6 +1035,26 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
   });
   const [msg,    setMsg]    = useState(null);
   const [saving, setSaving] = useState(false);
+  const [tzSearch, setTzSearch] = useState(null); // null = not focused
+
+  // pre-compute timezone list once
+  const tzList = useMemo(() => {
+    return Intl.supportedValuesOf('timeZone').map(tz => {
+      let offsetLabel = '';
+      try {
+        const parts = new Intl.DateTimeFormat('en', {
+          timeZone: tz, timeZoneName: 'shortOffset',
+        }).formatToParts(new Date());
+        const off = parts.find(p => p.type === 'timeZoneName');
+        if (off) offsetLabel = ` (${off.value})`;
+      } catch (_) {}
+      return { value: tz, label: `${tz.replace(/_/g, ' ')}${offsetLabel}` };
+    });
+  }, []);
+
+  const filteredTz = tzSearch
+    ? tzList.filter(t => t.label.toLowerCase().includes(tzSearch.toLowerCase()))
+    : tzList;
 
   const toggleDay   = d  => setForm(f => { const s=new Set(f.sending_days); s.has(d)?s.delete(d):s.add(d); return {...f, sending_days:[...s].sort()}; });
   const toggleInbox = id => setForm(f => { const s=new Set(f.inbox_ids);   s.has(id)?s.delete(id):s.add(id); return {...f, inbox_ids:[...s]}; });
@@ -874,17 +1164,37 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
         {/* Timezone */}
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
-          <select
-            className="w-full border rounded-lg px-3 py-2 text-sm"
-            value={form.timezone}
-            onChange={e => setForm(f=>({...f, timezone: e.target.value}))}
-          >
-            {Intl.supportedValuesOf('timeZone').map(tz => (
-              <option key={tz} value={tz}>{tz.replace(/_/g, ' ')}</option>
-            ))}
-          </select>
+          <div className="relative">
+            <input
+              type="text"
+              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+              placeholder="Search timezones…"
+              value={tzSearch !== null ? tzSearch : (form.timezone || '')}
+              onChange={e => setTzSearch(e.target.value)}
+              onFocus={() => setTzSearch(form.timezone || '')}
+              onBlur={() => setTimeout(() => setTzSearch(null), 200)}
+            />
+            {tzSearch !== null && filteredTz.length > 0 && (
+              <div className="absolute z-20 w-full top-full mt-1 border rounded-lg max-h-48 overflow-y-auto bg-white dark:bg-gray-900 shadow-lg">
+                {filteredTz.slice(0, 100).map(t => (
+                  <button
+                    key={t.value}
+                    type="button"
+                    className={`block w-full text-left px-3 py-1.5 text-sm hover:bg-teal-50 dark:hover:bg-gray-800 ${t.value === form.timezone ? 'bg-teal-50 font-medium' : ''}`}
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      setForm(f => ({ ...f, timezone: t.value }));
+                      setTzSearch(null);
+                    }}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <p className="text-xs text-gray-400 mt-1">
-            Sending window times are interpreted in this timezone.
+            Sending window times are interpreted in this timezone. Emails are stored internally in UTC and sent at the correct local time.
           </p>
         </div>
 
@@ -1034,6 +1344,13 @@ function PreviewModal({ sequence, campaignId, leads, onClose }) {
   const [err,       setErr]       = useState(null);
   const [testEmail, setTestEmail] = useState('');
   const [testState, setTestState] = useState(null); // null | 'sending' | 'success' | {error}
+  const backdropDown = useRef(false);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1072,11 +1389,12 @@ function PreviewModal({ sequence, campaignId, leads, onClose }) {
   return (
     <div
       className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-      onClick={onClose}
+      onMouseDown={e => { backdropDown.current = e.target === e.currentTarget; }}
+      onClick={() => { if (backdropDown.current) onClose(); }}
     >
       <div
         data-darkreader-ignore
-        className="rounded shadow w-full max-w-3xl max-h-[90vh] flex flex-col"
+        className="rounded-xl shadow-lg w-full max-w-2xl max-h-[90vh] flex flex-col mx-auto"
         style={{ backgroundColor: 'white' }}
         onClick={e => e.stopPropagation()}
       >
@@ -1188,18 +1506,27 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
   const [form, setForm] = useState({ subject: '', body: '', wait_days_after_previous: 0, is_html: false });
   const [msg,  setMsg]  = useState(null);
   const [editing,         setEditing]         = useState(null);
-  const [originalEditing, setOriginalEditing] = useState(null); // snapshot for change detection
+  const [originalEditing, setOriginalEditing] = useState(null);
   const [editDirty,       setEditDirty]       = useState(false);
   const [showEditWarning, setShowEditWarning] = useState(false);
   const [previewSeq, setPreviewSeq] = useState(null);
+  const [selectedIdx, setSelectedIdx] = useState(sequences.length > 0 ? 0 : null);
+  const [showAddForm, setShowAddForm] = useState(sequences.length === 0);
 
   useEffect(() => { setPos(sequences.length); }, [sequences]);
+  useEffect(() => {
+    if (sequences.length > 0 && selectedIdx === null) setSelectedIdx(0);
+    if (sequences.length === 0) { setSelectedIdx(null); setShowAddForm(true); }
+  }, [sequences.length]);
+
+  const selectedSeq = selectedIdx !== null && sequences[selectedIdx] ? sequences[selectedIdx] : null;
 
   const openEdit = (seq) => {
     const copy = { ...seq, is_html: seq.is_html ?? false };
     setEditing(copy);
     setOriginalEditing(copy);
     setEditDirty(false);
+    setShowAddForm(false);
   };
 
   const updateEditing = (patch) => {
@@ -1221,6 +1548,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
       await api.post(`/campaigns/${campaignId}/sequences`, { ...form, position: pos });
       setForm({ subject: '', body: '', wait_days_after_previous: 0, is_html: false });
       setMsg({ type: 'success', text: 'Sequence added' });
+      setShowAddForm(false);
       refresh();
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
@@ -1248,153 +1576,191 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
     try {
       await api.del(`/campaigns/${campaignId}/sequences/${seq.id}`);
       notify({ type: 'success', message: 'Sequence deleted' });
+      if (selectedIdx >= sequences.length - 1) setSelectedIdx(Math.max(0, sequences.length - 2));
       refresh();
     } catch (e) {
       notify({ type: 'error', message: e.message });
     }
   };
 
-  return (
-    <div className="space-y-6">
-      {sequences.length === 0 ? (
-        <div className="bg-gray-50 rounded-lg border border-dashed border-gray-300 p-8 text-center text-gray-400">
-          No sequences yet. Add one below.
-        </div>
-      ) : (
-        <div className="overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
-          <table className="min-w-full text-sm bg-white">
-            <thead>
-              <tr className="bg-gray-50 border-b border-gray-200">
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">#</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Wait</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Subject</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-600">Body preview</th>
-                <th className="px-4 py-3 text-center font-semibold text-gray-600">HTML</th>
-                <th className="px-4 py-3"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {sequences.map(s => (
-                <tr key={s.id} className="border-b border-gray-100 hover:bg-gray-50/60">
-                  <td className="px-4 py-3 font-medium text-gray-700">{s.position+1}</td>
-                  <td className="px-4 py-3 text-gray-500 whitespace-nowrap">{s.wait_days_after_previous}d</td>
-                  <td className="px-4 py-3 text-gray-800">
-                    {s.subject || <em className="text-gray-400">reply</em>}
-                  </td>
-                  <td className="px-4 py-3 text-gray-500 max-w-sm">
-                    <span className="truncate block">{s.is_html ? '〈HTML〉' : s.body}</span>
-                  </td>
-                  <td className="px-4 py-3 text-center text-gray-500">{s.is_html ? '✓' : '—'}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1.5 justify-end">
-                      <Button size="sm" variant="outline" onClick={()=>setPreviewSeq(s)}>Preview</Button>
-                      <Button size="sm" variant="outline" onClick={()=>openEdit(s)}>Edit</Button>
-                      <Button size="sm" variant="destructive"  onClick={()=>deleteSeq(s)}>Delete</Button>
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+  const getCumulativeDay = (idx) => {
+    let days = 0;
+    for (let i = 0; i <= idx; i++) days += sequences[i]?.wait_days_after_previous || 0;
+    return days;
+  };
 
-      {/* Add sequence */}
-      <div className="bg-white rounded-lg border border-gray-200 p-5">
-        <h3 className="font-semibold text-gray-800 mb-3">Add sequence</h3>
-        {msg && <div className={`mb-2 text-sm ${msg.type==='error'?'text-red-600':'text-green-600'}`}>{msg.text}</div>}
-        <form onSubmit={submit} className="space-y-4">
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Subject</label>
-            <input
-              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-              value={form.subject}
-              onChange={e => setForm(f=>({...f, subject: e.target.value}))}
-              placeholder="Leave blank to reply in same thread"
-            />
+  return (
+    <div className="flex gap-0 min-h-[520px] rounded-xl border border-gray-200 bg-white overflow-hidden shadow-sm">
+      {/* ── Left: Step timeline ── */}
+      <div className="w-72 shrink-0 border-r border-gray-200 bg-gray-50 flex flex-col">
+        <div className="px-4 py-3 border-b border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-700">Sequence Steps</h3>
+          <p className="text-xs text-gray-400 mt-0.5">{sequences.length} step{sequences.length !== 1 ? 's' : ''}</p>
+        </div>
+        <div className="flex-1 overflow-y-auto px-3 py-3">
+          {sequences.length === 0 && (
+            <p className="text-xs text-gray-400 text-center py-4">No steps yet. Add one to get started.</p>
+          )}
+          <div className="relative">
+            {sequences.map((s, idx) => {
+              const isActive = editing?.id === s.id || (selectedIdx === idx && !editing && !showAddForm);
+              const cumulDay = getCumulativeDay(idx);
+              return (
+                <div key={s.id}>
+                  {/* Step row — circle column is always exactly w-8 so all cards are the same width */}
+                  <div className="flex gap-3">
+                    <div className="w-8 shrink-0 flex items-center justify-center">
+                      <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold border-2 transition-all z-10 ${
+                        isActive ? 'bg-teal-500 border-teal-500 text-white shadow-md' : 'bg-white border-gray-300 text-gray-500'
+                      }`}>{idx + 1}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => { setSelectedIdx(idx); setEditing(null); setShowAddForm(false); }}
+                      className={`flex-1 min-w-0 text-left rounded-lg px-3 py-2.5 transition-all border cursor-pointer ${
+                        isActive ? 'bg-teal-50 border-teal-300 shadow-sm' : 'bg-white border-gray-200 hover:border-teal-200 hover:bg-teal-50/30'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1">
+                        <span className={`text-sm font-medium truncate ${isActive ? 'text-teal-700' : 'text-gray-800'}`}>
+                          {s.subject || <em className="text-gray-400 font-normal text-xs">Reply in thread</em>}
+                        </span>
+                        {s.is_html && <span className="text-[9px] bg-blue-100 text-blue-600 rounded px-1 py-0.5 font-medium ml-1 shrink-0">HTML</span>}
+                      </div>
+                      <div className="text-[11px] text-gray-400 mt-0.5">Day {cumulDay}{idx === 0 ? ' (start)' : ''}</div>
+                    </button>
+                  </div>
+                  {/* Connector between steps — rendered as its own row so it never affects card width */}
+                  {idx < sequences.length - 1 && (
+                    <div className="flex gap-3">
+                      <div className="w-8 shrink-0 flex flex-col items-center">
+                        <div className="w-0.5 h-4 bg-gray-300" />
+                        <div className="text-[10px] font-medium text-gray-400 bg-gray-100 border border-gray-200 rounded-full px-2 py-0.5 my-0.5 whitespace-nowrap">
+                          {sequences[idx + 1]?.wait_days_after_previous || 0}d wait
+                        </div>
+                        <div className="w-0.5 h-4 bg-gray-300" />
+                      </div>
+                    </div>
+                  )}
+                  {/* Small gap after each step */}
+                  <div className="h-2" />
+                </div>
+              );
+            })}
           </div>
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Body *</label>
-            <SequenceBodyEditor
-              value={form.body}
-              onChange={val => setForm(f=>({...f, body: val}))}
-              isHtml={form.is_html}
-              onIsHtmlChange={v => setForm(f=>({...f, is_html: v}))}
-              isFirstSequence={pos===0}
-              campaign={campaign}
-              required
-            />
-          </div>
-          <div>
-            <label className="block text-sm text-gray-600 mb-1">Wait days after previous</label>
-            <input
-              type="number" min={0}
-              className="w-24 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-              value={form.wait_days_after_previous}
-              onChange={e => setForm(f=>({...f, wait_days_after_previous: +e.target.value}))}
-            />
-          </div>
-          <Button size="sm" variant="default">Add sequence</Button>
-        </form>
+        </div>
+        <div className="p-3 border-t border-gray-200">
+          <button
+            type="button"
+            onClick={() => { setShowAddForm(true); setEditing(null); setSelectedIdx(null); }}
+            className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border-2 border-dashed text-sm font-medium transition-colors ${
+              showAddForm ? 'border-teal-400 bg-teal-50 text-teal-700' : 'border-gray-300 text-gray-500 hover:border-teal-300 hover:text-teal-600 hover:bg-teal-50/30'
+            }`}
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" /></svg>
+            Add Step
+          </button>
+        </div>
       </div>
 
-      {/* Edit modal */}
-      {editing && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-          onClick={tryCloseEdit}
-        >
-          <div
-            data-darkreader-ignore
-            className="p-6 rounded shadow w-full max-w-2xl max-h-[90vh] overflow-y-auto"
-            style={{ backgroundColor: 'white' }}
-            onClick={e=>e.stopPropagation()}
-          >
-            <h3 className="font-semibold text-gray-800 mb-4">Edit Sequence #{editing.position+1}</h3>
-            <form onSubmit={saveEdit} className="space-y-4">
+      {/* ── Right: Editor / Detail Panel ── */}
+      <div className="flex-1 flex flex-col min-w-0">
+        {editing && (
+          <div className="flex-1 flex flex-col overflow-y-auto">
+            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
               <div>
-                <label className="block text-sm text-gray-600 mb-1">Subject</label>
-                <input
-                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={editing.subject||''}
-                  onChange={e=>updateEditing({ subject: e.target.value })}
-                  placeholder="Leave blank to reply in same thread"
-                />
+                <h3 className="font-semibold text-gray-800">Edit Step #{editing.position + 1}</h3>
+                <p className="text-xs text-gray-400">Modify the email content and timing</p>
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => setPreviewSeq(editing)}>Preview</Button>
+                <Button size="sm" variant="destructive" onClick={() => deleteSeq(editing)}>Delete</Button>
+              </div>
+            </div>
+            <form onSubmit={saveEdit} className="flex-1 overflow-y-auto p-6 space-y-5">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={editing.subject || ''} onChange={e => updateEditing({ subject: e.target.value })} placeholder="Leave blank to reply in same thread" />
               </div>
               <div>
-                <label className="block text-sm text-gray-600 mb-1">Body *</label>
-                <SequenceBodyEditor
-                  value={editing.body}
-                  onChange={val=>updateEditing({ body: val })}
-                  isHtml={editing.is_html??false}
-                  onIsHtmlChange={v=>updateEditing({ is_html: v })}
-                  isFirstSequence={editing.position===0}
-                  campaign={campaign}
-                  required
-                />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
+                <SequenceBodyEditor value={editing.body} onChange={val => updateEditing({ body: val })} isHtml={editing.is_html ?? false} onIsHtmlChange={v => updateEditing({ is_html: v })} isFirstSequence={editing.position === 0} campaign={campaign} required />
               </div>
               <div>
-                <label className="block text-sm text-gray-600 mb-1">Wait days</label>
-                <input
-                  type="number" min={0}
-                  className="w-24 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={editing.wait_days_after_previous}
-                  onChange={e=>updateEditing({ wait_days_after_previous: +e.target.value })}
-                />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Wait days after previous step</label>
+                <input type="number" min={0} className="w-28 border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={editing.wait_days_after_previous} onChange={e => updateEditing({ wait_days_after_previous: +e.target.value })} />
               </div>
-              <div className="flex gap-2 pt-1">
-                <Button size="sm" variant="default">Save</Button>
+              <div className="flex gap-2 pt-2">
+                <Button size="sm" variant="default">Save Changes</Button>
                 <Button type="button" size="sm" variant="outline" onClick={tryCloseEdit}>Cancel</Button>
               </div>
             </form>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* Unsaved changes warning */}
+        {!editing && !showAddForm && selectedSeq && (
+          <div className="flex-1 flex flex-col overflow-y-auto">
+            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
+              <div>
+                <h3 className="font-semibold text-gray-800">Step {selectedSeq.position + 1}{selectedSeq.subject ? ` — ${selectedSeq.subject}` : ' — Reply in thread'}</h3>
+                <p className="text-xs text-gray-400">{selectedSeq.wait_days_after_previous}d wait{selectedSeq.is_html ? ' · HTML' : ' · Plain text'}{' · Day ' + getCumulativeDay(selectedIdx)}</p>
+              </div>
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => setPreviewSeq(selectedSeq)}>Preview</Button>
+                <Button size="sm" variant="default" onClick={() => openEdit(selectedSeq)}>Edit</Button>
+                <Button size="sm" variant="destructive" onClick={() => deleteSeq(selectedSeq)}>Delete</Button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6">
+              <div className="mb-5">
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Subject</span>
+                <p className="text-gray-800 font-medium">{selectedSeq.subject || <em className="text-gray-400 font-normal">Reply in same thread</em>}</p>
+              </div>
+              <div>
+                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
+                {selectedSeq.is_html ? (
+                  <div className="border rounded-lg p-5 bg-white prose prose-sm max-w-none min-h-[200px]" dangerouslySetInnerHTML={{ __html: selectedSeq.body }} />
+                ) : (
+                  <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800 min-h-[200px]">{selectedSeq.body || '(empty)'}</pre>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!editing && showAddForm && (
+          <div className="flex-1 flex flex-col overflow-y-auto">
+            <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
+              <h3 className="font-semibold text-gray-800">Add New Step</h3>
+              <p className="text-xs text-gray-400">This will become step #{sequences.length + 1} in the sequence</p>
+            </div>
+            <form onSubmit={submit} className="flex-1 overflow-y-auto p-6 space-y-5">
+              {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>{msg.text}</div>}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={form.subject} onChange={e => setForm(f => ({ ...f, subject: e.target.value }))} placeholder="Leave blank to reply in same thread" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
+                <SequenceBodyEditor value={form.body} onChange={val => setForm(f => ({ ...f, body: val }))} isHtml={form.is_html} onIsHtmlChange={v => setForm(f => ({ ...f, is_html: v }))} isFirstSequence={pos === 0} campaign={campaign} required />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Wait days after previous step</label>
+                <input type="number" min={0} className="w-28 border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={form.wait_days_after_previous} onChange={e => setForm(f => ({ ...f, wait_days_after_previous: +e.target.value }))} />
+              </div>
+              <Button size="sm" variant="default">Add Step</Button>
+            </form>
+          </div>
+        )}
+
+        {!editing && !showAddForm && !selectedSeq && (
+          <div className="flex-1 flex items-center justify-center text-gray-400 text-sm">Select a step or add a new one to get started.</div>
+        )}
+      </div>
+
       {showEditWarning && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60]">
-          <div data-darkreader-ignore className="rounded shadow p-6 max-w-sm w-full mx-4" style={{ backgroundColor: 'white' }}>
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
+          <div data-darkreader-ignore className="rounded-xl shadow-lg p-6 w-full max-w-sm mx-auto" style={{ backgroundColor: 'white' }}>
             <h3 className="font-semibold text-gray-800 mb-1">Discard changes?</h3>
             <p className="text-sm text-gray-500 mb-4">You have unsaved changes. Closing will discard them.</p>
             <div className="flex gap-2 justify-end">
@@ -1405,14 +1771,8 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
         </div>
       )}
 
-      {/* Preview modal */}
       {previewSeq && (
-        <PreviewModal
-          sequence={previewSeq}
-          campaignId={campaignId}
-          leads={leads}
-          onClose={()=>setPreviewSeq(null)}
-        />
+        <PreviewModal sequence={previewSeq} campaignId={campaignId} leads={leads} onClose={() => setPreviewSeq(null)} />
       )}
     </div>
   );

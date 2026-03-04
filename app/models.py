@@ -51,6 +51,11 @@ class Lead(Base):
     campaign_leads = relationship("CampaignLead", back_populates="lead", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="lead")
     replies = relationship("LeadReply", back_populates="lead")
+    unsubscribe_tokens = relationship(
+        "LeadUnsubscribeToken",
+        back_populates="lead",
+        cascade="all, delete-orphan",
+    )
 
 
 class Campaign(Base):
@@ -86,6 +91,12 @@ class Campaign(Base):
     campaign_leads = relationship("CampaignLead", back_populates="campaign", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="campaign", cascade="all, delete-orphan")
     replies = relationship("LeadReply", back_populates="campaign", cascade="all, delete-orphan")
+    # tokens for unsubscribe links; deleted when the campaign is removed
+    unsubscribe_tokens = relationship(
+        "LeadUnsubscribeToken",
+        back_populates="campaign",
+        cascade="all, delete-orphan",
+    )
 
 
 class CampaignInbox(Base):
@@ -119,6 +130,11 @@ class CampaignLead(Base):
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     enrolled_at = Column(DateTime, default=_utcnow)
+    # AI classification: null = not yet classified, "interested", "not_interested"
+    interest_status = Column(String(32), nullable=True, default=None)
+    # Whether sending is paused for this specific campaign-lead pair
+    # (e.g. auto-paused by AI classifier when marked not_interested)
+    sending_paused = Column(Boolean, default=False, nullable=False)
     campaign = relationship("Campaign", back_populates="campaign_leads")
     lead = relationship("Lead", back_populates="campaign_leads")
     queue_slots = relationship("QueueSlot", back_populates="campaign_lead", cascade="all, delete-orphan", order_by="QueueSlot.sequence_index")
@@ -188,10 +204,13 @@ class LeadUnsubscribeToken(Base):
     __tablename__ = "lead_unsubscribe_token"
     __table_args__ = (UniqueConstraint("lead_id", "campaign_id", name="uq_lead_campaign_unsubscribe"),)
     id = Column(Integer, primary_key=True, index=True)
-    lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
-    campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
+    lead_id = Column(Integer, ForeignKey("lead.id", ondelete="CASCADE"), nullable=False)
+    campaign_id = Column(Integer, ForeignKey("campaign.id", ondelete="CASCADE"), nullable=False)
     token = Column(String(64), unique=True, nullable=False, index=True)
     created_at = Column(DateTime, default=_utcnow)
+    # relationships for convenient cascades & joins
+    lead = relationship("Lead", back_populates="unsubscribe_tokens")
+    campaign = relationship("Campaign", back_populates="unsubscribe_tokens")
 
 
 class LeadReply(Base):
@@ -419,6 +438,8 @@ WEBHOOK_EVENT_TYPES = [
     "lead.replied",        # A lead replied to a campaign email
     "lead.unsubscribed",   # A lead clicked the unsubscribe link
     "lead.status_changed", # A lead's status was changed (any status transition)
+    "lead.interested",     # AI classified a lead's reply as interested
+    "lead.not_interested", # AI classified a lead's reply as not interested
     "daily_limit",         # An inbox hit its daily sending limit
     "rate_limit",          # A rate limit violation was detected
     "token_expired",       # A Gmail OAuth token could not be refreshed

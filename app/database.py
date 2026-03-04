@@ -152,6 +152,20 @@ async def init_db():
             except OperationalError:
                 pass
 
+            # CampaignLead: AI interest classification fields
+            try:
+                await conn.execute(
+                    text(
+                        """
+                        ALTER TABLE IF EXISTS campaign_lead
+                        ADD COLUMN IF NOT EXISTS interest_status varchar(32),
+                        ADD COLUMN IF NOT EXISTS sending_paused boolean NOT NULL DEFAULT false;
+                        """
+                    )
+                )
+            except OperationalError:
+                pass
+
     # SQLite: add missing columns individually (SQLite doesn't support
     # multi-column ALTER TABLE or IF NOT EXISTS for ADD COLUMN).
     if "sqlite" in engine.dialect.name:
@@ -187,6 +201,17 @@ async def init_db():
                 await conn.execute(text("ALTER TABLE sequence ADD COLUMN is_html BOOLEAN"))
             except Exception:
                 pass
+            # CampaignLead: AI interest classification fields
+            for col, typedef in [
+                ("interest_status", "VARCHAR(32)"),
+                ("sending_paused", "BOOLEAN NOT NULL DEFAULT 0"),
+            ]:
+                try:
+                    await conn.execute(
+                        text(f"ALTER TABLE campaign_lead ADD COLUMN {col} {typedef}")
+                    )
+                except Exception:
+                    pass
 
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:

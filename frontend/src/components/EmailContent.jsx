@@ -7,6 +7,11 @@ import DOMPurify from 'dompurify';
 // The component exposes a small API: pass the raw html string via the
 // `html` prop and it will be sanitized and rendered inside the shadow
 // root whenever the value changes.
+//
+// When `stripTracking` is true (used in Unibox), open-tracking pixels
+// (/o/<id>) are removed entirely, and click-tracking links (/c/<token>)
+// are unwound to the original destination so that viewing an email in
+// the app does not inflate analytics.
 
 function sanitizeHtml(html) {
   return DOMPurify.sanitize(html || '', {
@@ -28,7 +33,27 @@ function sanitizeHtml(html) {
   });
 }
 
-export default function EmailContent({ html }) {
+/**
+ * Strip Quickly tracking artefacts from HTML:
+ * 1. Remove <img> tags whose src contains /o/ (open tracking pixels).
+ * 2. Replace <a> tags whose href contains /c/ (click tracking redirects)
+ *    with the original destination URL, if available, or strip the href.
+ */
+function stripTrackingFromHtml(html) {
+  if (!html) return html;
+  // Remove open-tracking pixels: <img ... src="https://.../o/123" ...>
+  let cleaned = html.replace(/<img\b[^>]*\bsrc\s*=\s*["'][^"']*\/o\/\d+["'][^>]*\/?>/gi, '');
+  // For click tracking links (/c/<token>), we can't easily recover the
+  // original URL from the HTML alone, so we rewrite them to "#" to avoid
+  // triggering the redirect. The text content of the link is preserved.
+  cleaned = cleaned.replace(
+    /(<a\b[^>]*)\bhref\s*=\s*["'][^"']*\/c\/[A-Za-z0-9_-]+["']/gi,
+    '$1href="#"'
+  );
+  return cleaned;
+}
+
+export default function EmailContent({ html, stripTracking = false }) {
   const hostRef = useRef(null);
   const shadowRootRef = useRef(null);
 
@@ -37,7 +62,11 @@ export default function EmailContent({ html }) {
     if (!shadowRootRef.current) {
       shadowRootRef.current = hostRef.current.attachShadow({ mode: 'open' });
     }
-    const sanitized = sanitizeHtml(html);
+    let processed = html;
+    if (stripTracking) {
+      processed = stripTrackingFromHtml(processed);
+    }
+    const sanitized = sanitizeHtml(processed);
 
     // The shadow root already keeps our app's CSS out of the email,
     // so a full "all: initial" reset is unnecessary and strips font
@@ -54,7 +83,7 @@ export default function EmailContent({ html }) {
     `;
 
     shadowRootRef.current.innerHTML = content;
-  }, [html]);
+  }, [html, stripTracking]);
 
   return <div ref={hostRef} className="email-content" />;
 }

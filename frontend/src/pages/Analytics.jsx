@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from '../api';
 import { Button } from '../components/ui/Button';
@@ -16,6 +16,42 @@ import {
   CartesianGrid,
 } from 'recharts';
 
+// Fill every day in [start, end] with zeros where no data exists
+function fillDateRange(dataMap, startDate, endDate) {
+  const result = [];
+  if (!startDate || !endDate) return Object.values(dataMap).sort((a,b)=>a.date.localeCompare(b.date));
+  const cur = new Date(startDate + 'T00:00:00');
+  const end = new Date(endDate + 'T00:00:00');
+  while (cur <= end) {
+    const iso = localIso(cur);
+    result.push(dataMap[iso] || { date: iso, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 });
+    cur.setDate(cur.getDate() + 1);
+  }
+  return result;
+}
+
+function localIso(dt) {
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+
+function buildPresets(serverToday) {
+  const t = serverToday || new Date();
+  const todayStr = localIso(t);
+  const d = (offset) => { const dt = new Date(t); dt.setDate(dt.getDate() + offset); return localIso(dt); };
+  const monday = (dt) => { const x = new Date(dt); const day = x.getDay(); x.setDate(x.getDate() - (day === 0 ? 6 : day - 1)); return x; };
+  const lastWeekEnd = new Date(monday(t)); lastWeekEnd.setDate(lastWeekEnd.getDate() - 1);
+  const lastWeekStart = localIso(monday(lastWeekEnd));
+  const lastMonthStart = localIso(new Date(t.getFullYear(), t.getMonth() - 1, 1));
+  const lastMonthEnd = localIso(new Date(t.getFullYear(), t.getMonth(), 0));
+  return [
+    { label: 'Last 7 Days',  start: d(-6),          end: todayStr },
+    { label: 'Last Week',    start: lastWeekStart,  end: localIso(lastWeekEnd) },
+    { label: 'Last 30 Days', start: d(-29),         end: todayStr },
+    { label: 'Last Month',   start: lastMonthStart, end: lastMonthEnd },
+    { label: 'Last 90 Days', start: d(-89),         end: todayStr },
+  ];
+}
+
 export default function Analytics() {
   const [campaigns, setCampaigns] = useState([]);
   // current dropdown choice and list of selected campaign ids
@@ -24,9 +60,14 @@ export default function Analytics() {
   const [error, setError] = useState(null);
   // schedule sent data and filters
   const [allSent, setAllSent] = useState([]);
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
   const [serverToday, setServerToday] = useState(null);
+
+  const [presets, setPresets] = useState(() => buildPresets(new Date()));
+  const [activePreset, setActivePreset] = useState('Last 7 Days');
+  const defaultRange = presets.find(p => p.label === 'Last 7 Days') || presets[0];
+  const [startDate, setStartDate] = useState(defaultRange.start);
+  const [endDate, setEndDate] = useState(defaultRange.end);
+
   // state for whether each series should be hidden
   const [hideSeries, setHideSeries] = useState({
     sent: false,
@@ -38,6 +79,9 @@ export default function Analytics() {
   });
   // initialize hide flags for any series that are all zero; run only once when data arrives
   const initializedRef = useRef(false);
+  const [zoomRange, setZoomRange] = useState({ start: 0, end: 0 });
+  const activeChartIdxRef = useRef(null);
+  const chartContainerRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -54,20 +98,24 @@ export default function Analytics() {
         const t = new Date();
         t.setDate(t.getDate() + off);
         setServerToday(t);
-        if (!endDate) {
-          const iso = t.toISOString().slice(0,10);
-          setEndDate(iso);
-        }
-        if (!startDate) {
-          const past = new Date(t);
-          past.setDate(past.getDate() - 7);
-          setStartDate(past.toISOString().slice(0,10));
-        }
+        // Rebuild presets using server time
+        const newPresets = buildPresets(t);
+        setPresets(newPresets);
+        const last7 = newPresets.find(p => p.label === 'Last 7 Days') || newPresets[0];
+        setStartDate(last7.start);
+        setEndDate(last7.end);
+        setActivePreset('Last 7 Days');
       } catch (e) {
         setError('Failed to load analytics');
       }
     })();
   }, []);
+
+  const applyPreset = (preset) => {
+    setActivePreset(preset.label);
+    setStartDate(preset.start);
+    setEndDate(preset.end);
+  };
 
   const filtered = selectedIds.length
     ? campaigns.filter(c => selectedIds.includes(String(c.id)))
@@ -81,48 +129,66 @@ export default function Analytics() {
   const clickRateAll = totalSentForRates>0 ? Math.round((totalClicked/totalSentForRates)*100) : 0;
 
   // filtered sent events by campaign and date range
-  const filteredSent = allSent.filter(e => {
+  const filteredSent = useMemo(() => allSent.filter(e => {
     if (selectedIds.length && !selectedIds.includes(String(e.campaign_id))) return false;
     if (startDate && e.sent_date < startDate) return false;
     if (endDate && e.sent_date > endDate) return false;
     return true;
-  });
-
+  }), [allSent, selectedIds, startDate, endDate]);
+  // per-campaign range stats aggregated from filteredSent
+  const filteredStatsByCampaign = useMemo(() => {
+    const map = {};
+    const seenLeads = {};
+    filteredSent.forEach(e => {
+      const cid = String(e.campaign_id);
+      if (!map[cid]) {
+        map[cid] = { sent: 0, replies: 0, totalOpens: 0, totalClicks: 0 };
+        seenLeads[cid] = new Set();
+      }
+      map[cid].sent += 1;
+      if (e.lead_id) seenLeads[cid].add(String(e.lead_id));
+      if (e.lead_status === 'replied') map[cid].replies += 1;
+      (e.opens || []).forEach(() => map[cid].totalOpens += 1);
+      (e.clicks || []).forEach(() => map[cid].totalClicks += 1);
+    });
+    Object.keys(map).forEach(cid => { map[cid].uniqueLeads = seenLeads[cid].size; });
+    return map;
+  }, [filteredSent]);
   // build daily data
-  const dailyMap = {};
-  // set up containers for unique counts per day
-  const seenOpen = {};
-  const seenClick = {};
-  filteredSent.forEach(e => {
-    const d = e.sent_date || (e.sent_at ? e.sent_at.slice(0,10) : '');
-    if (!d) return;
-    if (!dailyMap[d]) {
-      dailyMap[d] = { date: d, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 };
-      seenOpen[d] = new Set();
-      seenClick[d] = new Set();
-    }
-    dailyMap[d].sent += 1;
-    if (e.lead_status === 'replied') dailyMap[d].totalReplies += 1;
-    if (e.opens && e.opens.length) {
-      dailyMap[d].totalOpens += e.opens.length;
-      e.opens.forEach(o => {
-        if (o && o.ip) seenOpen[d].add(o.ip);
-      });
-    }
-    if (e.clicks && e.clicks.length) {
-      dailyMap[d].totalClicks += e.clicks.length;
-      e.clicks.forEach(c => {
-        if (c && c.ip) seenClick[d].add(c.ip);
-      });
-    }
-  });
-  // derive unique counts
-  Object.keys(dailyMap).forEach(d => {
-    dailyMap[d].uniqueOpens = seenOpen[d].size;
-    dailyMap[d].uniqueClicks = seenClick[d].size;
-  });
-
-  const chartData = Object.values(dailyMap).sort((a,b)=>a.date.localeCompare(b.date));
+  const chartData = useMemo(() => {
+    const dailyMap = {};
+    const seenOpen = {};
+    const seenClick = {};
+    filteredSent.forEach(e => {
+      const d = e.sent_date || (e.sent_at ? e.sent_at.slice(0,10) : '');
+      if (!d) return;
+      if (!dailyMap[d]) {
+        dailyMap[d] = { date: d, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 };
+        seenOpen[d] = new Set();
+        seenClick[d] = new Set();
+      }
+      dailyMap[d].sent += 1;
+      if (e.lead_status === 'replied') dailyMap[d].totalReplies += 1;
+      if (e.opens && e.opens.length) {
+        dailyMap[d].totalOpens += e.opens.length;
+        e.opens.forEach(o => {
+          if (o && o.ip) seenOpen[d].add(o.ip);
+        });
+      }
+      if (e.clicks && e.clicks.length) {
+        dailyMap[d].totalClicks += e.clicks.length;
+        e.clicks.forEach(c => {
+          if (c && c.ip) seenClick[d].add(c.ip);
+        });
+      }
+    });
+    // derive unique counts
+    Object.keys(dailyMap).forEach(d => {
+      dailyMap[d].uniqueOpens = seenOpen[d].size;
+      dailyMap[d].uniqueClicks = seenClick[d].size;
+    });
+    return fillDateRange(dailyMap, startDate, endDate);
+  }, [filteredSent, startDate, endDate]);
 
   // series metadata for chart and legend
   const seriesList = [
@@ -136,10 +202,7 @@ export default function Analytics() {
 
   // once chartData is computed, initialize hide state for any all-zero series (only first time)
   useEffect(() => {
-    // only initialize once and only after we have real data rows;
-    // when chartData is empty `every` returns true which would hide
-    // every series by default.
-    if (!initializedRef.current && chartData.length > 0) {
+    if (!initializedRef.current && chartData.length > 0 && chartData.some(d => seriesList.some(s => d[s.key] > 0))) {
       const newHide = {};
       seriesList.forEach(s => {
         newHide[s.key] = chartData.every(d => d[s.key] === 0);
@@ -149,6 +212,42 @@ export default function Analytics() {
     }
   }, [chartData]);
 
+  // Reset zoom when chartData changes (new date range selected)
+  useEffect(() => {
+    setZoomRange({ start: 0, end: Math.max(0, chartData.length - 1) });
+  }, [chartData]);
+
+  // Attach wheel listener with passive:false so we can preventDefault
+  useEffect(() => {
+    const el = chartContainerRef.current;
+    if (!el) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      setZoomRange(prev => {
+        const len = chartData.length;
+        if (len <= 2) return prev;
+        const windowSize = prev.end - prev.start + 1;
+        const pivot = activeChartIdxRef.current ?? Math.floor((prev.start + prev.end) / 2);
+        const factor = e.deltaY < 0 ? 0.75 : 1.35;
+        const newSize = Math.max(3, Math.min(len, Math.round(windowSize * factor)));
+        const pivotRatio = windowSize > 1 ? (pivot - prev.start) / (windowSize - 1) : 0.5;
+        let newStart = Math.round(pivot - pivotRatio * (newSize - 1));
+        let newEnd = newStart + newSize - 1;
+        if (newStart < 0) { newStart = 0; newEnd = newSize - 1; }
+        if (newEnd >= len) { newEnd = len - 1; newStart = Math.max(0, len - newSize); }
+        return { start: newStart, end: newEnd };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [chartData]);
+
+  const displayData = chartData.slice(zoomRange.start, zoomRange.end + 1);
+  const handleChartMouseMove = (state) => {
+    if (state?.activeTooltipIndex != null)
+      activeChartIdxRef.current = zoomRange.start + state.activeTooltipIndex;
+  };
+
   const toggleSeries = key => {
     setHideSeries(prev => ({ ...prev, [key]: !prev[key] }));
   };
@@ -157,25 +256,24 @@ export default function Analytics() {
   const rangeSent = chartData.reduce((a,d)=>a+d.sent,0);
   const rangeReplies = chartData.reduce((a,d)=>a+d.totalReplies,0);
   const rangeClicks = chartData.reduce((a,d)=>a+d.totalClicks,0);
-  // Use the actual reply count from campaign stats (LeadReply table), not the
-  // per-sent-email lead_status field — the latter inflates the count by the
-  // number of emails sent to a replied lead, not the number of actual replies.
   const totalRepliesFromStats = filtered.reduce((a,c)=>a+(c.stats?.replies||0),0);
   const totalSentFromStats = filtered.reduce((a,c)=>a+(c.stats?.emails_sent||0),0);
   const replyRateRange = totalSentFromStats > 0 ? Math.round((totalRepliesFromStats / totalSentFromStats) * 100) : 0;
   const clickRateRange = rangeSent > 0 ? Math.round((rangeClicks / rangeSent) * 100) : 0;
 
+  // Format x-axis dates short
+  const formatXDate = (d) => {
+    if (!d) return '';
+    const parts = d.split('-');
+    return `${parseInt(parts[1])}/${parseInt(parts[2])}`;
+  };
+
   return (
     <div className="p-8 space-y-6">
       <h1 className="text-2xl font-semibold mb-4">Campaign Analytics</h1>
       {error && <div className="text-red-600">{error}</div>}
-      {/* filters & KPI cards */}
-      {serverToday && (
-        <div className="text-sm text-gray-500 mb-2">
-          Server date: {serverToday.toISOString().slice(0,10)}
-        </div>
-      )}
-      {/* KPI cards based on range */}
+
+      {/* KPI cards */}
       <div className="flex flex-wrap gap-4 mb-4">
         <Card className="p-4">
           <div className="text-sm text-gray-500">Total Sent</div>
@@ -190,63 +288,83 @@ export default function Analytics() {
           <div className="text-2xl font-bold">{clickRateRange}%</div>
         </Card>
       </div>
-      <div className="flex flex-col lg:flex-row items-center gap-4 mb-4">
-        <div className="flex items-center gap-2">
-          <label className="text-sm flex items-center gap-1">From <DatePicker value={startDate} onChange={setStartDate} /></label>
-          <label className="text-sm flex items-center gap-1">To <DatePicker value={endDate} onChange={setEndDate} /></label>
-        </div>
-        {/* legend now controls series visibility, toggles below chart instead of checkboxes */}
-        <div className="text-sm text-gray-500">Toggle series by clicking legend items below the chart.</div>
+
+      {/* Date range presets */}
+      <div className="flex flex-wrap items-center gap-2">
+        {presets.map(p => (
+          <button
+            key={p.label}
+            onClick={() => applyPreset(p)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+              activePreset === p.label
+                ? 'bg-teal-500 text-white border-teal-500'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-teal-300 hover:bg-teal-50'
+            }`}
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          onClick={() => setActivePreset('custom')}
+          className={`px-3 py-1.5 text-xs font-medium rounded-full border transition-colors ${
+            activePreset === 'custom'
+              ? 'bg-teal-500 text-white border-teal-500'
+              : 'bg-white text-gray-600 border-gray-300 hover:border-teal-300 hover:bg-teal-50'
+          }`}
+        >
+          Custom
+        </button>
       </div>
 
-      {/* timeline area chart */}
-      <div style={{ width: '100%', height: 260 }}>
-        {/* extra bottom space via margin so legend sits below tooltip area */}
-        <ResponsiveContainer>
-          <ReAreaChart data={chartData} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
-            <XAxis dataKey="date" />
-            <YAxis />
-            {/* ensure tooltip renders above legend/tools by using z-index */}
-            <Tooltip wrapperStyle={{ zIndex: 1000 }} />
-            <CartesianGrid strokeDasharray="3 3" />
-            {seriesList.map(s => (
-              <Area
-                key={s.key}
-                name={s.name}
-                type="monotone"
-                dataKey={s.key}
-                stroke={s.stroke}
-                fill={s.fill}
-                hide={hideSeries[s.key]}
-              />
-            ))}
-            <Legend
-              verticalAlign="bottom"
-              align="center"
-              wrapperStyle={{ marginTop: 16 }}
-              content={() => (
-                <div className="flex flex-wrap justify-center gap-4">
-                  {seriesList.map(s => {
-                    const inactive = hideSeries[s.key];
-                    return (
+      {activePreset === 'custom' && (
+        <div className="flex items-center gap-4">
+          <label className="text-sm flex items-center gap-1">From <DatePicker value={startDate} onChange={v => { setStartDate(v); setActivePreset('custom'); }} /></label>
+          <label className="text-sm flex items-center gap-1">To <DatePicker value={endDate} onChange={v => { setEndDate(v); setActivePreset('custom'); }} /></label>
+        </div>
+      )}
+
+      {/* timeline area chart — scroll to zoom, centered on hovered day */}
+      <Card className="p-4">
+        <div ref={chartContainerRef} style={{ width: '100%', height: 290 }}>
+          <ResponsiveContainer>
+            <ReAreaChart data={displayData} onMouseMove={handleChartMouseMove} margin={{ top: 20, right: 30, left: 0, bottom: 20 }}>
+              <XAxis dataKey="date" tick={{ fontSize: 11 }} tickFormatter={formatXDate} />
+              <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+              <Tooltip wrapperStyle={{ zIndex: 1000 }} />
+              <CartesianGrid strokeDasharray="3 3" />
+              {seriesList.map(s => (
+                <Area
+                  key={s.key}
+                  name={s.name}
+                  type="monotone"
+                  dataKey={s.key}
+                  stroke={s.stroke}
+                  fill={s.fill}
+                  hide={hideSeries[s.key]}
+                />
+              ))}
+              <Legend
+                verticalAlign="bottom"
+                align="center"
+                content={() => (
+                  <div className="flex flex-wrap justify-center gap-3 mt-2">
+                    {seriesList.map(s => (
                       <span
                         key={s.key}
                         onClick={() => toggleSeries(s.key)}
-                        className={`flex items-center cursor-pointer select-none ${inactive ? 'opacity-50' : ''}`}
+                        className={`flex items-center gap-1 cursor-pointer select-none text-xs transition-opacity ${hideSeries[s.key] ? 'opacity-40' : ''}`}
                       >
-                        <svg width="10" height="10" className="mr-1">
-                          <rect width="10" height="10" fill={s.stroke} />
-                        </svg>
+                        <span className="inline-block w-2.5 h-2.5 rounded-sm" style={{ background: s.stroke }} />
                         {s.name}
                       </span>
-                    );
-                  })}
-                </div>
-              )}
-            />
-          </ReAreaChart>
-        </ResponsiveContainer>
-      </div>
+                    ))}
+                  </div>
+                )}
+              />
+            </ReAreaChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
       <div className="flex flex-col lg:flex-row items-start lg:items-center gap-4">
         <div className="flex-1">
           <label htmlFor="campaign-select" className="sr-only">Campaigns</label>
@@ -330,20 +448,19 @@ export default function Analytics() {
             </thead>
             <tbody>
               {filtered.map(c => {
-                const stats = c.stats || {};
-                const totalLeads = stats.total_leads || 0;
-                const sent = stats.emails_sent || 0;
-                const scheduled = stats.scheduled || 0;
-                // show the denominator used for progress rather than the naive
-                // total_leads * sequences calculation; this reflects the actual
-                // number of messages either sent or still queued.
-                const denom = sent + scheduled;
-                const progress = denom > 0 ? Math.round((sent / denom) * 100) : 0;
-                const replies = stats.replies || 0;
-                // placeholder fields may not exist yet
-                const openRate = stats.open_rate ?? null;
-                const clickRate = stats.click_rate ?? null;
-                const replyRate = sent > 0 ? Math.round((replies / sent) * 100) : 0;
+                const allTimeStats = c.stats || {};
+                const rStats = filteredStatsByCampaign[String(c.id)] || {};
+                const sent = rStats.sent || 0;
+                const leads = rStats.uniqueLeads || 0;
+                const replies = rStats.replies || 0;
+                const openRate = sent > 0 ? Math.round((rStats.totalOpens || 0) / sent * 100) : 0;
+                const replyRate = sent > 0 ? Math.round(replies / sent * 100) : 0;
+                const clickRate = sent > 0 ? Math.round((rStats.totalClicks || 0) / sent * 100) : 0;
+                // progress is all-time (scheduled vs sent) — no range equivalent
+                const allTimeSent = allTimeStats.emails_sent || 0;
+                const scheduled = allTimeStats.scheduled || 0;
+                const denom = allTimeSent + scheduled;
+                const progress = denom > 0 ? Math.round((allTimeSent / denom) * 100) : 0;
                 return (
                   <tr key={c.id} className="hover:bg-gray-50">
                     <td className="py-2">
@@ -351,9 +468,9 @@ export default function Analytics() {
                         {c.name}
                       </Link>
                     </td>
-                    <td className="py-2 text-center font-mono">{totalLeads}</td>
+                    <td className="py-2 text-center font-mono">{leads}</td>
+                    <td className="py-2 text-center font-mono">{sent}</td>
                     <td className="py-2 text-center font-mono">{scheduled}</td>
-                    <td className="py-2 text-center font-mono">{denom}</td>
                     <td className="py-2 text-center">
                       <div className="bg-gray-200 h-2 rounded overflow-hidden mx-auto w-32">
                         <div className="bg-teal-500 h-2" style={{width: `${progress}%`}} />
@@ -367,12 +484,8 @@ export default function Analytics() {
                       </div>
                       <div className="text-xs mt-1">{replyRate}%</div>
                     </td>
-                    <td className="py-2 text-center">
-                      {openRate !== null ? `${Math.round(openRate*100)}%` : '–'}
-                    </td>
-                    <td className="py-2 text-center">
-                      {clickRate !== null ? `${Math.round(clickRate*100)}%` : '–'}
-                    </td>
+                    <td className="py-2 text-center">{openRate}%</td>
+                    <td className="py-2 text-center">{clickRate}%</td>
                   </tr>
                 );
               })}

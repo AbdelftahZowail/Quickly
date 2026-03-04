@@ -14,11 +14,19 @@ function ScheduleEmailPreviewModal({ item, onClose }) {
   const isHtml = item.sequence_is_html || (item.sequence_body || '').trim().startsWith('<');
   const subject = item.subject || '(no subject)';
   const body = item.sequence_body || '';
+  const backdropDown = useRef(false);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
 
   return (
     <div
       className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-      onClick={onClose}
+      onMouseDown={e => { backdropDown.current = e.target === e.currentTarget; }}
+      onClick={() => { if (backdropDown.current) onClose(); }}
     >
       <div
         data-darkreader-ignore
@@ -110,6 +118,7 @@ export default function Schedule() {
   const [stats, setStats] = useState({});
   const [serverStatus, setServerStatus] = useState({});
   const [strategy, setStrategy] = useState('priority');
+  const [timeToNext, setTimeToNext] = useState('');
   const confirm = useConfirm();
 
   const [campaignFilter, setCampaignFilter] = useState('');
@@ -142,6 +151,26 @@ export default function Schedule() {
       setServerStatus(srv);
       setStrategy(stratData.scheduling_strategy || 'priority');
       const camps = new Map();
+      // reset countdown first so stale values disappear when schedule is empty
+      setTimeToNext('');
+      // compute delay until next scheduled email using server timestamp (if
+      // available) otherwise fall back to local clock
+      if (sch && sch.length) {
+        const now = srv.server_time ? new Date(srv.server_time) : new Date();
+        const future = sch
+          .map(i => new Date(i.scheduled_at))
+          .filter(d => d > now)
+          .sort((a,b) => a - b)[0];
+        if (future) {
+          const diff = future - now;
+          const mins = Math.floor(diff / 60000);
+          const hrs = Math.floor(mins / 60);
+          const rem = mins % 60;
+          setTimeToNext(`${hrs}h ${rem}m`);
+        } else {
+          setTimeToNext('none');
+        }
+      }
       [...s, ...sch].forEach(e => {
         if (e.campaign_id && e.campaign_name) camps.set(e.campaign_id, e.campaign_name);
       });
@@ -387,16 +416,35 @@ export default function Schedule() {
     <div className="p-8">
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-bold">Schedule</h1>
-        <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5" title="All times shown in your local timezone">
-          🕐 {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, ' ')}
+        <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5" title="Times are stored in UTC and displayed in your local timezone below">
+          🕐 Times in {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, ' ')}
         </span>
       </div>
       <Card className="flex flex-wrap justify-between items-center mb-4 p-2">
         <div className="flex flex-wrap gap-4 items-center">
           {!isProduction && (
-            <div>
-              <span className="text-sm text-gray-500">Test Mode:</span> <span className={serverStatus.test_mode?'text-red-600':'text-green-600'}>{serverStatus.test_mode?'ON':'OFF'}</span>
-            </div>
+            <>
+              <div>
+                <span className="text-sm text-gray-500">Test Mode:</span> <span className={serverStatus.test_mode?'text-red-600':'text-green-600'}>{serverStatus.test_mode?'ON':'OFF'}</span>
+              </div>
+              <div title="Backend server clock (UTC). Campaign sending windows are interpreted in their configured timezone and stored as UTC, then displayed here in your browser's local time.">
+                <span className="text-sm text-gray-500">Server (UTC):</span>{' '}
+                <span className="font-mono text-xs">
+                  {serverStatus.server_time
+                    ? new Date(serverStatus.server_time).toISOString().replace('T',' ').slice(0,19) + ' UTC'
+                    : '—'}
+                </span>
+                {serverStatus.server_time && (
+                  <span className="ml-1 text-xs text-gray-400">
+                    = {new Date(serverStatus.server_time).toLocaleTimeString()} local
+                  </span>
+                )}
+              </div>
+              <div title="Time until the next scheduled email fires (calculated from server UTC time)">
+                <span className="text-sm text-gray-500">Next email in:</span>{' '}
+                <span className="font-semibold">{timeToNext || '—'}</span>
+              </div>
+            </>
           )}
           <div>
             <span className="text-sm text-gray-500">Schedule:</span> <span className={serverStatus.schedule_running?'text-green-600':'text-red-600'}>{serverStatus.schedule_running?'Running':'Stopped'}</span>

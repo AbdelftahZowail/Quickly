@@ -12,7 +12,7 @@ from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func, delete
 import inspect
 
-from app.models import QueueSlot, EmailLog, EmailClick, CampaignLead, Lead
+from app.models import QueueSlot, EmailLog, EmailClick, CampaignLead, Lead, LeadUnsubscribeToken
 from app.queue_logic import (
     _parse_time,
     _estimated_send_time,
@@ -44,6 +44,7 @@ from tests.conftest import (
     make_email_log,
     make_email_click,
     make_queue_slot,
+    make_unsubscribe_token,
 )
 
 
@@ -1481,6 +1482,20 @@ class TestApiRecalculationTriggers:
         # once the campaign (and therefore log) is removed, clicks should
         # have been deleted as well rather than nulled out
         count2 = await session.execute(select(func.count(EmailClick.id)))
+        assert count2.scalar() == 0
+
+    async def test_delete_campaign_cascades_unsubscribe_tokens(self, session):
+        # deleting a campaign should also remove any lead unsubscribe tokens
+        # or the FK constraint will trip (see bug report)
+        campaign = await make_campaign(session)
+        lead = await make_lead(session)
+        # create a token tied to that campaign
+        await make_unsubscribe_token(session, lead.id, campaign.id, token="abc")
+        count = await session.execute(select(func.count(LeadUnsubscribeToken.id)))
+        assert count.scalar() == 1
+        # use the router path to trigger the same logic as the API
+        await delete_campaign(campaign.id, db=session)
+        count2 = await session.execute(select(func.count(LeadUnsubscribeToken.id)))
         assert count2.scalar() == 0
 
 

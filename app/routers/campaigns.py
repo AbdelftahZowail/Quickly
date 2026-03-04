@@ -1,6 +1,10 @@
 """Campaigns and sequences API routes."""
+import csv
+import io
+import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
@@ -14,6 +18,7 @@ from app.models import (
     CampaignLead,
     QueueSlot,
     Lead,
+    LeadUnsubscribeToken,
     Inbox,
     EmailLog,
     CampaignInbox,
@@ -165,6 +170,32 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["sequences"] = cnt
+
+        # bounced lead counts per campaign
+        res = await db.execute(
+            select(CampaignLead.campaign_id, func.count())
+            .join(Lead, CampaignLead.lead_id == Lead.id)
+            .where(
+                CampaignLead.campaign_id.in_(campaign_ids),
+                Lead.status == "bounced",
+            )
+            .group_by(CampaignLead.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["bounced"] = cnt
+
+        # unsubscribed lead counts per campaign
+        res = await db.execute(
+            select(CampaignLead.campaign_id, func.count())
+            .join(Lead, CampaignLead.lead_id == Lead.id)
+            .where(
+                CampaignLead.campaign_id.in_(campaign_ids),
+                Lead.status == "unsubscribed",
+            )
+            .group_by(CampaignLead.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["unsubscribed"] = cnt
     # convert raw counts stored in open_rate/click_rate keys into fractions
     for cid, stats in stats_map.items():
         sent = stats.get("emails_sent", 0) or 0
@@ -340,6 +371,11 @@ async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         select(CampaignLead.lead_id).where(CampaignLead.campaign_id == campaign_id)
     )
     lead_ids = [r[0] for r in cl_res.all()]
+
+    # delete any unsubscribe tokens belonging to this campaign before we
+    # remove the campaign itself; the FK constraint otherwise trips during
+    # the flush when SQLAlchemy issues the DELETE on campaign.
+    await db.execute(delete(LeadUnsubscribeToken).where(LeadUnsubscribeToken.campaign_id == campaign_id))
 
     # Cascade handles sequences, campaign_leads (and their queue_slots),
     # campaign_inboxes, etc.  after flushing we can inspect which of the
@@ -714,9 +750,57 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "opened": lead.id in opened_set,
             "clicked": lead.id in clicked_set,
             "replied": lead.id in replied_set,
+            "interest_status": cl.interest_status,
+            "sending_paused": cl.sending_paused,
         }
         for cl, lead in rows
     ]
+
+
+class _CampaignLeadPatch(BaseModel):
+    interest_status: str | None = None    # "interested", "not_interested", or null to clear
+    sending_paused: bool | None = None
+
+
+@router.patch("/{campaign_id}/leads/{lead_id}")
+async def patch_campaign_lead(
+    campaign_id: int,
+    lead_id: int,
+    payload: _CampaignLeadPatch,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update interest_status and/or sending_paused for a campaign-lead pair.
+
+    Used by the frontend to let users override the AI classification — e.g.
+    re-enable sending for a lead that was marked not_interested, or manually
+    mark a lead as interested/not_interested.
+    """
+    result = await db.execute(
+        select(CampaignLead).where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id == lead_id,
+        )
+    )
+    cl = result.scalar_one_or_none()
+    if not cl:
+        raise HTTPException(404, "Campaign-lead enrolment not found")
+
+    if payload.interest_status is not None:
+        if payload.interest_status not in ("interested", "not_interested", ""):
+            raise HTTPException(400, "interest_status must be 'interested', 'not_interested', or empty string to clear")
+        cl.interest_status = payload.interest_status if payload.interest_status else None
+
+    if payload.sending_paused is not None:
+        cl.sending_paused = payload.sending_paused
+        # If re-enabling sending, re-create queue slots for this lead
+        if not payload.sending_paused:
+            from app.queue_logic import reserve_slots_for_new_leads_bulk
+            campaign = await db.get(Campaign, campaign_id)
+            if campaign:
+                await reserve_slots_for_new_leads_bulk(db, campaign, [cl])
+
+    await db.commit()
+    return {"ok": True, "interest_status": cl.interest_status, "sending_paused": cl.sending_paused}
 
 
 class PreviewRequest(BaseModel):
@@ -1063,3 +1147,149 @@ async def bulk_add_leads_to_campaign(
     }
 
 
+# ---- Export leads as CSV ----
+@router.get("/{campaign_id}/leads/export")
+async def export_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Export all leads for a campaign as a CSV file."""
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    camp = result.scalar_one_or_none()
+    if not camp:
+        raise HTTPException(404, "Campaign not found")
+
+    result = await db.execute(
+        select(CampaignLead, Lead)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(CampaignLead.campaign_id == campaign_id)
+        .order_by(CampaignLead.enrolled_at.desc())
+    )
+    rows = result.all()
+
+    # Gather all custom_data keys
+    all_keys = set()
+    for _cl, lead in rows:
+        if lead.custom_data:
+            all_keys.update(lead.custom_data.keys())
+    custom_keys = sorted(all_keys)
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    header = ["email", "name"] + custom_keys
+    writer.writerow(header)
+    for _cl, lead in rows:
+        row = [lead.email, lead.name or ""]
+        for k in custom_keys:
+            val = (lead.custom_data or {}).get(k, "")
+            row.append(str(val) if val is not None else "")
+        writer.writerow(row)
+
+    output.seek(0)
+    safe_name = camp.name.replace(" ", "_").replace("/", "_")[:30]
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="leads_{safe_name}.csv"'},
+    )
+
+
+# ---- Import leads from CSV ----
+@router.post("/{campaign_id}/leads/import")
+async def import_campaign_leads(
+    campaign_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import leads from a CSV file. Expects columns: email, name, and any custom fields."""
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Campaign not found")
+
+    contents = await file.read()
+    text = contents.decode("utf-8-sig")  # handle BOM from Excel
+
+    # Try to detect delimiter
+    sniffer = csv.Sniffer()
+    try:
+        dialect = sniffer.sniff(text[:2048])
+    except csv.Error:
+        dialect = csv.excel  # fallback
+
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+
+    if not reader.fieldnames:
+        raise HTTPException(400, "CSV file appears to be empty or has no headers")
+
+    # Normalize field names
+    fields = [f.strip().lower() for f in reader.fieldnames]
+    if "email" not in fields:
+        raise HTTPException(400, "CSV must have an 'email' column")
+
+    added = 0
+    already_enrolled = 0
+    errors = 0
+    results_list = []
+
+    for row_num, row in enumerate(reader, start=2):
+        # Normalize keys
+        normalized = {k.strip().lower(): v.strip() if v else "" for k, v in row.items() if k}
+        email = normalized.get("email", "").strip().lower()
+        if not email:
+            results_list.append({"row": row_num, "status": "error", "detail": "Empty email"})
+            errors += 1
+            continue
+
+        name = normalized.get("name", "")
+        # Everything else is custom data
+        custom_data = {}
+        for k, v in normalized.items():
+            if k not in ("email", "name") and v:
+                custom_data[k] = v
+
+        try:
+            lead_result = await db.execute(select(Lead).where(Lead.email == email))
+            lead = lead_result.scalar_one_or_none()
+            if not lead:
+                lead = Lead(email=email, name=name, custom_data=custom_data)
+                db.add(lead)
+                await db.flush()
+            else:
+                changed = False
+                if name and not lead.name:
+                    lead.name = name
+                    changed = True
+                if custom_data:
+                    merged = {**(lead.custom_data or {}), **custom_data}
+                    if merged != lead.custom_data:
+                        lead.custom_data = merged
+                        changed = True
+                if changed:
+                    await db.flush()
+
+            existing_cl = await db.execute(
+                select(CampaignLead).where(
+                    CampaignLead.campaign_id == campaign_id,
+                    CampaignLead.lead_id == lead.id,
+                )
+            )
+            if existing_cl.scalar_one_or_none():
+                results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
+                already_enrolled += 1
+                continue
+
+            cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
+            db.add(cl)
+            await db.flush()
+            await reserve_slots_for_new_leads_bulk(db, [cl.id], campaign_id)
+            added += 1
+            results_list.append({"row": row_num, "email": email, "status": "added"})
+        except Exception as exc:
+            log.exception("import_leads: error on row %d email=%s: %s", row_num, email, exc)
+            results_list.append({"row": row_num, "email": email, "status": "error", "detail": str(exc)})
+            errors += 1
+
+    return {
+        "ok": True,
+        "added": added,
+        "already_enrolled": already_enrolled,
+        "errors": errors,
+        "total_rows": added + already_enrolled + errors,
+    }

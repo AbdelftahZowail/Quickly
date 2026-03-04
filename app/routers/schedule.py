@@ -20,6 +20,15 @@ log = logging.getLogger("quickly.schedule")
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
 
 
+def _utc_iso(dt) -> "str | None":
+    """Return an ISO-8601 UTC timestamp with a 'Z' suffix so browsers correctly
+    convert it to the user's local timezone.  Naive datetime objects stored in
+    this application are always UTC (server runs in UTC in Docker)."""
+    if dt is None:
+        return None
+    return dt.isoformat() + "Z"
+
+
 @router.get("/sent")
 async def global_sent(db: AsyncSession = Depends(get_db)):
     """All sent emails across every campaign with full details."""
@@ -50,7 +59,7 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
         {
             "type": "sent",
             "log_id": el.id,
-            "sent_at": el.sent_at.isoformat() if el.sent_at else None,
+            "sent_at": _utc_iso(el.sent_at),
             "sent_date": el.sent_at.date().isoformat() if el.sent_at else None,
             "subject": el.subject or "",
             "message_id": el.message_id or "",
@@ -71,8 +80,8 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
             "campaign_wait_minutes": campaign.wait_minutes_between or 5,
             "campaign_stop_on_reply": campaign.stop_on_reply,
             # include open/click events (ip + timestamp)
-            "opens": [ {"ip": o.ip_address, "at": o.opened_at.isoformat()} for o in el.opens ],
-            "clicks": [ {"ip": c.ip_address, "at": c.clicked_at.isoformat()} for c in el.clicks ],
+            "opens": [ {"ip": o.ip_address, "at": _utc_iso(o.opened_at)} for o in el.opens ],
+            "clicks": [ {"ip": c.ip_address, "at": _utc_iso(c.clicked_at)} for c in el.clicks ],
             "opened": bool(el.opens),
             "clicked": bool(el.clicks),
         }
@@ -103,7 +112,7 @@ async def global_scheduled(db: AsyncSession = Depends(get_db)):
         {
             "type": "scheduled",
             "slot_id": slot.id,
-            "scheduled_at": slot.scheduled_date.isoformat() if slot.scheduled_date else None,
+            "scheduled_at": _utc_iso(slot.scheduled_date),
             "scheduled_date": slot.scheduled_date.date().isoformat() if slot.scheduled_date else None,
             "position_in_day": slot.position_in_day,
             "sequence_index": slot.sequence_index,

@@ -278,6 +278,22 @@ async def make_email_click(
     return click
 
 
+async def make_unsubscribe_token(
+    session: AsyncSession,
+    lead_id: int,
+    campaign_id: int,
+    token: str = "tok",
+) -> LeadUnsubscribeToken:
+    row = LeadUnsubscribeToken(
+        lead_id=lead_id,
+        campaign_id=campaign_id,
+        token=token,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
 async def make_queue_slot(
     session: AsyncSession,
     campaign_lead_id: int,
