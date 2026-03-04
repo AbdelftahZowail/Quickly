@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import html as _html_lib
 import json
 import logging
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -240,8 +242,44 @@ def _dt_to_iso(dt: datetime | None) -> str | None:
     return dt.isoformat() + "Z"
 
 
+# Matches common quoted-reply markers so we can strip them from snippets.
+_QUOTE_START_RE = re.compile(
+    r"(^|\n)[ \t]*>"  # lines starting with >
+    r"|(^|\n)-{3,}"  # separator lines like ---
+    r"|\bOn .{10,120}wrote:",  # "On <date> <person> wrote:"
+    re.IGNORECASE | re.DOTALL,
+)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+# Hidden preheader divs should not contribute to visible snippets.
+_PREHEADER_RE = re.compile(
+    r"<div[^>]*style=[^>]*display\s*:\s*none[^>]*>.*?</div>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_html_tags(text: str) -> str:
+    """Strip HTML tags and decode entities to get plain text."""
+    no_preheader = _PREHEADER_RE.sub("", text)
+    no_tags = _HTML_TAG_RE.sub(" ", no_preheader)
+    return _html_lib.unescape(no_tags)
+
+
+def _strip_quoted(text: str) -> str:
+    """Return text with quoted/reply sections removed."""
+    m = _QUOTE_START_RE.search(text)
+    if m:
+        return text[: m.start()].rstrip()
+    return text
+
+
 def _body_snippet(plain: str, html: str, fallback: str = "") -> str:
-    base = plain or html or fallback or ""
+    if plain:
+        base = plain
+    elif html:
+        base = _strip_html_tags(html)
+    else:
+        base = _strip_html_tags(fallback) if "<" in fallback else fallback
+    base = _strip_quoted(base)
     compact = " ".join(base.split())
     return compact[:180]
 
@@ -691,7 +729,7 @@ async def _upsert_message_from_gmail(
 
     internal_date_raw = gmail_message.get("internalDate")
     internal_date = int(internal_date_raw) if internal_date_raw not in (None, "") else None
-    snippet = str(gmail_message.get("snippet", ""))
+    snippet = _strip_quoted(str(gmail_message.get("snippet", "")))
     history_id = str(gmail_message.get("historyId", ""))
     labels = gmail_message.get("labelIds", []) or []
     payload = gmail_message.get("payload", {}) or {}

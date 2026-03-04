@@ -543,6 +543,7 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
             body=seq.body,
             wait_days_after_previous=seq.wait_days_after_previous,
             is_html=seq.is_html,
+            preview_text=seq.preview_text,
         )
         db.add(new_seq)
     
@@ -577,6 +578,7 @@ async def create_sequence(
         body=data.body,
         wait_days_after_previous=data.wait_days_after_previous,
         is_html=data.is_html,
+        preview_text=data.preview_text,
     )
     db.add(seq)
     await db.flush()
@@ -613,6 +615,8 @@ async def update_sequence(
         seq.body = data.body
     if 'is_html' in data.model_fields_set:
         seq.is_html = data.is_html
+    if 'preview_text' in data.model_fields_set:
+        seq.preview_text = data.preview_text
     if data.wait_days_after_previous is not None:
         seq.wait_days_after_previous = data.wait_days_after_previous
         await db.flush()

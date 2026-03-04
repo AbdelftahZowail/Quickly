@@ -9,8 +9,8 @@ import traceback
 import urllib.request
 import urllib.error
 from dataclasses import dataclass
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import email.policy
+from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -137,6 +137,116 @@ def _fetch_gmail_message_id(gmail_id: str, access_token: str) -> Optional[str]:
     return None
 
 
+# ---- MIME construction (Python stdlib, no external deps) ----
+
+def _strip_html_tags(html: str) -> str:
+    """Convert HTML to plain text, preserving meaningful content and whitespace."""
+    # Step 1: convert line-breaking tags to newlines before stripping anything
+    text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
+    text = re.sub(r"</p>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</div>", "\n", text, flags=re.IGNORECASE)
+    # Step 2: strip all remaining tags
+    text = re.sub(r"<[^>]+>", "", text)
+    # Step 3: decode common HTML entities
+    text = (
+        text
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+    )
+    # Step 4: trim each line and collapse 3+ consecutive newlines to 2
+    lines = [line.strip() for line in text.splitlines()]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _build_email_message(
+    to_email: str,
+    subject: str,
+    body: str,
+    from_email: str,
+    from_name: str = "",
+    reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
+    is_html: bool = False,
+    message_id: Optional[str] = None,
+    list_unsubscribe_url: Optional[str] = None,
+) -> EmailMessage:
+    """Build an EmailMessage using Python's stdlib email module (policy.SMTP)."""
+    msg = EmailMessage(policy=email.policy.SMTP)
+
+    # Set body content first — set_content/add_alternative must be called
+    # before headers are written so the MIME structure is established cleanly.
+    if is_html:
+        # Plain-text first, then the HTML alternative.
+        # Spam filters compare both parts — content must match.
+        plain = _strip_html_tags(body)
+        msg.set_content(plain)
+        msg.add_alternative(body, subtype="html")
+    else:
+        msg.set_content(body)
+
+    # Headers are added after the body is set.
+    msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    if message_id:
+        msg["Message-ID"] = message_id
+
+    if reply_to_msg_id:
+        ref = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
+        msg["In-Reply-To"] = ref
+        msg["References"] = references or ref
+
+    if list_unsubscribe_url:
+        msg["List-Unsubscribe"] = f"<{list_unsubscribe_url}>"
+        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+
+    return msg
+
+
+def build_raw_mime(
+    to_email: str,
+    subject: str,
+    body: str,
+    from_email: str,
+    from_name: str = "",
+    reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
+    is_html: bool = False,
+    message_id: Optional[str] = None,
+    list_unsubscribe_url: Optional[str] = None,
+) -> str:
+    """
+    Build a raw RFC 2822 MIME string and return it base64url-encoded for
+    the Gmail API.  No external dependencies — uses Python's stdlib only.
+
+    Plugs directly into::
+
+        gmail.users().messages().send(
+            userId="me",
+            body={"raw": build_raw_mime(...), "threadId": thread_id},
+        ).execute()
+    """
+    msg = _build_email_message(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        from_email=from_email,
+        from_name=from_name,
+        reply_to_msg_id=reply_to_msg_id,
+        references=references,
+        is_html=is_html,
+        message_id=message_id,
+        list_unsubscribe_url=list_unsubscribe_url,
+    )
+    return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+
+
 def _send_via_gmail(
     to_email: str,
     subject: str,
@@ -203,25 +313,20 @@ def _send_via_gmail(
         log.error("Failed to build Gmail service: %s", e)
         return None
 
-    # compose the message exactly as before
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"{from_name} <{from_email}>" if from_name else from_email
-    msg["To"] = to_email
+    # compose the MIME message using Python stdlib (no external deps)
     message_id = make_msgid()
-    msg["Message-ID"] = message_id
-
-    if reply_to_msg_id:
-        ref = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
-        msg["In-Reply-To"] = ref
-        msg["References"] = references or ref
-
-    if list_unsubscribe_url:
-        msg["List-Unsubscribe"] = f"<{list_unsubscribe_url}>"
-        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
-
-    part = MIMEText(body, "html" if is_html else "plain", "utf-8")
-    msg.attach(part)
+    msg = _build_email_message(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        from_email=from_email,
+        from_name=from_name,
+        reply_to_msg_id=reply_to_msg_id,
+        references=references,
+        is_html=is_html,
+        message_id=message_id,
+        list_unsubscribe_url=list_unsubscribe_url,
+    )
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
     body_payload: Dict[str, Any] = {"raw": raw}

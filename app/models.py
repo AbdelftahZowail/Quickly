@@ -120,6 +120,8 @@ class Sequence(Base):
     body = Column(Text, nullable=False)
     # Explicit HTML flag.  None = legacy auto-detect; True = HTML; False = plain text.
     is_html = Column(Boolean, nullable=True, default=None)
+    # Optional preheader/preview text injected as hidden div when is_html is True.
+    preview_text = Column(String(512), nullable=True, default=None)
     wait_days_after_previous = Column(Integer, default=0)  # days after previous sequence
     campaign = relationship("Campaign", back_populates="sequences")
 

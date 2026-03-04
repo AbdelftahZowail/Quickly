@@ -190,13 +190,27 @@ class EmailScheduleValidator:
         return self.result
     
     async def _get_active_campaigns(self) -> List[Campaign]:
-        """Get all campaigns that have queue slots scheduled."""
-        query = (
-            select(Campaign)
+        """Get all campaigns that have queue slots scheduled.
+
+        PostgreSQL does not support equality for `json` columns, so we avoid a
+        plain ``distinct()`` which expands to ``SELECT DISTINCT campaign.*``
+        (including the ``sending_days`` json field).  Instead we ask for a
+        distinct campaign *id* only and load the campaigns in a second step.
+        """
+        # first grab unique campaign IDs
+        id_query = (
+            select(Campaign.id)
             .join(CampaignLead, Campaign.id == CampaignLead.campaign_id)
             .join(QueueSlot, CampaignLead.id == QueueSlot.campaign_lead_id)
-            .distinct()
+            .distinct(Campaign.id)
         )
+        res = await self.session.execute(id_query)
+        campaign_ids = [row[0] for row in res.fetchall()]
+        if not campaign_ids:
+            return []
+
+        # load full campaign objects
+        query = select(Campaign).where(Campaign.id.in_(campaign_ids))
         result = await self.session.execute(query)
         return result.scalars().all()
     

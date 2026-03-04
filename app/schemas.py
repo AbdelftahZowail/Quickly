@@ -68,6 +68,7 @@ class SequenceCreate(BaseModel):
     body: str
     wait_days_after_previous: int = 0
     is_html: Optional[bool] = None  # None = auto-detect (legacy), True = HTML, False = plain
+    preview_text: Optional[str] = None
 
 
 class SequenceUpdate(BaseModel):
@@ -75,6 +76,7 @@ class SequenceUpdate(BaseModel):
     body: Optional[str] = None
     wait_days_after_previous: Optional[int] = None
     is_html: Optional[bool] = None
+    preview_text: Optional[str] = None
 
 
 class SequenceResponse(BaseModel):
@@ -85,6 +87,7 @@ class SequenceResponse(BaseModel):
     body: str
     wait_days_after_previous: int
     is_html: Optional[bool] = None
+    preview_text: Optional[str] = None
 
     class Config:
         from_attributes = True
