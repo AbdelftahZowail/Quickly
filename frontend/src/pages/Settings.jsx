@@ -1,23 +1,25 @@
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { api } from '../api';
+import { api, apiCache } from '../api';
 import { useDarkMode } from '../context/DarkModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 import { useAppMode } from '../context/AppModeContext';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import EmailVerificationSettings from '../components/EmailVerificationSettings';
 
 /* ────────────────────────────────────────────────────────────────────────────
    Section definitions — each object drives both the sidebar TOC and the
    scroll-spy highlight.  `id` must match the element id in the JSX below.
    ──────────────────────────────────────────────────────────────────────────── */
 const SECTIONS = [
-  { id: 'general',    label: 'General' },
-  { id: 'webhooks',   label: 'Webhooks' },
-  { id: 'ai',         label: 'AI Features' },
-  { id: 'scheduling', label: 'Scheduling' },
-  { id: 'test-mode',  label: 'Test Mode' },
-  { id: 'utilities',  label: 'Utilities' },
+  { id: 'general',           label: 'General' },
+  { id: 'webhooks',          label: 'Webhooks' },
+  { id: 'ai',                label: 'AI Features' },
+  { id: 'optional-features', label: 'Optional Features' },
+  { id: 'scheduling',        label: 'Scheduling' },
+  { id: 'test-mode',         label: 'Test Mode' },
+  { id: 'utilities',         label: 'Utilities' },
 ];
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
@@ -33,7 +35,7 @@ export default function Settings() {
   const [testMode, setTestMode] = useState(false);
 
   // Webhooks (new CRUD system)
-  const [webhooks, setWebhooks] = useState([]);
+  const [webhooks, setWebhooks] = useState(() => apiCache.get('/settings/webhooks') || []);
   const [eventTypes, setEventTypes] = useState([]);
   const [newWh, setNewWh] = useState({ url: '', secret: '', description: '', events: [], active: true });
   const [editingId, setEditingId] = useState(null);
@@ -42,7 +44,7 @@ export default function Settings() {
   // AI settings — keyed by feature id
   const [aiFeatures, setAiFeatures] = useState({});
   const [aiExpanded, setAiExpanded] = useState({});           // { featureId: bool } — collapsed by default
-  const [aiProviders, setAiProviders] = useState([]);
+  const [aiProviders, setAiProviders] = useState(() => apiCache.get('/settings/ai/providers')?.providers || []);
   const [aiModels, setAiModels] = useState({});
   const [aiProviderSearch, setAiProviderSearch] = useState({});
   const [aiModelSearch, setAiModelSearch] = useState({});
@@ -54,6 +56,12 @@ export default function Settings() {
   const [testEventType, setTestEventType] = useState('');
   const [testEventResult, setTestEventResult] = useState(null);
 
+  // Known IPs
+  const [knownIps, setKnownIps] = useState(() => apiCache.get('/settings/known-ips')?.known_ips || []);
+  const [knownIpsOpen, setKnownIpsOpen] = useState(false);
+  const [currentIp, setCurrentIp] = useState('');
+  const [newIpAddress, setNewIpAddress] = useState('');
+
   // scroll-spy
   const [activeSection, setActiveSection] = useState(SECTIONS[0].id);
   const contentRef = useRef(null);
@@ -61,13 +69,14 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
         api.get('/settings/webhooks/events'),
         api.get('/settings/ai'),
         api.get('/settings/ai/providers'),
+        api.get('/settings/known-ips'),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
@@ -82,6 +91,8 @@ export default function Settings() {
       }
       setAiFeatures(featMap);
       setAiProviders(provData.providers || []);
+      setKnownIps(ipData.known_ips || []);
+      setCurrentIp(ipData.current_ip || '');
     } catch {}
   }, []);
 
@@ -92,16 +103,21 @@ export default function Settings() {
     const container = contentRef.current;
     if (!container) return;
     const handleScroll = () => {
+      const THRESHOLD = 120;
       const offsets = SECTIONS.map(s => {
         const el = document.getElementById(s.id);
         return el ? { id: s.id, top: el.getBoundingClientRect().top } : null;
       }).filter(Boolean);
-      // pick the one closest to the top of the viewport (with a small margin)
-      const active = offsets.reduce((best, cur) =>
-        (cur.top <= 120 && cur.top > (best?.top ?? -Infinity)) ? cur : best,
-        offsets[0],
-      );
-      if (active) setActiveSection(active.id);
+      // Sections whose top edge has scrolled past the threshold are "active candidates"
+      const past = offsets.filter(s => s.top <= THRESHOLD);
+      if (past.length > 0) {
+        // Pick the one closest to (but still at or above) the threshold
+        const active = past.reduce((best, cur) => cur.top > best.top ? cur : best);
+        setActiveSection(active.id);
+      } else {
+        // Nothing past threshold yet — highlight the first section
+        setActiveSection(offsets[0]?.id ?? SECTIONS[0].id);
+      }
     };
     container.addEventListener('scroll', handleScroll, { passive: true });
     window.addEventListener('scroll', handleScroll, { passive: true });
@@ -787,6 +803,20 @@ export default function Settings() {
           {Object.keys(aiFeatures).length === 0 && (
             <p className="text-sm text-gray-400 italic">Loading AI features…</p>
           )}
+
+        </section>
+
+        {/* ──────────────── Optional Features ──────────────── */}
+        <section id="optional-features" className="mb-10">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Optional Features</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Additional integrations that enhance lead processing.
+          </p>
+
+          {/* ── Email Verification ── */}
+          <EmailVerificationSettings />
+
+
         </section>
 
         {/* ──────────────── Scheduling ──────────────── */}
@@ -842,7 +872,108 @@ export default function Settings() {
             </Button>
           </section>
         )}
+
+        {/* ──────────────── Known IPs ──────────────── */}
+        <section className="mb-10">
+          <h2 className="text-lg font-semibold mb-2 border-b pb-2">Known IPs</h2>
+          <p className="text-xs text-gray-500 mb-3">
+            Opens and clicks from these IPs are ignored for self-open filtering.
+          </p>
+          <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>
+            Manage Known IPs
+          </Button>
+        </section>
       </div>
+
+      {/* ──────────────── Known IPs Dialog ──────────────── */}
+      {knownIpsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="bg-white dark:bg-gray-900 rounded-xl shadow-xl w-full max-w-2xl mx-4 p-6 max-h-[80vh] flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Known IPs</h2>
+              <button
+                onClick={() => setKnownIpsOpen(false)}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 text-xl leading-none"
+              >✕</button>
+            </div>
+            <p className="text-xs text-gray-500 mb-4">
+              Opens and clicks from these IPs are ignored (self-open filtering). IPs from your browser sessions are collected automatically and expire after one week. You can also add permanent IPs manually.
+            </p>
+
+            {/* Add new IP */}
+            <div className="flex gap-2 mb-4">
+              <input
+                type="text"
+                placeholder="e.g. 203.0.113.5"
+                value={newIpAddress}
+                onChange={e => setNewIpAddress(e.target.value)}
+                className="flex-1 border rounded px-2 py-1 text-sm dark:bg-gray-800 dark:border-gray-600"
+              />
+              <Button size="sm" onClick={async () => {
+                const ip = newIpAddress.trim();
+                if (!ip) return;
+                try {
+                  await api.post('/settings/known-ips', { ip_address: ip, permanent: true });
+                  setNewIpAddress('');
+                  const d = await api.get('/settings/known-ips');
+                  setKnownIps(d.known_ips || []);
+                  notify('IP added', 'success');
+                } catch (e) { notify(e.message, 'error'); }
+              }}>Add Permanent</Button>
+            </div>
+
+            {/* IP list */}
+            <div className="overflow-y-auto flex-1">
+              {knownIps.length === 0 ? (
+                <p className="text-sm text-gray-400 italic">No known IPs yet. Your browser IP will be registered automatically.</p>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs text-gray-500 border-b">
+                      <th className="pb-1">IP Address</th>
+                      <th className="pb-1">Type</th>
+                      <th className="pb-1">Last Seen</th>
+                      <th className="pb-1">Expires</th>
+                      <th className="pb-1"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {knownIps.map(ip => (
+                      <tr key={ip.id} className={`border-b ${ip.is_current ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}>
+                        <td className="py-1.5">
+                          {ip.ip_address}
+                          {ip.is_current && <span className="ml-2 text-xs text-blue-600 dark:text-blue-400 font-medium">(you)</span>}
+                        </td>
+                        <td className="py-1.5">
+                          {ip.permanent
+                            ? <span className="text-xs bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 px-1.5 py-0.5 rounded">permanent</span>
+                            : <span className="text-xs bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400 px-1.5 py-0.5 rounded">auto</span>
+                          }
+                        </td>
+                        <td className="py-1.5 text-gray-500">{ip.last_seen_at ? new Date(ip.last_seen_at).toLocaleDateString() : '—'}</td>
+                        <td className="py-1.5 text-gray-500">{ip.expires_at ? new Date(ip.expires_at).toLocaleDateString() : '—'}</td>
+                        <td className="py-1.5 text-right">
+                          <button
+                            className="text-xs text-red-500 hover:underline"
+                            onClick={async () => {
+                              try {
+                                await api.del(`/settings/known-ips/${ip.id}`);
+                                const d = await api.get('/settings/known-ips');
+                                setKnownIps(d.known_ips || []);
+                                notify('IP removed', 'success');
+                              } catch (e) { notify(e.message, 'error'); }
+                            }}
+                          >Remove</button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

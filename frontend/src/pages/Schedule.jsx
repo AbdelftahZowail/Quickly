@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef } from 'react';
-import { api } from '../api';
+import { api, apiCache } from '../api';
 import { useLoading } from '../context/LoadingContext';
 import { useNotify } from '../context/NotificationContext';
 import { useConfirm } from '../context/ConfirmContext';
@@ -113,10 +113,10 @@ export default function Schedule() {
   const notify = useNotify();
   const { isProduction } = useAppMode();
 
-  const [sent, setSent] = useState([]);
-  const [scheduled, setScheduled] = useState([]);
-  const [stats, setStats] = useState({});
-  const [serverStatus, setServerStatus] = useState({});
+  const [sent, setSent] = useState(() => apiCache.get('/schedule/sent') || []);
+  const [scheduled, setScheduled] = useState(() => apiCache.get('/schedule/scheduled') || []);
+  const [stats, setStats] = useState(() => apiCache.get('/schedule/stats') || {});
+  const [serverStatus, setServerStatus] = useState(() => apiCache.get('/status') || {});
   const [strategy, setStrategy] = useState('priority');
   const [timeToNext, setTimeToNext] = useState('');
   const confirm = useConfirm();

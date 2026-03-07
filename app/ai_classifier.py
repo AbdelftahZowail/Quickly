@@ -35,9 +35,11 @@ FEATURES: dict[str, dict] = {
     "reply_classifier": {
         "label": "Reply Interest Classifier",
         "description": (
-            "Classifies lead replies as 'interested' or 'not_interested' based on "
+            "Classifies lead replies as 'interested', 'not_interested', 'unsubscribed', "
+            "'out_of_office', 'wrong_person', or 'auto_reply' based on "
             "the original email sent and the lead's reply.  Not-interested leads are "
-            "automatically paused and notified via webhook."
+            "automatically paused; unsubscribed leads are marked as unsubscribed and removed "
+            "from sending."
         ),
     },
 }
@@ -207,8 +209,12 @@ classify the lead's reply as one of:
 
   - "interested"     — the lead shows positive engagement: wants more info,
                        schedules a call, asks questions about the offer, etc.
-  - "not_interested" — the lead declines, asks to be removed, says "unsubscribe",
-                       gives a negative/neutral response, or shows no intent to engage.
+  - "not_interested" — the lead declines or gives a negative/neutral response
+                       with no intent to engage, but does NOT explicitly ask to
+                       be removed from mailings.
+  - "unsubscribed"   — the lead explicitly requests to be removed, unsubscribed,
+                       or asks to stop receiving emails (e.g. "unsubscribe",
+                       "remove me", "stop emailing me", "take me off your list").
   - "out_of_office"  — the reply is an automatic out-of-office/vacation autoresponder.
   - "wrong_person"   — the lead indicates they are not the right contact (e.g.
                        "you have the wrong person", "I don't handle this", etc.).
@@ -216,7 +222,7 @@ classify the lead's reply as one of:
                        an out-of-office (e.g. ticket confirmation, CRM auto-reply).
 
 Respond with ONLY one of these exact values:
-  interested  |  not_interested  |  out_of_office  |  wrong_person  |  auto_reply
+  interested  |  not_interested  |  unsubscribed  |  out_of_office  |  wrong_person  |  auto_reply
 Do NOT include any other text, explanation, or punctuation.
 """
 
@@ -227,7 +233,7 @@ async def classify_reply(
     email_subject: str = "",
     email_body: str = "",
     thread_messages: list[dict] | None = None,
-) -> Literal["interested", "not_interested", "out_of_office", "wrong_person", "auto_reply"] | None:
+) -> Literal["interested", "not_interested", "unsubscribed", "out_of_office", "wrong_person", "auto_reply"] | None:
     """Classify *reply_text* using the reply_classifier feature.
 
     Accepts the original *email_subject* and *email_body* for basic context, or
@@ -286,6 +292,8 @@ async def classify_reply(
         # Check in order: multi-word values first to avoid substring collisions
         if "not_interested" in raw:
             return "not_interested"
+        if "unsubscribed" in raw:
+            return "unsubscribed"
         if "out_of_office" in raw:
             return "out_of_office"
         if "wrong_person" in raw:

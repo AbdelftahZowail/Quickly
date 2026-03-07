@@ -59,7 +59,7 @@ async def test_open_pixel_returns_gif(session, monkeypatch):
     """Endpoint always returns a GIF regardless of whether the log exists."""
     monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
 
-    resp = await open_pixel(log_id=9999, request=_req(), db=session)
+    resp = await open_pixel(token="9999", request=_req(), db=session)
 
     assert resp.media_type == "image/gif"
     assert resp.body[:4] == b"GIF8"  # GIF89a header
@@ -69,7 +69,7 @@ async def test_open_pixel_returns_gif(session, monkeypatch):
 async def test_open_pixel_no_cache_header(session, monkeypatch):
     monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
 
-    resp = await open_pixel(log_id=9999, request=_req(), db=session)
+    resp = await open_pixel(token="9999", request=_req(), db=session)
 
     assert "no-store" in resp.headers.get("cache-control", "").lower()
 
@@ -84,7 +84,7 @@ async def test_open_pixel_records_email_open(session, monkeypatch):
     cl = await make_campaign_lead(session, campaign.id, lead.id)
     email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
 
-    await open_pixel(log_id=email_log.id, request=_req(x_real_ip="1.2.3.4"), db=session)
+    await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(x_real_ip="1.2.3.4"), db=session)
 
     result = await session.execute(
         select(func.count(EmailOpen.id)).where(EmailOpen.email_log_id == email_log.id)
@@ -102,7 +102,7 @@ async def test_open_pixel_stores_ip_address(session, monkeypatch):
     await make_campaign_lead(session, campaign.id, lead.id)
     email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
 
-    await open_pixel(log_id=email_log.id, request=_req(x_real_ip="5.6.7.8"), db=session)
+    await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(x_real_ip="5.6.7.8"), db=session)
 
     result = await session.execute(
         select(EmailOpen).where(EmailOpen.email_log_id == email_log.id)
@@ -122,7 +122,7 @@ async def test_open_pixel_sets_opened_flag(session, monkeypatch):
     email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
     assert not email_log.opened
 
-    await open_pixel(log_id=email_log.id, request=_req(), db=session)
+    await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(), db=session)
 
     await session.refresh(email_log)
     assert email_log.opened is True
@@ -133,7 +133,7 @@ async def test_open_pixel_unknown_log_id_still_returns_gif(session, monkeypatch)
     """If the log row does not exist the pixel must still be served (avoids 500s)."""
     monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
 
-    resp = await open_pixel(log_id=99999, request=_req(), db=session)
+    resp = await open_pixel(token="99999", request=_req(), db=session)
 
     assert resp.media_type == "image/gif"
 
@@ -153,7 +153,7 @@ async def test_open_pixel_fires_webhook(session, monkeypatch):
     await make_campaign_lead(session, campaign.id, lead.id)
     email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
 
-    await open_pixel(log_id=email_log.id, request=_req(), db=session)
+    await open_pixel(token=email_log.open_token or str(email_log.id), request=_req(), db=session)
 
     assert "email.opened" in events
 

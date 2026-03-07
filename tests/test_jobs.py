@@ -141,6 +141,38 @@ async def test_rate_limit_allows_small_slack(session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_format_override_allows_long_values(session, monkeypatch):
+    """Ensure the format_override column can hold more than 8 characters.
+
+    Historically the database migration created the column as varchar(8),
+    which caused a truncation error when longer reasons like
+    ``tracking_upgraded_to_html`` were stored.  The send job should still
+    work and preserve the full string.
+    """
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session, track_opens=True)
+    # force the "text_forced_tracking_disabled" override which is long
+    campaign.send_all_as_text = True
+    await session.flush()
+
+    seq = await make_sequence(session, campaign.id)
+    lead = await make_lead(session)
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+
+    now = datetime.utcnow()
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(minutes=1))
+    await session.flush()
+
+    monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+
+    await run_send_job()
+
+    # row should exist with the full override string
+    res = await session.execute(select(EmailLog.format_override))
+    assert res.scalar() == "text_forced_tracking_disabled"
+
+@pytest.mark.asyncio
 async def test_gmail_token_refresh_failure_fires_webhook(session, monkeypatch):
     inbox = await make_inbox(session, provider="gmail")
     campaign = await make_campaign(session)

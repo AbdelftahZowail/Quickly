@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { Link } from 'react-router-dom';
-import { api } from '../api';
+import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import DatePicker from '../components/ui/DatePicker';
@@ -53,13 +53,13 @@ function buildPresets(serverToday) {
 }
 
 export default function Analytics() {
-  const [campaigns, setCampaigns] = useState([]);
+  const [campaigns, setCampaigns] = useState(() => apiCache.get('/campaigns') || []);
   // current dropdown choice and list of selected campaign ids
   const [currentChoice, setCurrentChoice] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
   const [error, setError] = useState(null);
   // schedule sent data and filters
-  const [allSent, setAllSent] = useState([]);
+  const [allSent, setAllSent] = useState(() => apiCache.get('/schedule/sent') || []);
   const [serverToday, setServerToday] = useState(null);
 
   const [presets, setPresets] = useState(() => buildPresets(new Date()));

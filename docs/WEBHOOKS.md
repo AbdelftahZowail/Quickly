@@ -254,6 +254,60 @@ Fires when the AI classifier determines a lead's reply is negative or a rejectio
 }
 ```
 
+### `lead.out_of_office`
+
+Fires when the AI classifier determines a lead's reply is an out-of-office auto-response. Sending is not paused in this case.
+
+```json
+{
+  "event": "lead.out_of_office",
+  "data": {
+    "lead_id": 42,
+    "lead_email": "prospect@example.com",
+    "lead_name": "Alice Long",
+    "campaign_id": 5,
+    "classification": "out_of_office",
+    "reply_snippet": "I am out of the office until March 15th."
+  }
+}
+```
+
+### `lead.wrong_person`
+
+Fires when the AI classifier determines the reply indicates the email reached the wrong person (e.g. misaddressed or forwarded).
+
+```json
+{
+  "event": "lead.wrong_person",
+  "data": {
+    "lead_id": 42,
+    "lead_email": "prospect@example.com",
+    "lead_name": "Alice Long",
+    "campaign_id": 5,
+    "classification": "wrong_person",
+    "reply_snippet": "I think you have the wrong person."
+  }
+}
+```
+
+### `lead.auto_reply`
+
+Fires when the AI classifier determines the reply is an automated message (e.g. email delivery notification, vacation responder that isn't out-of-office).
+
+```json
+{
+  "event": "lead.auto_reply",
+  "data": {
+    "lead_id": 42,
+    "lead_email": "prospect@example.com",
+    "lead_name": "Alice Long",
+    "campaign_id": 5,
+    "classification": "auto_reply",
+    "reply_snippet": "This is an automated response."
+  }
+}
+```
+
 ### `daily_limit`
 
 Fires when the send job is about to exceed an inbox's daily sending cap.
@@ -371,7 +425,7 @@ The webhook call is non-blocking and failure-safe, so adding new events to criti
 |---|---|---|
 | `GET` | `/api/settings/webhooks` | List all webhooks |
 | `POST` | `/api/settings/webhooks` | Create a webhook |
-| `GET` | `/api/settings/webhooks/events` | List valid event types |
+| `GET` | `/api/settings/webhooks/events` | List valid event types (15 total) |
 | `PATCH` | `/api/settings/webhooks/{id}` | Update a webhook |
 | `DELETE` | `/api/settings/webhooks/{id}` | Delete a webhook |
 | `POST` | `/api/settings/webhooks/{id}/test` | Fire generic test event |

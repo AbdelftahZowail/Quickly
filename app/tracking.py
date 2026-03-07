@@ -88,6 +88,7 @@ def inject_tracking_html(
     tracking_base: str,
     track_opens: bool = True,
     track_clicks: bool = True,
+    open_token: str | None = None,
 ) -> tuple[str, list[tuple[str, str]]]:
     """Rewrite every http(s) href in *html* to a click-tracking redirect URL
     and append a 1×1 open-tracking pixel just before ``</body>`` (or at end).
@@ -95,6 +96,9 @@ def inject_tracking_html(
     Links whose URL already starts with *tracking_base* (e.g. the unsubscribe
     link ``/u/{token}``) are left untouched — they are already served by this
     same server and need no extra redirection.
+
+    The open pixel URL uses *open_token* when provided (non-incremental ID),
+    falling back to *email_log_id* for backwards compatibility.
 
     Returns:
         ``(new_html, link_pairs)`` where *link_pairs* is a list of
@@ -126,7 +130,8 @@ def inject_tracking_html(
 
     if track_opens:
         # Append open-tracking pixel ─────────────────────────────────────────────
-        pixel_url = f"{tracking_base}/o/{email_log_id}"
+        pixel_id = open_token if open_token else str(email_log_id)
+        pixel_url = f"{tracking_base}/o/{pixel_id}"
         pixel = (
             f'<img src="{pixel_url}" width="1" height="1" '
             f'border="0" style="display:none" alt="" />'

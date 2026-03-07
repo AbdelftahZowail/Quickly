@@ -3,11 +3,12 @@ import csv
 import io
 import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, func
+from sqlalchemy.orm import selectinload
 from datetime import date
 from typing import List
 
@@ -15,6 +16,7 @@ from app.database import get_db
 from app.models import (
     Campaign,
     Sequence,
+    SequenceVariant,
     CampaignLead,
     QueueSlot,
     Lead,
@@ -32,6 +34,9 @@ from app.schemas import (
     SequenceCreate,
     SequenceUpdate,
     SequenceResponse,
+    SequenceVariantCreate,
+    SequenceVariantUpdate,
+    SequenceVariantResponse,
 )
 from app.queue_logic import reserve_slots_for_new_leads_bulk, recalculate_queue_after_sequence_change_for_leads
 
@@ -50,6 +55,7 @@ def _campaign_to_response(
         stats = {}
     return CampaignResponse(
         id=campaign.id,
+        public_id=campaign.public_id or str(campaign.id),
         name=campaign.name,
         inbox_ids=inbox_ids,
         sending_days=campaign.sending_days or [0, 1, 2, 3, 4],
@@ -494,7 +500,13 @@ async def update_campaign(
     if data.send_all_as_text is not None:
         campaign.send_all_as_text = data.send_all_as_text
     if data.timezone is not None:
+        old_tz = campaign.timezone
         campaign.timezone = data.timezone if data.timezone else None
+        if campaign.timezone != old_tz:
+            await db.flush()
+            log.info("Campaign %s timezone changed (%s -> %s); triggering queue recalculation", campaign_id, old_tz, campaign.timezone)
+            from app.routers.schedule import recalculate_all_campaigns
+            await recalculate_all_campaigns(db)
     await db.flush()
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
@@ -558,7 +570,10 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
 @router.get("/{campaign_id}/sequences", response_model=list[SequenceResponse])
 async def list_sequences(campaign_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Sequence).where(Sequence.campaign_id == campaign_id).order_by(Sequence.position)
+        select(Sequence)
+        .options(selectinload(Sequence.variants))
+        .where(Sequence.campaign_id == campaign_id)
+        .order_by(Sequence.position)
     )
     return result.scalars().all()
 
@@ -582,7 +597,6 @@ async def create_sequence(
     )
     db.add(seq)
     await db.flush()
-    await db.refresh(seq)
     log.info("create_sequence: campaign=%s position=%s id=%s", campaign_id, data.position, seq.id)
     # Recalculate queue so already-enrolled leads get slots for the new sequence
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
@@ -590,7 +604,11 @@ async def create_sequence(
     if cl_ids:
         from app.routers.schedule import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
-    return seq
+    # Re-query with variants eagerly loaded
+    result2 = await db.execute(
+        select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
+    )
+    return result2.scalar_one()
 
 
 @router.patch("/{campaign_id}/sequences/{sequence_id}", response_model=SequenceResponse)
@@ -625,8 +643,12 @@ async def update_sequence(
         if cl_ids:
             from app.routers.schedule import recalculate_all_campaigns
             await recalculate_all_campaigns(db)
-    await db.refresh(seq)
-    return seq
+    await db.flush()
+    # Re-query with variants eagerly loaded to avoid lazy-load MissingGreenlet error
+    result2 = await db.execute(
+        select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
+    )
+    return result2.scalar_one()
 
 
 @router.delete("/{campaign_id}/sequences/{sequence_id}")
@@ -662,6 +684,131 @@ async def delete_sequence(
         from app.routers.schedule import recalculate_all_campaigns
         await recalculate_all_campaigns(db)
     return {"ok": True}
+
+
+# ---- Sequence Variants (A/B testing) ----
+
+@router.get(
+    "/{campaign_id}/sequences/{sequence_id}/variants",
+    response_model=list[SequenceVariantResponse],
+)
+async def list_variants(
+    campaign_id: int,
+    sequence_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """List all A/B variants for a sequence step."""
+    seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    result = await db.execute(
+        select(SequenceVariant)
+        .where(SequenceVariant.sequence_id == seq.id)
+        .order_by(SequenceVariant.id)
+    )
+    return result.scalars().all()
+
+
+@router.post(
+    "/{campaign_id}/sequences/{sequence_id}/variants",
+    response_model=SequenceVariantResponse,
+    status_code=201,
+)
+async def create_variant(
+    campaign_id: int,
+    sequence_id: int,
+    data: SequenceVariantCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new A/B variant for a sequence step."""
+    seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    variant = SequenceVariant(
+        sequence_id=seq.id,
+        label=data.label or "",
+        subject=data.subject,
+        body=data.body,
+        is_html=data.is_html,
+        preview_text=data.preview_text,
+        enabled=data.enabled,
+    )
+    db.add(variant)
+    await db.flush()
+    await db.refresh(variant)
+    log.info("create_variant: sequence=%s variant=%s label=%r", seq.id, variant.id, variant.label)
+    return variant
+
+
+@router.patch(
+    "/{campaign_id}/sequences/{sequence_id}/variants/{variant_id}",
+    response_model=SequenceVariantResponse,
+)
+async def update_variant(
+    campaign_id: int,
+    sequence_id: int,
+    variant_id: int,
+    data: SequenceVariantUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an A/B variant (partial update)."""
+    seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    result = await db.execute(
+        select(SequenceVariant).where(
+            SequenceVariant.id == variant_id,
+            SequenceVariant.sequence_id == seq.id,
+        )
+    )
+    variant = result.scalar_one_or_none()
+    if not variant:
+        raise HTTPException(404, "Variant not found")
+    if data.label is not None:
+        variant.label = data.label
+    if data.subject is not None:
+        variant.subject = data.subject
+    if data.body is not None:
+        variant.body = data.body
+    if 'is_html' in data.model_fields_set:
+        variant.is_html = data.is_html
+    if 'preview_text' in data.model_fields_set:
+        variant.preview_text = data.preview_text
+    if data.enabled is not None:
+        variant.enabled = data.enabled
+    await db.flush()
+    await db.refresh(variant)
+    return variant
+
+
+@router.delete("/{campaign_id}/sequences/{sequence_id}/variants/{variant_id}")
+async def delete_variant(
+    campaign_id: int,
+    sequence_id: int,
+    variant_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an A/B variant."""
+    seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    result = await db.execute(
+        select(SequenceVariant).where(
+            SequenceVariant.id == variant_id,
+            SequenceVariant.sequence_id == seq.id,
+        )
+    )
+    variant = result.scalar_one_or_none()
+    if not variant:
+        raise HTTPException(404, "Variant not found")
+    await db.delete(variant)
+    await db.flush()
+    return {"ok": True}
+
+
+async def _get_sequence_or_404(campaign_id: int, sequence_id: int, db: AsyncSession) -> Sequence:
+    result = await db.execute(
+        select(Sequence).where(
+            Sequence.id == sequence_id,
+            Sequence.campaign_id == campaign_id,
+        )
+    )
+    seq = result.scalar_one_or_none()
+    if not seq:
+        raise HTTPException(404, "Sequence not found")
+    return seq
 
 
 # ---- Enrolled leads and queue ----
@@ -756,6 +903,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "replied": lead.id in replied_set,
             "interest_status": cl.interest_status,
             "sending_paused": cl.sending_paused,
+            "email_verification_status": lead.email_verification_status,
         }
         for cl, lead in rows
     ]
@@ -789,7 +937,7 @@ async def patch_campaign_lead(
     if not cl:
         raise HTTPException(404, "Campaign-lead enrolment not found")
 
-    VALID_INTEREST_STATUSES = {"interested", "not_interested", "out_of_office", "wrong_person", "auto_reply", ""}
+    VALID_INTEREST_STATUSES = {"interested", "not_interested", "out_of_office", "wrong_person", "auto_reply", "unsubscribed", ""}
     if payload.interest_status is not None:
         if payload.interest_status not in VALID_INTEREST_STATUSES:
             raise HTTPException(400, f"interest_status must be one of: {', '.join(sorted(VALID_INTEREST_STATUSES - {''}))}, or empty string to clear")
@@ -811,6 +959,7 @@ async def patch_campaign_lead(
 class PreviewRequest(BaseModel):
     sequence_id: int
     lead_id: int | None = None
+    variant_id: int | None = None  # If set, preview this A/B variant's content
 
 
 @router.post("/{campaign_id}/preview")
@@ -819,7 +968,11 @@ async def preview_email(
     data: PreviewRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """Render a sequence email for preview (with optional lead variable substitution)."""
+    """Render a sequence email for preview (with optional lead variable substitution).
+
+    Pass variant_id to preview a specific A/B variant's content instead of the
+    default sequence content.
+    """
     seq_result = await db.execute(
         select(Sequence).where(
             Sequence.id == data.sequence_id,
@@ -835,6 +988,27 @@ async def preview_email(
     if not campaign:
         raise HTTPException(404, "Campaign not found")
 
+    # Resolve variant content when a variant_id is supplied.
+    preview_body = seq.body or ""
+    preview_subject = seq.subject or ""
+    preview_is_html = bool(seq.is_html)
+    variant_label: str | None = None
+    if data.variant_id is not None:
+        from app.models import SequenceVariant
+        var_result = await db.execute(
+            select(SequenceVariant).where(
+                SequenceVariant.id == data.variant_id,
+                SequenceVariant.sequence_id == data.sequence_id,
+            )
+        )
+        variant = var_result.scalar_one_or_none()
+        if not variant:
+            raise HTTPException(404, "Variant not found")
+        preview_body = variant.body or ""
+        preview_subject = variant.subject or seq.subject or ""  # fallback to sequence subject
+        preview_is_html = bool(variant.is_html) if variant.is_html is not None else bool(seq.is_html)
+        variant_label = variant.label or "Variant"
+
     from app.sender import render_body, get_lead_data
 
     # Build substitution data – fall back to placeholder strings when no lead given.
@@ -845,13 +1019,13 @@ async def preview_email(
         if lead:
             lead_data = get_lead_data(lead)
 
-    rendered_body = render_body(seq.body or "", lead_data)
-    rendered_subject = render_body(seq.subject or "", lead_data)
+    rendered_body = render_body(preview_body, lead_data)
+    rendered_subject = render_body(preview_subject, lead_data)
 
     # For HTML sequences inject tracking with a placeholder log id so that
     # tracking URLs look realistic (they won't resolve until a real send).
     tracking_urls_note = None
-    if seq.is_html and (campaign.track_clicks or campaign.track_opens):
+    if preview_is_html and (campaign.track_clicks or campaign.track_opens):
         try:
             from app.settings_manager import settings as app_settings
             from app.tracking import inject_tracking_html
@@ -871,8 +1045,9 @@ async def preview_email(
     return {
         "subject": rendered_subject,
         "body": rendered_body,
-        "is_html": bool(seq.is_html),
+        "is_html": preview_is_html,
         "sequence_position": seq.position,
+        "variant_label": variant_label,
         "tracking_note": tracking_urls_note,
     }
 
@@ -881,6 +1056,7 @@ class TestEmailRequest(BaseModel):
     sequence_id: int
     lead_id: int | None = None
     to_email: str
+    variant_id: int | None = None  # If set, send this A/B variant's content
 
 
 @router.post("/{campaign_id}/send-test")
@@ -919,6 +1095,24 @@ async def send_test_email(
     if not inbox:
         raise HTTPException(400, "No inboxes configured for this campaign")
 
+    # Resolve variant content when a variant_id is supplied.
+    send_body = seq.body or ""
+    send_subject = seq.subject or "(no subject)"
+    send_is_html = bool(seq.is_html)
+    if data.variant_id is not None:
+        from app.models import SequenceVariant
+        var_result = await db.execute(
+            select(SequenceVariant).where(
+                SequenceVariant.id == data.variant_id,
+                SequenceVariant.sequence_id == data.sequence_id,
+            )
+        )
+        variant = var_result.scalar_one_or_none()
+        if variant:
+            send_body = variant.body or ""
+            send_subject = variant.subject or seq.subject or "(no subject)"
+            send_is_html = bool(variant.is_html) if variant.is_html is not None else bool(seq.is_html)
+
     from app.sender import render_body, get_lead_data
 
     lead_data: dict = {"name": "Test User", "email": data.to_email}
@@ -928,8 +1122,8 @@ async def send_test_email(
         if lead:
             lead_data = get_lead_data(lead)
 
-    rendered_body = render_body(seq.body or "", lead_data)
-    rendered_subject = render_body(seq.subject or "(no subject)", lead_data)
+    rendered_body = render_body(send_body, lead_data)
+    rendered_subject = render_body(send_subject, lead_data)
 
     # Get Gmail account if needed
     gmail_account = None
@@ -950,7 +1144,7 @@ async def send_test_email(
             body=rendered_body,
             from_email=inbox.email or "",
             from_name=inbox.display_name or "",
-            is_html=bool(seq.is_html),
+            is_html=send_is_html,
             provider=getattr(inbox, "provider", "resend") or "resend",
             gmail_account=gmail_account,
         ),
@@ -1005,28 +1199,157 @@ async def list_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
 
 
 
+@router.get("/{campaign_id}/analytics/steps")
+async def step_analytics(campaign_id: int, db: AsyncSession = Depends(get_db)):
+    """Per-step (and per-variant) analytics for a campaign.
+
+    Returns one entry per sequence step, each containing total counts plus
+    a breakdown by variant (including the 'default' i.e. no-variant bucket).
+    'opportunities' = leads that were sent the step AND are marked interested.
+    """
+    # Fetch all sequences with their variants
+    seq_result = await db.execute(
+        select(Sequence)
+        .options(selectinload(Sequence.variants))
+        .where(Sequence.campaign_id == campaign_id)
+        .order_by(Sequence.position)
+    )
+    sequences = seq_result.scalars().all()
+
+    # All email logs for this campaign (eager-load variant)
+    log_result = await db.execute(
+        select(EmailLog)
+        .options(selectinload(EmailLog.variant))
+        .where(EmailLog.campaign_id == campaign_id)
+    )
+    logs = log_result.scalars().all()
+
+    # Interested leads for this campaign
+    interested_result = await db.execute(
+        select(CampaignLead.lead_id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.interest_status == "interested",
+        )
+    )
+    interested_lead_ids = {r[0] for r in interested_result.all()}
+
+    # Replied lead IDs for this campaign
+    replied_result = await db.execute(
+        select(LeadReply.lead_id)
+        .where(LeadReply.campaign_id == campaign_id)
+        .distinct()
+    )
+    replied_lead_ids = {r[0] for r in replied_result.all()}
+
+    # Build per-step metrics
+    analytics = []
+    for seq in sequences:
+        step_logs = [el for el in logs if el.sequence_index == seq.position]
+
+        # Build variant buckets:  key = variant_id (None for default)
+        variant_map: dict = {}  # variant_id -> {label, enabled, sent, opens, clicks, replies, opportunities}
+
+        # Populate "default" bucket
+        variant_map[None] = {
+            "variant_id": None,
+            "variant_label": "Default",
+            "sent": 0, "opens": 0, "clicks": 0, "replies": 0, "opportunities": 0,
+            "enabled": True,
+        }
+        # Populate named variant buckets
+        for v in seq.variants:
+            variant_map[v.id] = {
+                "variant_id": v.id,
+                "variant_label": v.label or f"Variant {v.id}",
+                "sent": 0, "opens": 0, "clicks": 0, "replies": 0, "opportunities": 0,
+                "enabled": v.enabled,
+            }
+
+        for el in step_logs:
+            vid = el.variant_id  # None or a variant id
+            bucket = variant_map.get(vid)
+            if bucket is None:
+                # variant was deleted but logs remain — group under default
+                bucket = variant_map[None]
+            bucket["sent"] += 1
+            if el.opened:
+                bucket["opens"] += 1
+            if el.clicked:
+                bucket["clicks"] += 1
+            if el.lead_id in replied_lead_ids:
+                bucket["replies"] += 1
+            if el.lead_id in interested_lead_ids:
+                bucket["opportunities"] += 1
+
+        total_sent = sum(b["sent"] for b in variant_map.values())
+        total_opens = sum(b["opens"] for b in variant_map.values())
+        total_clicks = sum(b["clicks"] for b in variant_map.values())
+        total_replies = sum(b["replies"] for b in variant_map.values())
+        total_opportunities = sum(b["opportunities"] for b in variant_map.values())
+
+        analytics.append({
+            "sequence_id": seq.id,
+            "sequence_index": seq.position,
+            "subject": seq.subject or "",
+            "total_sent": total_sent,
+            "total_opens": total_opens,
+            "total_clicks": total_clicks,
+            "total_replies": total_replies,
+            "total_opportunities": total_opportunities,
+            "variants": list(variant_map.values()),
+        })
+
+    return analytics
+
+
 @router.get("/{campaign_id}/sent")
 async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    """Return sent email history for this campaign (for the schedule view)."""
+    """Return sent email history for this campaign with full status details."""
+    from sqlalchemy.orm import selectinload as _sl
     result = await db.execute(
-        select(EmailLog, Lead)
+        select(EmailLog, Lead, CampaignLead)
         .join(Lead, EmailLog.lead_id == Lead.id)
+        .outerjoin(
+            CampaignLead,
+            (CampaignLead.lead_id == EmailLog.lead_id)
+            & (CampaignLead.campaign_id == EmailLog.campaign_id),
+        )
+        .options(
+            _sl(EmailLog.variant),
+        )
         .where(EmailLog.campaign_id == campaign_id)
-        .order_by(EmailLog.sent_at)
+        .order_by(EmailLog.sent_at.desc())
     )
     rows = result.all()
+
+    # get replied lead ids
+    replied_result = await db.execute(
+        select(LeadReply.lead_id)
+        .where(LeadReply.campaign_id == campaign_id)
+        .distinct()
+    )
+    replied_ids = {r[0] for r in replied_result.all()}
+
     return [
         {
             "log_id": el.id,
             "sent_date": el.sent_at.date().isoformat() if el.sent_at else None,
             "sent_at": el.sent_at.isoformat() if el.sent_at else None,
             "sequence_index": el.sequence_index,
-            "subject": el.subject,
+            "subject": el.subject or "",
             "lead_id": el.lead_id,
             "lead_email": lead.email,
-            "lead_name": lead.name,
+            "lead_name": lead.name or "",
+            "lead_status": lead.status,
+            "interest_status": cl.interest_status if cl else None,
+            "opened": el.opened,
+            "clicked": el.clicked,
+            "replied": el.lead_id in replied_ids,
+            "variant_id": el.variant_id,
+            "variant_label": (el.variant.label if el.variant else None),
         }
-        for el, lead in rows
+        for el, lead, cl in rows
     ]
 
 
@@ -1056,6 +1379,8 @@ async def remove_lead_from_campaign(
 async def bulk_add_leads_to_campaign(
     campaign_id: int,
     leads_data: list[CampaignLeadAdd],
+    skip_duplicates: bool = Query(True, description="When True, leads already enrolled in any campaign are skipped and reported in duplicate_leads. When False, leads are added normally (already-enrolled leads in this campaign are silently skipped)."),
+    verify_emails: bool = Query(False, description="When True and email verification is configured, verify each lead's email in the background after adding."),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1070,10 +1395,22 @@ async def bulk_add_leads_to_campaign(
     if not leads_data:
         raise HTTPException(400, "No leads provided")
 
+    # Deduplicate within the batch — keep only the first occurrence of each email
+    seen_emails: set[str] = set()
+    deduped: list[CampaignLeadAdd] = []
+    for entry in leads_data:
+        norm = entry.email.strip().lower()
+        if norm not in seen_emails:
+            seen_emails.add(norm)
+            deduped.append(entry)
+    duplicates_in_batch = len(leads_data) - len(deduped)
+    leads_data = deduped
+
     results = []
     added = 0
     already_enrolled = 0
     errors = 0
+    duplicate_leads: list[str] = []
 
     for entry in leads_data:
         email = entry.email.strip().lower()
@@ -1108,16 +1445,28 @@ async def bulk_add_leads_to_campaign(
                     await db.flush()
 
             # Check enrollment
-            existing_cl = await db.execute(
-                select(CampaignLead).where(
-                    CampaignLead.campaign_id == campaign_id,
-                    CampaignLead.lead_id == lead.id,
+            if skip_duplicates:
+                # Global check: skip if enrolled in any campaign
+                existing_any = await db.execute(
+                    select(CampaignLead).where(CampaignLead.lead_id == lead.id)
                 )
-            )
-            if existing_cl.scalar_one_or_none():
-                results.append({"email": email, "status": "already_enrolled"})
-                already_enrolled += 1
-                continue
+                if existing_any.scalar_one_or_none():
+                    duplicate_leads.append(email)
+                    results.append({"email": email, "status": "already_enrolled"})
+                    already_enrolled += 1
+                    continue
+            else:
+                # Only check this campaign to avoid a DB constraint violation
+                existing_cl = await db.execute(
+                    select(CampaignLead).where(
+                        CampaignLead.campaign_id == campaign_id,
+                        CampaignLead.lead_id == lead.id,
+                    )
+                )
+                if existing_cl.scalar_one_or_none():
+                    results.append({"email": email, "status": "already_enrolled"})
+                    already_enrolled += 1
+                    continue
 
             # Enroll and queue
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
@@ -1143,30 +1492,186 @@ async def bulk_add_leads_to_campaign(
             results.append({"email": email, "status": "error", "detail": str(exc)})
             errors += 1
 
+    # Trigger background email verification if requested
+    added_lead_ids = [r["lead_id"] for r in results if r.get("status") == "added" and r.get("lead_id")]
+    if verify_emails and added_lead_ids:
+        import asyncio
+        asyncio.create_task(_run_background_verification(added_lead_ids))
+
     return {
         "ok": True,
         "added": added,
         "already_enrolled": already_enrolled,
+        "duplicate_leads": duplicate_leads,
+        "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
         "results": results,
+        "verification_queued": verify_emails and bool(added_lead_ids),
     }
+
+
+# ── Background email verification ────────────────────────────────────────────
+
+async def _run_background_verification(lead_ids: list[int]):
+    """Verify emails for the given lead IDs in the background."""
+    from app.database import AsyncSessionLocal
+    from app.app_settings import (
+        get_setting,
+        EMAIL_VERIFICATION_API_KEY,
+        EMAIL_VERIFICATION_PROVIDER,
+        EMAIL_VERIFICATION_ENABLED,
+        EMAIL_VERIFICATION_CUSTOM_URL,
+        EMAIL_VERIFICATION_CUSTOM_FIELD,
+        EMAIL_VERIFICATION_CUSTOM_VALID_VALUES,
+        EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES,
+        EMAIL_VERIFICATION_CUSTOM_METHOD,
+    )
+    from app.email_verification import verify_single, BLOCK_SEND_STATUSES, PENDING, CustomHttpProvider
+    import json
+
+    async with AsyncSessionLocal() as db:
+        try:
+            enabled = (await get_setting(db, EMAIL_VERIFICATION_ENABLED) or "false").lower() in ("true", "1", "yes")
+            if not enabled:
+                log.info("Email verification disabled, skipping background verification")
+                return
+            provider_name = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
+
+            # Build the verifier callable based on provider
+            if provider_name == "custom":
+                custom_url = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_URL) or ""
+                custom_field = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD) or ""
+                valid_vals = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
+                invalid_vals = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
+                custom_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
+                if not custom_url or "{email}" not in custom_url:
+                    log.warning("Custom email verification provider has no valid URL template configured")
+                    return
+                _cp = CustomHttpProvider(custom_url, custom_field, valid_vals, invalid_vals, custom_method)
+                async def _do_verify(email: str) -> "VerificationResult":  # type: ignore[name-defined]  # noqa: E731
+                    return await _cp.verify(email, "")
+            else:
+                api_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
+                if not api_key:
+                    log.warning("Email verification enabled but no API key configured")
+                    return
+                async def _do_verify(email: str) -> "VerificationResult":  # type: ignore[name-defined]  # noqa: E731
+                    return await verify_single(email, api_key, provider_name)
+
+            # Mark leads as pending
+            result = await db.execute(select(Lead).where(Lead.id.in_(lead_ids)))
+            leads = result.scalars().all()
+            for lead in leads:
+                lead.email_verification_status = PENDING
+            await db.commit()
+
+            # Verify each lead
+            for lead in leads:
+                try:
+                    vr = await _do_verify(lead.email)
+                    # Re-fetch to avoid stale state
+                    result = await db.execute(select(Lead).where(Lead.id == lead.id))
+                    fresh_lead = result.scalar_one_or_none()
+                    if fresh_lead:
+                        fresh_lead.email_verification_status = vr.status
+                        fresh_lead.email_verification_result = vr.raw
+                        # If invalid or risky, mark lead as bounced to prevent sending
+                        if vr.status in BLOCK_SEND_STATUSES:
+                            fresh_lead.status = "bounced"
+                            # Also remove pending queue slots
+                            cl_result = await db.execute(
+                                select(CampaignLead.id).where(CampaignLead.lead_id == lead.id)
+                            )
+                            cl_ids = [r[0] for r in cl_result.all()]
+                            if cl_ids:
+                                await db.execute(
+                                    delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids))
+                                )
+                        await db.commit()
+                    log.info("Verified lead %s (%s): %s - %s", lead.id, lead.email, vr.status, vr.message)
+                except Exception as exc:
+                    log.exception("Failed to verify lead %s (%s): %s", lead.id, lead.email, exc)
+        except Exception as exc:
+            log.exception("Background verification failed: %s", exc)
+
+
+@router.post("/{campaign_id}/leads/verify")
+async def trigger_verification_for_campaign(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger email verification for all unverified leads in a campaign."""
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Campaign not found")
+
+    result = await db.execute(
+        select(Lead.id)
+        .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            Lead.email_verification_status.is_(None),
+        )
+    )
+    lead_ids = [r[0] for r in result.all()]
+    if not lead_ids:
+        return {"ok": True, "message": "No unverified leads found", "queued": 0}
+
+    import asyncio
+    asyncio.create_task(_run_background_verification(lead_ids))
+    return {"ok": True, "queued": len(lead_ids)}
+
+
+@router.get("/{campaign_id}/leads/verification-status")
+async def get_verification_status(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return verification status summary for leads in a campaign."""
+    from sqlalchemy import case
+    result = await db.execute(
+        select(
+            Lead.email_verification_status,
+            func.count().label("count"),
+        )
+        .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+        .where(CampaignLead.campaign_id == campaign_id)
+        .group_by(Lead.email_verification_status)
+    )
+    rows = result.all()
+    status_counts = {status or "unverified": count for status, count in rows}
+    return {"statuses": status_counts}
 
 
 # ---- Export leads as CSV ----
 @router.get("/{campaign_id}/leads/export")
-async def export_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_db)):
-    """Export all leads for a campaign as a CSV file."""
+async def export_campaign_leads(
+    campaign_id: int,
+    verification_status: str | None = Query(None, description="Filter by email verification status"),
+    status: str | None = Query(None, description="Filter by lead status (active, bounced, etc.)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export leads for a campaign as a CSV file, with optional filtering."""
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     camp = result.scalar_one_or_none()
     if not camp:
         raise HTTPException(404, "Campaign not found")
 
-    result = await db.execute(
+    query = (
         select(CampaignLead, Lead)
         .join(Lead, CampaignLead.lead_id == Lead.id)
         .where(CampaignLead.campaign_id == campaign_id)
-        .order_by(CampaignLead.enrolled_at.desc())
     )
+    if verification_status:
+        if verification_status == "unverified":
+            query = query.where(Lead.email_verification_status.is_(None))
+        else:
+            query = query.where(Lead.email_verification_status == verification_status)
+    if status:
+        query = query.where(Lead.status == status)
+    query = query.order_by(CampaignLead.enrolled_at.desc())
+
+    result = await db.execute(query)
     rows = result.all()
 
     # Gather all custom_data keys
@@ -1178,10 +1683,10 @@ async def export_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get
 
     output = io.StringIO()
     writer = csv.writer(output)
-    header = ["email", "name"] + custom_keys
+    header = ["email", "name", "status", "email_verification_status"] + custom_keys
     writer.writerow(header)
     for _cl, lead in rows:
-        row = [lead.email, lead.name or ""]
+        row = [lead.email, lead.name or "", lead.status or "", lead.email_verification_status or ""]
         for k in custom_keys:
             val = (lead.custom_data or {}).get(k, "")
             row.append(str(val) if val is not None else "")
@@ -1201,6 +1706,8 @@ async def export_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get
 async def import_campaign_leads(
     campaign_id: int,
     file: UploadFile = File(...),
+    skip_duplicates: bool = Query(True, description="When True, leads already enrolled in any campaign are skipped and reported in duplicate_leads. When False, leads are added normally (already-enrolled leads in this campaign are silently skipped)."),
+    verify_emails: bool = Query(False, description="When True, triggers background email verification for added leads"),
     db: AsyncSession = Depends(get_db),
 ):
     """Import leads from a CSV file. Expects columns: email, name, and any custom fields."""
@@ -1231,7 +1738,10 @@ async def import_campaign_leads(
     added = 0
     already_enrolled = 0
     errors = 0
+    duplicates_in_batch = 0
+    duplicate_leads: list[str] = []
     results_list = []
+    seen_emails: set[str] = set()
 
     for row_num, row in enumerate(reader, start=2):
         # Normalize keys
@@ -1241,6 +1751,12 @@ async def import_campaign_leads(
             results_list.append({"row": row_num, "status": "error", "detail": "Empty email"})
             errors += 1
             continue
+
+        if email in seen_emails:
+            results_list.append({"row": row_num, "email": email, "status": "duplicate_in_file"})
+            duplicates_in_batch += 1
+            continue
+        seen_emails.add(email)
 
         name = normalized.get("name", "")
         # Everything else is custom data
@@ -1269,32 +1785,53 @@ async def import_campaign_leads(
                 if changed:
                     await db.flush()
 
-            existing_cl = await db.execute(
-                select(CampaignLead).where(
-                    CampaignLead.campaign_id == campaign_id,
-                    CampaignLead.lead_id == lead.id,
+            if skip_duplicates:
+                # Global check: skip if enrolled in any campaign
+                existing_any = await db.execute(
+                    select(CampaignLead).where(CampaignLead.lead_id == lead.id)
                 )
-            )
-            if existing_cl.scalar_one_or_none():
-                results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
-                already_enrolled += 1
-                continue
+                if existing_any.scalar_one_or_none():
+                    duplicate_leads.append(email)
+                    results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
+                    already_enrolled += 1
+                    continue
+            else:
+                # Only check this campaign to avoid a DB constraint violation
+                existing_cl = await db.execute(
+                    select(CampaignLead).where(
+                        CampaignLead.campaign_id == campaign_id,
+                        CampaignLead.lead_id == lead.id,
+                    )
+                )
+                if existing_cl.scalar_one_or_none():
+                    results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
+                    already_enrolled += 1
+                    continue
 
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)
             await db.flush()
             await reserve_slots_for_new_leads_bulk(db, [cl.id], campaign_id)
             added += 1
-            results_list.append({"row": row_num, "email": email, "status": "added"})
+            results_list.append({"row": row_num, "email": email, "status": "added", "lead_id": lead.id})
         except Exception as exc:
             log.exception("import_leads: error on row %d email=%s: %s", row_num, email, exc)
             results_list.append({"row": row_num, "email": email, "status": "error", "detail": str(exc)})
             errors += 1
 
+    # Trigger background email verification if requested
+    added_lead_ids = [r["lead_id"] for r in results_list if r.get("status") == "added" and r.get("lead_id")]
+    if verify_emails and added_lead_ids:
+        import asyncio
+        asyncio.create_task(_run_background_verification(added_lead_ids))
+
     return {
         "ok": True,
         "added": added,
         "already_enrolled": already_enrolled,
+        "duplicate_leads": duplicate_leads,
+        "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
-        "total_rows": added + already_enrolled + errors,
+        "total_rows": added + already_enrolled + duplicates_in_batch + errors,
+        "verification_queued": verify_emails and bool(added_lead_ids),
     }

@@ -182,6 +182,7 @@ async def check_gmail_permissions(db: AsyncSession = Depends(get_db)):
 async def google_authorize(
     display_name: str = "",
     max_per_day: int = 50,
+    ramp_up_enabled: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """Redirect user to Google consent screen."""
@@ -190,8 +191,8 @@ async def google_authorize(
     if not client_id or not client_secret:
         raise HTTPException(400, "Google OAuth not configured. Save your credentials in Settings first.")
 
-    # Store display_name and max_per_day in state so we can use it in callback
-    state_data = json.dumps({"display_name": display_name, "max_per_day": max_per_day})
+    # Store display_name, max_per_day and ramp_up_enabled in state so we can use it in callback
+    state_data = json.dumps({"display_name": display_name, "max_per_day": max_per_day, "ramp_up_enabled": ramp_up_enabled})
 
     params = {
         "client_id": client_id,
@@ -228,6 +229,7 @@ async def google_callback(
         state_data = {}
     display_name = state_data.get("display_name", "")
     max_per_day = state_data.get("max_per_day", 50)
+    ramp_up_enabled = bool(state_data.get("ramp_up_enabled", False))
 
     # Fetch OAuth credentials from DB
     from app.app_settings import get_google_oauth_credentials
@@ -290,6 +292,7 @@ async def google_callback(
             display_name=display_name or email.split("@")[0],
             max_emails_per_day=max_per_day,
             provider="gmail",
+            ramp_up_enabled=ramp_up_enabled,
         )
         db.add(inbox)
         await db.flush()

@@ -2,7 +2,7 @@ import { useParams } from 'react-router-dom';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNotify } from '../context/NotificationContext';
 import { useLoading } from '../context/LoadingContext';
-import { api } from '../api';
+import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import DatePicker from '../components/ui/DatePicker';
@@ -21,7 +21,7 @@ import {
 } from 'recharts';
 
 // ─── tabs ─────────────────────────────────────────────────────────────────────
-const TABS = ['sequences', 'leads', 'analytics', 'queue', 'settings'];
+const TABS = ['analytics', 'sequences', 'leads', 'queue', 'settings'];
 const TAB_LABELS = {
   sequences: 'Sequences',
   leads: 'Leads',
@@ -33,23 +33,40 @@ const TAB_LABELS = {
 // ─── Main page ────────────────────────────────────────────────────────────────
 export default function CampaignDetail() {
   const { id } = useParams();
-  const [campaign, setCampaign] = useState(null);
-  const [inboxes, setInboxes] = useState([]);
-  const [sequences, setSequences] = useState([]);
-  const [leads, setLeads] = useState([]);
-  const [queueData, setQueueData] = useState([]);
-  const [sentData, setSentData] = useState([]);
-  const [allSentGlobal, setAllSentGlobal] = useState([]);
+  const [campaign, setCampaign] = useState(() => apiCache.get(`/campaigns/${id}`) || null);
+  const [inboxes, setInboxes] = useState(() => apiCache.get('/inboxes') || []);
+  const [sequences, setSequences] = useState(() => apiCache.get(`/campaigns/${id}/sequences`) || []);
+  const [leads, setLeads] = useState(() => apiCache.get(`/campaigns/${id}/leads`) || []);
+  const [queueData, setQueueData] = useState(() => apiCache.get(`/campaigns/${id}/queue`) || []);
+  const [sentData, setSentData] = useState(() => apiCache.get(`/campaigns/${id}/sent`) || []);
+  const [allSentGlobal, setAllSentGlobal] = useState(() => apiCache.get('/schedule/sent') || []);
   const [queueFilter, setQueueFilter] = useState(null);
   const queueRef = useRef(null);
   const [pastExpanded, setPastExpanded] = useState(false);
   const [recalcInProgress, setRecalcInProgress] = useState(false);
   const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('sequences');
+  const [loading, setLoading] = useState(() => !apiCache.get(`/campaigns/${id}`));
+  const [activeTab, setActiveTab] = useState(() => {
+    const hash = window.location.hash.replace('#', '');
+    return TABS.includes(hash) ? hash : 'analytics';
+  });
   const confirm = useConfirm();
   const notify = useNotify();
   const loadingCtrl = useLoading();
+
+  // Sync hash ↔ tab
+  useEffect(() => {
+    window.location.hash = activeTab;
+  }, [activeTab]);
+
+  useEffect(() => {
+    const onHash = () => {
+      const hash = window.location.hash.replace('#', '');
+      if (TABS.includes(hash)) setActiveTab(hash);
+    };
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   const loadAll = useCallback(async () => {
     loadingCtrl.start();
@@ -271,6 +288,9 @@ export default function CampaignDetail() {
           campaignId={Number(id)}
           campaign={campaign}
           allSent={allSentGlobal}
+          sentData={sentData}
+          sequences={sequences}
+          onRefresh={loadAll}
         />
       )}
 
@@ -322,6 +342,13 @@ const BADGE_STYLES = {
   wrong_person:   'bg-purple-100 text-purple-700',
   auto_reply:     'bg-slate-100 text-slate-600',
   paused:         'bg-yellow-100 text-yellow-700',
+  // Email verification statuses
+  valid:          'bg-emerald-100 text-emerald-700',
+  invalid:        'bg-red-100 text-red-700',
+  risky:          'bg-orange-100 text-orange-700',
+  catch_all:      'bg-yellow-100 text-yellow-700',
+  unknown:        'bg-gray-200 text-gray-600',
+  pending:        'bg-blue-100 text-blue-600',
 };
 
 function StatusBadge({ label }) {
@@ -344,6 +371,7 @@ function deriveStatuses(lead) {
   if (lead.interest_status === 'interested') badges.push('interested');
   if (lead.interest_status === 'not_interested') badges.push('not_interested');
   if (lead.sending_paused) badges.push('paused');
+  if (lead.email_verification_status) badges.push(lead.email_verification_status);
   return badges;
 }
 
@@ -355,11 +383,20 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const [single, setSingle] = useState({ email: '', name: '', custom: '' });
   const [bulk, setBulk]   = useState('');
   const [msg, setMsg]     = useState(null);
+  const [skipDuplicates, setSkipDuplicates] = useState(true);
+  const [verifyEmails, setVerifyEmails] = useState(false);
+  const [lastDuplicates, setLastDuplicates] = useState([]);
   const [editCell, setEditCell] = useState(null); // { leadId, field }
   const [editValue, setEditValue] = useState('');
   const [importing, setImporting] = useState(false);
   const [showFormatInfo, setShowFormatInfo] = useState(false);
   const fileInputRef = useRef(null);
+  const [verifying, setVerifying] = useState(false);
+  const [verificationSummary, setVerificationSummary] = useState(null);
+  // filters: { status, opened, replied, clicked, verification }
+  const [filters, setFilters] = useState({ status: 'all', opened: 'all', replied: 'all', clicked: 'all', verification: 'all' });
+  const setFilter = (key, val) => setFilters(prev => ({ ...prev, [key]: val }));
+  const hasActiveFilter = Object.values(filters).some(v => v !== 'all');
 
   // All custom field names across all leads
   const customFields = useMemo(() => {
@@ -367,6 +404,52 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     leads.forEach(l => Object.keys(l.custom_data || {}).forEach(k => keys.add(k)));
     return [...keys].sort();
   }, [leads]);
+
+  // Filtered leads based on all active filters
+  const filteredLeads = useMemo(() => {
+    return leads.filter(l => {
+      if (filters.status !== 'all') {
+        if (filters.status === 'active' && l.status !== 'active') return false;
+        if (filters.status === 'bounced' && l.status !== 'bounced') return false;
+        if (filters.status === 'unsubscribed' && l.status !== 'unsubscribed') return false;
+        if (filters.status === 'completed' && l.stage !== 'Complete') return false;
+      }
+      if (filters.opened === 'yes' && !l.opened) return false;
+      if (filters.opened === 'no' && l.opened) return false;
+      if (filters.replied === 'yes' && !l.replied) return false;
+      if (filters.replied === 'no' && l.replied) return false;
+      if (filters.clicked === 'yes' && !l.clicked) return false;
+      if (filters.clicked === 'no' && l.clicked) return false;
+      if (filters.verification !== 'all') {
+        if (filters.verification === 'unverified' && l.email_verification_status) return false;
+        else if (filters.verification !== 'unverified' && l.email_verification_status !== filters.verification) return false;
+      }
+      return true;
+    });
+  }, [leads, filters]);
+
+  // Load verification summary
+  const loadVerificationSummary = useCallback(async () => {
+    try {
+      const res = await api.get(`/campaigns/${campaignId}/leads/verification-status`);
+      setVerificationSummary(res);
+    } catch {}
+  }, [campaignId]);
+
+  useEffect(() => { loadVerificationSummary(); }, [loadVerificationSummary]);
+
+  // Verify all unverified leads
+  const verifyAllLeads = async () => {
+    setVerifying(true);
+    try {
+      const res = await api.post(`/campaigns/${campaignId}/leads/verify`);
+      notify({ type: 'success', message: `Verification queued for ${res.queued} lead(s)` });
+      // Poll for completion
+      setTimeout(() => { refresh(); loadVerificationSummary(); }, 3000);
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    } finally { setVerifying(false); }
+  };
 
   const startEdit = (leadId, field, val) => {
     setEditCell({ leadId, field });
@@ -469,9 +552,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     if (!payload.length) { setMsg({ type: 'error', text: 'No valid emails found' }); return; }
 
     try {
-      const res = await api.post(`/campaigns/${campaignId}/leads`, payload);
+      const res = await api.post(`/campaigns/${campaignId}/leads?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, payload);
       setBulk('');
-      notify({ type: 'success', message: `${res.added || payload.length} lead(s) added` });
+      setLastDuplicates(res.duplicate_leads || []);
+      const dupMsg = res.duplicate_leads?.length ? ` (${res.duplicate_leads.length} duplicate(s) skipped)` : '';
+      notify({ type: 'success', message: `${res.added || payload.length} lead(s) added${dupMsg}` });
       refresh();
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
@@ -483,9 +568,12 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     const file = e.target.files?.[0];
     if (!file) return;
     setImporting(true);
+    setLastDuplicates([]);
     try {
-      const res = await api.upload(`/campaigns/${campaignId}/leads/import`, file);
-      notify({ type: 'success', message: `Imported: ${res.added} added, ${res.already_enrolled} already enrolled, ${res.errors} errors` });
+      const res = await api.upload(`/campaigns/${campaignId}/leads/import?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, file);
+      setLastDuplicates(res.duplicate_leads || []);
+      const dupMsg = res.duplicate_leads?.length ? `, ${res.duplicate_leads.length} duplicate(s) skipped` : '';
+      notify({ type: 'success', message: `Imported: ${res.added} added, ${res.already_enrolled} already enrolled, ${res.errors} errors${dupMsg}` });
       refresh();
     } catch (err) {
       notify({ type: 'error', message: err.message });
@@ -498,7 +586,13 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   // ---- File export ----
   const handleExport = async () => {
     try {
-      const res = await api.download(`/campaigns/${campaignId}/leads/export`);
+      const params = new URLSearchParams();
+      if (filters.status !== 'all') params.set('status', filters.status);
+      if (filters.verification !== 'all' && filters.verification !== 'unverified') {
+        params.set('verification_status', filters.verification);
+      }
+      const qs = params.toString() ? `?${params.toString()}` : '';
+      const res = await api.download(`/campaigns/${campaignId}/leads/export${qs}`);
       if (!res.ok) throw new Error('Export failed');
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
@@ -520,20 +614,113 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
       <div className="flex flex-wrap items-center gap-3">
         <Button size="sm" variant="outline" onClick={handleExport} disabled={!leads.length}>
           <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" /></svg>
-          Export CSV
+          Export{hasActiveFilter ? ' (filtered)' : ''} CSV
         </Button>
         <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" className="hidden" onChange={handleFileImport} />
         <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={importing}>
           <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 8l-4-4m0 0L8 8m4-4v12" /></svg>
           {importing ? 'Importing…' : 'Import CSV'}
         </Button>
-        <span className="text-xs text-gray-400 ml-1">{leads.length} lead{leads.length !== 1 ? 's' : ''}</span>
+        <Button size="sm" variant="outline" onClick={verifyAllLeads} disabled={verifying}>
+          {verifying ? 'Verifying…' : 'Verify All Emails'}
+        </Button>
+        <span className="text-xs text-gray-400 ml-1">
+          {filteredLeads.length}{hasActiveFilter ? `/${leads.length}` : ''} lead{filteredLeads.length !== 1 ? 's' : ''}
+        </span>
+        {hasActiveFilter && (
+          <button
+            className="text-xs text-teal-600 hover:underline ml-1"
+            onClick={() => setFilters({ status: 'all', opened: 'all', replied: 'all', clicked: 'all', verification: 'all' })}
+          >Clear filters</button>
+        )}
       </div>
 
+      {/* Filter bar */}
+      <div className="flex flex-wrap gap-x-6 gap-y-2 p-3 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
+        {/* Status */}
+        <div className="flex items-center gap-1.5">
+          <span className="font-medium text-gray-500 whitespace-nowrap">Status:</span>
+          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsubscribed'},{v:'completed',l:'Completed'}].map(o => (
+            <button key={o.v} onClick={() => setFilter('status', o.v)}
+              className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                filters.status === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
+              }`}>{o.l}</button>
+          ))}
+        </div>
+        {/* Opened */}
+        <div className="flex items-center gap-1.5">
+          <span className="font-medium text-gray-500 whitespace-nowrap">Opened:</span>
+          {[{v:'all',l:'All'},{v:'yes',l:'Yes'},{v:'no',l:'No'}].map(o => (
+            <button key={o.v} onClick={() => setFilter('opened', o.v)}
+              className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                filters.opened === o.v ? 'bg-amber-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-amber-300'
+              }`}>{o.l}</button>
+          ))}
+        </div>
+        {/* Replied */}
+        <div className="flex items-center gap-1.5">
+          <span className="font-medium text-gray-500 whitespace-nowrap">Replied:</span>
+          {[{v:'all',l:'All'},{v:'yes',l:'Yes'},{v:'no',l:'No'}].map(o => (
+            <button key={o.v} onClick={() => setFilter('replied', o.v)}
+              className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                filters.replied === o.v ? 'bg-violet-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-violet-300'
+              }`}>{o.l}</button>
+          ))}
+        </div>
+        {/* Clicked */}
+        <div className="flex items-center gap-1.5">
+          <span className="font-medium text-gray-500 whitespace-nowrap">Clicked:</span>
+          {[{v:'all',l:'All'},{v:'yes',l:'Yes'},{v:'no',l:'No'}].map(o => (
+            <button key={o.v} onClick={() => setFilter('clicked', o.v)}
+              className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                filters.clicked === o.v ? 'bg-orange-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-orange-300'
+              }`}>{o.l}</button>
+          ))}
+        </div>
+        {/* Email verification */}
+        {verificationSummary?.statuses && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="font-medium text-gray-500 whitespace-nowrap">Verified:</span>
+            {[
+              { v: 'all', l: 'All' },
+              { v: 'valid', l: 'Valid' },
+              { v: 'invalid', l: 'Invalid' },
+              { v: 'risky', l: 'Risky' },
+              { v: 'catch_all', l: 'Catch-All' },
+              { v: 'unknown', l: 'Unknown' },
+              { v: 'pending', l: 'Pending' },
+              { v: 'unverified', l: 'Unverified' },
+            ].filter(o => o.v === 'all' || (verificationSummary.statuses[o.v] || 0) > 0).map(o => (
+              <button key={o.v} onClick={() => setFilter('verification', o.v)}
+                className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                  filters.verification === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
+                }`}>
+                {o.l}{o.v !== 'all' ? ` (${verificationSummary.statuses[o.v] || 0})` : ''}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Duplicate leads notice */}
+      {lastDuplicates.length > 0 && (
+        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <p className="text-sm font-medium text-yellow-800 mb-1">{lastDuplicates.length} duplicate(s) skipped — already enrolled in a campaign:</p>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {lastDuplicates.map(email => (
+              <span key={email} className="font-mono text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">{email}</span>
+            ))}
+          </div>
+          <button className="text-xs text-yellow-600 underline mt-1" onClick={() => setLastDuplicates([])}>Dismiss</button>
+        </div>
+      )}
+
       {/* Leads table */}
-      {leads.length === 0 ? (
+      {filteredLeads.length === 0 ? (
         <div className="bg-gray-50 rounded-lg border border-dashed border-gray-300 p-8 text-center text-gray-400">
-          No leads enrolled yet. Add them below or import a CSV file.
+          {leads.length === 0
+            ? 'No leads enrolled yet. Add them below or import a CSV file.'
+            : 'No leads match the current filter.'}
         </div>
       ) : (
         <div className="overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
@@ -553,7 +740,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
               </tr>
             </thead>
             <tbody>
-              {leads.map(l => (
+              {filteredLeads.map(l => (
                 <tr key={l.lead_id} className="border-b border-gray-100 hover:bg-gray-50/60 transition-colors">
                   {/* email */}
                   <td className="px-4 py-2.5">
@@ -704,10 +891,28 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           </div>
         )}
 
-        <div className="flex gap-2 mb-4">
+        <div className="flex gap-2 mb-3">
           <Button size="sm" variant={mode==='single'?'default':'outline'} onClick={()=>setMode('single')}>Single</Button>
           <Button size="sm" variant={mode==='bulk'?'default':'outline'}   onClick={()=>setMode('bulk')}>Bulk paste</Button>
         </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-2">
+          <input
+            type="checkbox"
+            checked={skipDuplicates}
+            onChange={e => { setSkipDuplicates(e.target.checked); setLastDuplicates([]); }}
+            className="rounded"
+          />
+          Skip duplicates (checks all campaigns)
+        </label>
+        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-4">
+          <input
+            type="checkbox"
+            checked={verifyEmails}
+            onChange={e => setVerifyEmails(e.target.checked)}
+            className="rounded"
+          />
+          Verify emails after adding (requires API key in Settings)
+        </label>
         {msg && <div className={`mb-2 text-sm ${msg.type==='error'?'text-red-600':'text-green-600'}`}>{msg.text}</div>}
         {mode === 'single' && (
           <form onSubmit={addSingle} className="space-y-3">
@@ -773,7 +978,8 @@ const SERIES_LIST = [
   { key: 'uniqueClicks', name: 'Unique Clicks', stroke: 'rgba(236,72,153,0.8)',  fill: 'rgba(236,72,153,0.15)' },
 ];
 
-function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
+function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], sequences = [], onRefresh }) {
+  const notify = useNotify();
   const today = new Date();
   const localIso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
   const todayStr = localIso(today);
@@ -808,6 +1014,37 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
   const activeChartIdxRef = useRef(null);
   const chartContainerRef = useRef(null);
 
+  // Sub-tabs state
+  const [analyticsSub, setAnalyticsSub] = useState('steps');
+  const [stepStats, setStepStats] = useState([]);
+  const [stepStatsLoading, setStepStatsLoading] = useState(false);
+  const [sentFilter, setSentFilter] = useState('all');
+
+  const loadStepStats = useCallback(async () => {
+    setStepStatsLoading(true);
+    try {
+      const data = await api.get(`/campaigns/${campaignId}/analytics/steps`);
+      setStepStats(data);
+    } catch (e) {
+      console.error('Failed to load step analytics', e);
+    } finally {
+      setStepStatsLoading(false);
+    }
+  }, [campaignId]);
+
+  useEffect(() => { loadStepStats(); }, [loadStepStats]);
+
+  const toggleVariant = async (seqId, variantId, enabled) => {
+    try {
+      await api.patch(`/campaigns/${campaignId}/sequences/${seqId}/variants/${variantId}`, { enabled });
+      await loadStepStats();
+      onRefresh?.();
+      notify({ type: 'success', message: enabled ? 'Variant enabled' : 'Variant disabled' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
   const applyPreset = (preset) => {
     setActivePreset(preset.label);
     setStartDate(preset.start);
@@ -825,7 +1062,6 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
   );
 
   const chartData = useMemo(() => {
-    // Build lookup from actual data
     const map = {};
     const seenOpen = {}, seenClick = {};
     filteredSent.forEach(e => {
@@ -844,8 +1080,6 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
       map[d].uniqueOpens  = seenOpen[d].size;
       map[d].uniqueClicks = seenClick[d].size;
     });
-
-    // Fill every day in the range with zeros where no data exists
     const result = [];
     if (startDate && endDate) {
       const cur = new Date(startDate + 'T00:00:00');
@@ -868,12 +1102,10 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
     }
   }, [chartData]);
 
-  // Reset zoom when chartData changes (new date range selected)
   useEffect(() => {
     setZoomRange({ start: 0, end: Math.max(0, chartData.length - 1) });
   }, [chartData]);
 
-  // Attach wheel listener with passive:false so we can preventDefault
   useEffect(() => {
     const el = chartContainerRef.current;
     if (!el) return;
@@ -904,7 +1136,6 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
       activeChartIdxRef.current = zoomRange.start + state.activeTooltipIndex;
   };
 
-  const stats = campaign?.stats || {};
   const rangeLeads   = new Set(filteredSent.map(e => e.lead_id).filter(Boolean)).size;
   const rangeSent    = chartData.reduce((a,d)=>a+d.sent, 0);
   const rangeOpens   = chartData.reduce((a,d)=>a+d.totalOpens, 0);
@@ -914,7 +1145,6 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
   const replyRate    = rangeSent > 0 ? Math.round(rangeReplies / rangeSent * 100) : 0;
   const clickRate    = rangeSent > 0 ? Math.round(rangeClicks  / rangeSent * 100) : 0;
 
-  // Format x-axis dates short
   const formatXDate = (d) => {
     if (!d) return '';
     const parts = d.split('-');
@@ -923,7 +1153,7 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
 
   return (
     <div className="space-y-6">
-      {/* Range KPIs — all values reflect the selected date range */}
+      {/* Range KPIs */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
         {[
           { label: 'Leads',      value: rangeLeads },
@@ -980,7 +1210,7 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
         </div>
       )}
 
-      {/* Chart — scroll to zoom, centered on hovered day */}
+      {/* Chart */}
       <Card className="p-4">
         <div ref={chartContainerRef} style={{ width: '100%', height: 290 }}>
           <ResponsiveContainer>
@@ -1014,6 +1244,281 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent }) {
           </ResponsiveContainer>
         </div>
       </Card>
+
+      {/* Bottom sub-tabs */}
+      <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+        <div className="flex border-b border-gray-200">
+          {[
+            { key: 'steps', label: 'Step Analytics' },
+            { key: 'sent',  label: 'Sent Emails' },
+          ].map(sub => (
+            <button
+              key={sub.key}
+              onClick={() => setAnalyticsSub(sub.key)}
+              className={`px-5 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                analyticsSub === sub.key
+                  ? 'border-teal-500 text-teal-600 bg-teal-50/40'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+              }`}
+            >
+              {sub.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="p-4">
+          {analyticsSub === 'steps' && (
+            <StepAnalyticsPanel
+              stepStats={stepStats}
+              loading={stepStatsLoading}
+              campaignId={campaignId}
+              sequences={sequences}
+              onToggleVariant={toggleVariant}
+            />
+          )}
+          {analyticsSub === 'sent' && (
+            <SentEmailsPanel
+              sentData={sentData}
+              filter={sentFilter}
+              onFilterChange={setSentFilter}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Step Analytics Panel ─────────────────────────────────────────────────────
+function StepAnalyticsPanel({ stepStats, loading, campaignId, sequences, onToggleVariant }) {
+  const [expandedSteps, setExpandedSteps] = useState({});
+
+  const toggleStep = (idx) => setExpandedSteps(p => ({ ...p, [idx]: !p[idx] }));
+
+  const pct = (n, total) => total > 0 ? `${Math.round(n / total * 100)}%` : '—';
+
+  if (loading) return <div className="py-8 text-center text-gray-400 text-sm">Loading step analytics…</div>;
+  if (!stepStats.length) return <div className="py-8 text-center text-gray-400 text-sm">No data yet. Send some emails to see step analytics.</div>;
+
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-sm">
+        <thead>
+          <tr className="border-b border-gray-200 bg-gray-50 text-gray-600 text-xs font-semibold uppercase tracking-wide">
+            <th className="px-3 py-2 text-left w-8"></th>
+            <th className="px-3 py-2 text-left">Step</th>
+            <th className="px-3 py-2 text-right">Sent</th>
+            <th className="px-3 py-2 text-right">Opens</th>
+            <th className="px-3 py-2 text-right">Clicks</th>
+            <th className="px-3 py-2 text-right">Replies</th>
+            <th className="px-3 py-2 text-right">Opportunities</th>
+          </tr>
+        </thead>
+        <tbody>
+          {stepStats.map((step) => {
+            const seq = sequences.find(s => s.id === step.sequence_id);
+            const hasVariants = step.variants && step.variants.length > 1; // >1 means default + at least one named
+            const expanded = expandedSteps[step.sequence_index];
+            return (
+              <>
+                <tr
+                  key={step.sequence_index}
+                  className={`border-b border-gray-100 ${hasVariants ? 'cursor-pointer hover:bg-gray-50' : ''}`}
+                  onClick={() => hasVariants && toggleStep(step.sequence_index)}
+                >
+                  <td className="px-3 py-2.5 text-gray-400 text-center">
+                    {hasVariants && (
+                      <span className={`inline-block transition-transform text-xs ${expanded ? 'rotate-90' : ''}`}>▶</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5">
+                    <div className="font-medium text-gray-800">Step {step.sequence_index + 1}</div>
+                    {step.subject && <div className="text-xs text-gray-400 truncate max-w-xs">{step.subject}</div>}
+                    {hasVariants && (
+                      <span className="inline-flex items-center gap-1 text-[10px] bg-purple-100 text-purple-600 rounded-full px-1.5 py-0.5 mt-0.5">
+                        A/B {step.variants.length - 1} variant{step.variants.length - 1 > 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2.5 text-right font-medium">{step.total_sent}</td>
+                  <td className="px-3 py-2.5 text-right">
+                    {step.total_opens} <span className="text-gray-400 text-xs">({pct(step.total_opens, step.total_sent)})</span>
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    {step.total_clicks} <span className="text-gray-400 text-xs">({pct(step.total_clicks, step.total_sent)})</span>
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    {step.total_replies} <span className="text-gray-400 text-xs">({pct(step.total_replies, step.total_sent)})</span>
+                  </td>
+                  <td className="px-3 py-2.5 text-right">
+                    <span className="font-semibold text-green-600">{step.total_opportunities}</span>
+                    <span className="text-gray-400 text-xs ml-1">({pct(step.total_opportunities, step.total_sent)})</span>
+                  </td>
+                </tr>
+                {/* Variant breakdown rows */}
+                {hasVariants && expanded && step.variants.map((variant) => (
+                  <tr key={`${step.sequence_index}-v${variant.variant_id ?? 'default'}`} className="bg-purple-50/50 border-b border-purple-100 text-xs">
+                    <td className="px-3 py-2"></td>
+                    <td className="px-3 py-2 pl-8">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-purple-700">
+                          {variant.variant_label}
+                        </span>
+                        {variant.variant_id != null && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onToggleVariant(step.sequence_id, variant.variant_id, !variant.enabled);
+                            }}
+                            className={`text-[10px] px-2 py-0.5 rounded-full font-medium transition-colors ${
+                              variant.enabled
+                                ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200'
+                                : 'bg-gray-200 text-gray-500 hover:bg-gray-300'
+                            }`}
+                          >
+                            {variant.enabled ? 'Enabled' : 'Disabled'}
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-3 py-2 text-right">{variant.sent}</td>
+                    <td className="px-3 py-2 text-right">
+                      {variant.opens} <span className="text-gray-400">({pct(variant.opens, variant.sent)})</span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {variant.clicks} <span className="text-gray-400">({pct(variant.clicks, variant.sent)})</span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {variant.replies} <span className="text-gray-400">({pct(variant.replies, variant.sent)})</span>
+                    </td>
+                    <td className="px-3 py-2 text-right font-semibold text-green-600">
+                      {variant.opportunities} <span className="text-gray-400 font-normal">({pct(variant.opportunities, variant.sent)})</span>
+                    </td>
+                  </tr>
+                ))}
+              </>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Sent Emails Panel ────────────────────────────────────────────────────────
+const SENT_FILTER_OPTIONS = [
+  { value: 'all',        label: 'All' },
+  { value: 'opened',     label: 'Opened' },
+  { value: 'clicked',    label: 'Clicked' },
+  { value: 'replied',    label: 'Replied' },
+  { value: 'interested', label: 'Interested' },
+  { value: 'not_opened', label: 'Not Opened' },
+  { value: 'bounced',    label: 'Bounced' },
+  { value: 'unsubscribed', label: 'Unsubscribed' },
+];
+
+function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
+  const filtered = useMemo(() => {
+    switch (filter) {
+      case 'opened':      return sentData.filter(e => e.opened);
+      case 'clicked':     return sentData.filter(e => e.clicked);
+      case 'replied':     return sentData.filter(e => e.replied);
+      case 'interested':  return sentData.filter(e => e.interest_status === 'interested');
+      case 'not_opened':  return sentData.filter(e => !e.opened);
+      case 'bounced':     return sentData.filter(e => e.lead_status === 'bounced');
+      case 'unsubscribed':return sentData.filter(e => e.lead_status === 'unsubscribed');
+      default:            return sentData;
+    }
+  }, [sentData, filter]);
+
+  const fmt = (isoStr) => {
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Filter bar */}
+      <div className="flex flex-wrap gap-1.5 items-center">
+        <span className="text-xs font-medium text-gray-500 mr-1">Filter:</span>
+        {SENT_FILTER_OPTIONS.map(opt => (
+          <button
+            key={opt.value}
+            onClick={() => onFilterChange(opt.value)}
+            className={`px-2.5 py-1 text-xs font-medium rounded-full border transition-colors ${
+              filter === opt.value
+                ? 'bg-teal-500 text-white border-teal-500'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-teal-300 hover:bg-teal-50'
+            }`}
+          >
+            {opt.label}
+          </button>
+        ))}
+        <span className="text-xs text-gray-400 ml-2">{filtered.length} email{filtered.length !== 1 ? 's' : ''}</span>
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="py-8 text-center text-gray-400 text-sm">No emails match this filter.</div>
+      ) : (
+        <div className="overflow-x-auto max-h-[480px] overflow-y-auto">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-white z-10">
+              <tr className="border-b border-gray-200 bg-gray-50 text-gray-600 text-xs font-semibold uppercase tracking-wide">
+                <th className="px-3 py-2.5 text-left">Sent</th>
+                <th className="px-3 py-2.5 text-left">Lead</th>
+                <th className="px-3 py-2.5 text-left">Step</th>
+                <th className="px-3 py-2.5 text-left">Subject</th>
+                <th className="px-3 py-2.5 text-center">Opened</th>
+                <th className="px-3 py-2.5 text-center">Clicked</th>
+                <th className="px-3 py-2.5 text-center">Replied</th>
+                <th className="px-3 py-2.5 text-left">Variant</th>
+                <th className="px-3 py-2.5 text-left">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtered.map(e => (
+                <tr key={e.log_id} className="border-b border-gray-100 hover:bg-gray-50/60">
+                  <td className="px-3 py-2 whitespace-nowrap text-gray-500 text-xs">{fmt(e.sent_at)}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-gray-800 max-w-[180px] truncate">{e.lead_email}</td>
+                  <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">Step {(e.sequence_index ?? 0) + 1}</td>
+                  <td className="px-3 py-2 text-xs text-gray-700 max-w-[200px] truncate">{e.subject || '—'}</td>
+                  <td className="px-3 py-2 text-center">
+                    {e.opened
+                      ? <span className="text-amber-600 font-bold text-xs">✓</span>
+                      : <span className="text-gray-300 text-xs">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    {e.clicked
+                      ? <span className="text-orange-600 font-bold text-xs">✓</span>
+                      : <span className="text-gray-300 text-xs">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-center">
+                    {e.replied
+                      ? <span className="text-violet-600 font-bold text-xs">✓</span>
+                      : <span className="text-gray-300 text-xs">—</span>}
+                  </td>
+                  <td className="px-3 py-2 text-xs">
+                    {e.variant_label
+                      ? <span className="bg-purple-100 text-purple-700 rounded px-1.5 py-0.5">{e.variant_label}</span>
+                      : <span className="text-gray-300">—</span>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex flex-wrap gap-1">
+                      {e.lead_status && e.lead_status !== 'active' && (
+                        <StatusBadge label={e.lead_status} />
+                      )}
+                      {e.interest_status && (
+                        <StatusBadge label={e.interest_status} />
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -1070,7 +1575,18 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     setSaving(true);
     try {
       await api.patch(`/campaigns/${campaignId}`, form);
-      setMsg({ type: 'success', text: 'Settings saved' });
+      // If the timezone was changed, trigger a queue recalculation automatically.
+      const tzChanged = form.timezone !== (campaign.timezone ?? '');
+      if (tzChanged) {
+        try {
+          await api.post(`/campaigns/${campaignId}/recalculate-queue`);
+          setMsg({ type: 'success', text: 'Settings saved · Queue recalculated for new timezone' });
+        } catch (_) {
+          setMsg({ type: 'success', text: 'Settings saved (queue recalculation failed — run it manually if needed)' });
+        }
+      } else {
+        setMsg({ type: 'success', text: 'Settings saved' });
+      }
       onSave();
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
@@ -1227,9 +1743,19 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
           </div>
         </div>
 
-        {(form.send_all_as_text||form.send_first_as_text) && (
+        {(form.send_all_as_text||form.send_first_as_text) && (form.track_opens||form.track_clicks) && (
+          <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+            ⚠ Plain text mode will override tracking — open/click tracking requires HTML and will be disabled for affected emails.
+          </p>
+        )}
+        {(form.send_all_as_text||form.send_first_as_text) && !(form.track_opens||form.track_clicks) && (
           <p className="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
             ⚠ HTML settings on sequences will be ignored for affected emails.
+          </p>
+        )}
+        {!(form.send_all_as_text||form.send_first_as_text) && (form.track_opens||form.track_clicks) && (
+          <p className="text-xs text-blue-600 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+            ℹ Tracking is enabled — plain-text sequences will be automatically sent as HTML so tracking pixels and links can be injected.
           </p>
         )}
 
@@ -1277,12 +1803,17 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewTe
   const forcePlainAll   = campaign?.send_all_as_text;
   const forcePlainFirst = campaign?.send_first_as_text && isFirstSequence;
   const isOverridden    = forcePlainAll || forcePlainFirst;
-  const effectiveHtml   = isHtml && !isOverridden;
+  const trackingEnabled = campaign?.track_opens || campaign?.track_clicks;
+  // Tracking needs HTML: if sequence is plain text but tracking is on, it will be upgraded
+  const trackingUpgrade = !isHtml && trackingEnabled && !isOverridden;
+  const effectiveHtml   = (isHtml || trackingUpgrade) && !isOverridden;
 
   const overrideMsg = forcePlainAll
-    ? 'Campaign is set to send all emails as plain text — HTML will be ignored.'
+    ? 'Campaign is set to send all emails as plain text — HTML will be ignored. Tracking will also be disabled for these emails.'
     : forcePlainFirst
-    ? 'Campaign sends the first email as plain text — HTML will be ignored for this sequence.'
+    ? 'Campaign sends the first email as plain text — HTML will be ignored for this sequence. Tracking will also be disabled.'
+    : trackingUpgrade
+    ? 'Open/click tracking is enabled — this email will be sent as HTML so tracking pixels and links can be injected.'
     : null;
 
   return (
@@ -1295,6 +1826,11 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewTe
         {isOverridden && isHtml && (
           <span className="text-xs font-medium text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-0.5">
             ⚠ {overrideMsg}
+          </span>
+        )}
+        {trackingUpgrade && (
+          <span className="text-xs font-medium text-blue-600 bg-blue-50 border border-blue-200 rounded px-2 py-0.5">
+            ℹ {overrideMsg}
           </span>
         )}
       </div>
@@ -1357,7 +1893,7 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewTe
 }
 
 // ─── Preview Modal ────────────────────────────────────────────────────────────
-function PreviewModal({ sequence, campaignId, leads, onClose }) {
+function PreviewModal({ sequence, campaignId, leads, onClose, variant = null }) {
   const [leadId,    setLeadId]    = useState(leads[0]?.lead_id ?? '');
   const [preview,   setPreview]   = useState(null);
   const [loading,   setLoading]   = useState(false);
@@ -1379,6 +1915,7 @@ function PreviewModal({ sequence, campaignId, leads, onClose }) {
       const data = await api.post(`/campaigns/${campaignId}/preview`, {
         sequence_id: sequence.id,
         lead_id: leadId ? Number(leadId) : null,
+        ...(variant ? { variant_id: variant.id } : {}),
       });
       setPreview(data);
     } catch (e) {
@@ -1386,7 +1923,7 @@ function PreviewModal({ sequence, campaignId, leads, onClose }) {
     } finally {
       setLoading(false);
     }
-  }, [campaignId, sequence.id, leadId]);
+  }, [campaignId, sequence.id, leadId, variant]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -1398,6 +1935,7 @@ function PreviewModal({ sequence, campaignId, leads, onClose }) {
         sequence_id: sequence.id,
         lead_id: leadId ? Number(leadId) : null,
         to_email: testEmail.trim(),
+        ...(variant ? { variant_id: variant.id } : {}),
       });
       setTestState('success');
       setTimeout(() => setTestState(null), 3000);
@@ -1422,6 +1960,7 @@ function PreviewModal({ sequence, campaignId, leads, onClose }) {
         <div className="flex items-center justify-between px-6 py-4 border-b">
           <h2 className="font-semibold text-gray-800">
             Preview — Sequence #{(sequence.position ?? 0) + 1}
+            {variant && <span className="ml-2 text-xs font-normal text-purple-600 bg-purple-50 border border-purple-200 rounded px-2 py-0.5">{variant.label || 'Variant'}</span>}
           </h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
         </div>
@@ -1530,8 +2069,12 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
   const [editDirty,       setEditDirty]       = useState(false);
   const [showEditWarning, setShowEditWarning] = useState(false);
   const [previewSeq, setPreviewSeq] = useState(null);
+  const [previewVariant, setPreviewVariant] = useState(null);
   const [selectedIdx, setSelectedIdx] = useState(sequences.length > 0 ? 0 : null);
   const [showAddForm, setShowAddForm] = useState(sequences.length === 0);
+  const [editingVariant, setEditingVariant] = useState(null);
+  const [showVariantForm, setShowVariantForm] = useState(false);
+  const [variantForm, setVariantForm] = useState({ label: '', subject: '', body: '', is_html: false, preview_text: '' });
 
   useEffect(() => { setPos(sequences.length); }, [sequences]);
   useEffect(() => {
@@ -1601,6 +2144,46 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
     } catch (e) {
       notify({ type: 'error', message: e.message });
     }
+  };
+
+  const createVariant = async () => {
+    try {
+      await api.post(`/campaigns/${campaignId}/sequences/${selectedSeq.id}/variants`, variantForm);
+      setShowVariantForm(false);
+      setVariantForm({ label: '', subject: '', body: '', is_html: false, preview_text: '' });
+      refresh();
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  const saveVariant = async () => {
+    if (!editingVariant) return;
+    try {
+      await api.patch(`/campaigns/${campaignId}/sequences/${selectedSeq.id}/variants/${editingVariant.id}`, variantForm);
+      setEditingVariant(null);
+      setShowVariantForm(false);
+      refresh();
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  const deleteVariant = async (v) => {
+    if (!await confirm(`Delete variant "${v.label || 'Variant'}"?`)) return;
+    try {
+      await api.del(`/campaigns/${campaignId}/sequences/${selectedSeq.id}/variants/${v.id}`);
+      refresh();
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  const toggleVariantEnabled = async (v) => {
+    try {
+      await api.patch(`/campaigns/${campaignId}/sequences/${selectedSeq.id}/variants/${v.id}`, { enabled: !v.enabled });
+      refresh();
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  const openEditVariant = (v) => {
+    setEditingVariant(v);
+    setVariantForm({ label: v.label || '', subject: v.subject || '', body: v.body || '', is_html: v.is_html ?? false, preview_text: v.preview_text || '' });
+    setShowVariantForm(true);
   };
 
   const getCumulativeDay = (idx) => {
@@ -1744,6 +2327,79 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                   <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800 min-h-[200px]">{selectedSeq.body || '(empty)'}</pre>
                 )}
               </div>
+
+              {/* ── A/B Variants ── */}
+              <div className="mt-6 pt-6 border-t border-gray-200">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">A/B Variants</span>
+                    <p className="text-xs text-gray-400 mt-0.5">Add alternate email content — one is chosen randomly when sending</p>
+                  </div>
+                  {!showVariantForm && (
+                    <button
+                      onClick={() => { setEditingVariant(null); setVariantForm({ label: '', subject: '', body: '', is_html: false, preview_text: '' }); setShowVariantForm(true); }}
+                      className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-purple-50 text-purple-700 border border-purple-200 rounded-lg hover:bg-purple-100 transition-colors"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4"/></svg>
+                      Add Variant
+                    </button>
+                  )}
+                </div>
+
+                {(selectedSeq.variants || []).length === 0 && !showVariantForm && (
+                  <p className="text-xs text-gray-400 italic py-2">No variants — email always sends the default content above.</p>
+                )}
+                {(selectedSeq.variants || []).length > 0 && (
+                  <div className="space-y-2 mb-3">
+                    {(selectedSeq.variants || []).map(v => (
+                      <div key={v.id} className={`flex items-center gap-3 p-3 rounded-lg border ${v.enabled ? 'border-purple-200 bg-purple-50/50' : 'border-gray-200 bg-gray-50 opacity-60'}`}>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-sm text-gray-800">{v.label || 'Variant'}</span>
+                            <button
+                              onClick={() => toggleVariantEnabled(v)}
+                              className={`text-[10px] px-2 py-0.5 rounded-full font-medium transition-colors ${v.enabled ? 'bg-emerald-100 text-emerald-700 hover:bg-emerald-200' : 'bg-gray-200 text-gray-500 hover:bg-gray-300'}`}
+                            >
+                              {v.enabled ? 'Enabled' : 'Disabled'}
+                            </button>
+                          </div>
+                          {v.subject && <p className="text-xs text-gray-500 mt-0.5 truncate">Subject: {v.subject}</p>}
+                          {v.body && <p className="text-xs text-gray-400 mt-0.5 truncate">{v.body.replace(/<[^>]+>/g, '').slice(0, 80)}…</p>}
+                        </div>
+                        <div className="flex gap-1.5 shrink-0">
+                          <button onClick={() => { setPreviewSeq(selectedSeq); setPreviewVariant(v); }} className="px-2.5 py-1 text-xs bg-white border border-teal-200 rounded hover:bg-teal-50 text-teal-700 transition-colors">Preview</button>
+                          <button onClick={() => openEditVariant(v)} className="px-2.5 py-1 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100 text-gray-600 transition-colors">Edit</button>
+                          <button onClick={() => deleteVariant(v)} className="px-2.5 py-1 text-xs bg-white border border-red-200 rounded hover:bg-red-50 text-red-600 transition-colors">Delete</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {showVariantForm && (
+                  <div className="border border-purple-200 bg-purple-50/30 rounded-lg p-4 space-y-3">
+                    <h4 className="text-sm font-semibold text-gray-700">{editingVariant ? 'Edit Variant' : 'New Variant'}</h4>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Label <span className="text-gray-400">(e.g. "Variant A")</span></label>
+                      <input className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300" placeholder="Variant A" value={variantForm.label} onChange={e => setVariantForm(f => ({ ...f, label: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Subject <span className="text-gray-400">(blank = use step's subject)</span></label>
+                      <input className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300" placeholder="Leave blank to use step subject" value={variantForm.subject} onChange={e => setVariantForm(f => ({ ...f, subject: e.target.value }))} />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Body *</label>
+                      <textarea className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 min-h-[120px] font-mono" placeholder="Email body..." value={variantForm.body} onChange={e => setVariantForm(f => ({ ...f, body: e.target.value }))} />
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="default" onClick={editingVariant ? saveVariant : createVariant} type="button">
+                        {editingVariant ? 'Save Variant' : 'Create Variant'}
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => { setShowVariantForm(false); setEditingVariant(null); }} type="button">Cancel</Button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
@@ -1792,7 +2448,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
       )}
 
       {previewSeq && (
-        <PreviewModal sequence={previewSeq} campaignId={campaignId} leads={leads} onClose={() => setPreviewSeq(null)} />
+        <PreviewModal sequence={previewSeq} campaignId={campaignId} leads={leads} variant={previewVariant} onClose={() => { setPreviewSeq(null); setPreviewVariant(null); }} />
       )}
     </div>
   );

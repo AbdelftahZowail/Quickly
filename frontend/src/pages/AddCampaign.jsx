@@ -1,17 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../api';
+import { api, apiCache } from '../api';
 import { Input } from '../components/ui/Input';
 import { Button } from '../components/ui/Button';
 
 export default function AddCampaign() {
-  const [inboxes, setInboxes] = useState([]);
+  const [inboxes, setInboxes] = useState(() => apiCache.get('/inboxes') || []);
   const [form, setForm] = useState({
     name: '',
     inbox_ids: [],
     sending_days: [0,1,2,3,4],
     sending_hours_start: '09:00',
     sending_hours_end: '17:00',
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     stop_on_reply: true,
     // Tracking (off by default)
     track_opens: false,
@@ -23,7 +24,24 @@ export default function AddCampaign() {
     send_all_as_text: false,
   });
   const [message, setMessage] = useState(null);
+  const [tzSearch, setTzSearch] = useState('');
   const navigate = useNavigate();
+
+  const tzList = useMemo(() => {
+    return Intl.supportedValuesOf('timeZone').map(tz => {
+      let offsetLabel = '';
+      try {
+        const parts = new Intl.DateTimeFormat('en', { timeZone: tz, timeZoneName: 'shortOffset' }).formatToParts(new Date());
+        const off = parts.find(p => p.type === 'timeZoneName');
+        if (off) offsetLabel = ` (${off.value})`;
+      } catch (_) {}
+      return { value: tz, label: `${tz.replace(/_/g, ' ')}${offsetLabel}` };
+    });
+  }, []);
+
+  const filteredTz = tzSearch
+    ? tzList.filter(t => t.label.toLowerCase().includes(tzSearch.toLowerCase()))
+    : tzList;
 
   useEffect(() => {
     api.get('/inboxes').then(setInboxes).catch(() => {
@@ -130,21 +148,57 @@ export default function AddCampaign() {
         </div>
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <Input
-            label="Sending window start"
-            name="sending_hours_start"
-            value={form.sending_hours_start}
-            onChange={handleChange}
-          />
+            <label className="block text-sm font-medium text-gray-700 mb-1">Sending window start</label>
+            <input
+              type="time"
+              name="sending_hours_start"
+              value={form.sending_hours_start}
+              onChange={handleChange}
+              className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+            />
           </div>
           <div>
-            <Input
-            label="Sending window end"
-            name="sending_hours_end"
-            value={form.sending_hours_end}
-            onChange={handleChange}
-          />
+            <label className="block text-sm font-medium text-gray-700 mb-1">Sending window end</label>
+            <input
+              type="time"
+              name="sending_hours_end"
+              value={form.sending_hours_end}
+              onChange={handleChange}
+              className="border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+            />
           </div>
+        </div>
+        {/* Timezone */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Timezone</label>
+          <div className="relative">
+            <input
+              type="text"
+              placeholder="Search timezone…"
+              value={tzSearch || form.timezone}
+              onFocus={e => { setTzSearch(''); e.target.select(); }}
+              onChange={e => { setTzSearch(e.target.value); }}
+              onBlur={() => setTimeout(() => setTzSearch(''), 200)}
+              className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+            />
+            {tzSearch !== '' && (
+              <ul className="absolute z-50 mt-1 w-full max-h-52 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg">
+                {filteredTz.slice(0, 100).map(t => (
+                  <li
+                    key={t.value}
+                    className={`px-3 py-2 text-sm cursor-pointer hover:bg-teal-50 ${
+                      form.timezone === t.value ? 'bg-teal-100 font-medium' : ''
+                    }`}
+                    onMouseDown={() => { setForm(f => ({ ...f, timezone: t.value })); setTzSearch(''); }}
+                  >
+                    {t.label}
+                  </li>
+                ))}
+                {filteredTz.length === 0 && <li className="px-3 py-2 text-sm text-gray-400">No match</li>}
+              </ul>
+            )}
+          </div>
+          <p className="text-xs text-gray-400 mt-1">Sending hours above are interpreted in this timezone</p>
         </div>
         <div>
           <label className="flex items-center gap-2">
