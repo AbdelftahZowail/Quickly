@@ -53,7 +53,7 @@ async def test_get_unibox_merges_and_sorts(session):
     )
     await session.flush()
 
-    payload = await unibox_router.get_unibox(page=1, page_size=20, leads_only=False, db=session)
+    payload = await unibox_router.get_unibox(page=1, page_size=20, leads_only=False, lead_status=None, db=session)
     items = payload["items"]
     assert payload["total"] == 2
     assert items[0]["thread_id"] == "t-b"

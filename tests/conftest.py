@@ -26,7 +26,7 @@ from app.database import Base
 from app.models import (
     Campaign, Inbox, Sequence, Lead, CampaignLead,
     CampaignInbox, QueueSlot, EmailLog, EmailClick, LeadReply,
-    AppSetting,
+    AppSetting, LeadUnsubscribeToken,
 )
 
 

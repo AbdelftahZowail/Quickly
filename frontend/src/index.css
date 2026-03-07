@@ -27,6 +27,15 @@ button {
   @apply inline-flex items-center justify-center font-medium rounded-md;
 }
 
+/* Chart reveal-from-bottom animation */
+@keyframes chart-reveal-up {
+  from { clip-path: inset(100% 0 0 0); }
+  to   { clip-path: inset(0% 0 0 0); }
+}
+.chart-reveal-up {
+  animation: chart-reveal-up 0.6s ease-out forwards;
+}
+
 /* Remove focus outlines on mouse click globally; keep them for keyboard nav */
 *:focus {
   outline: none !important;

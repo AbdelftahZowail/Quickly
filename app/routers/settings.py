@@ -4,7 +4,7 @@ import urllib.parse
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,7 +32,7 @@ from app.app_settings import (
     set_test_mode,
 )
 from sqlalchemy import select
-from app.models import EmailLog, EmailOpen, Webhook, WEBHOOK_EVENT_TYPES
+from app.models import EmailLog, EmailOpen, Webhook, WEBHOOK_EVENT_TYPES, KnownIP
 from app.schemas import WebhookCreate, WebhookUpdate, WebhookResponse
 from app.webhooks import fire_webhook_event
 from app.ai_classifier import verify_ai_key, get_supported_providers, get_models_for_provider
@@ -685,3 +685,323 @@ async def verify_ai_feature_settings(
         return {"ok": False, "error": f"Please provide: {', '.join(missing)}"}
 
     return await verify_ai_key(provider=provider, model=model, api_key=api_key)
+
+
+# ---------------------------------------------------------------------------
+# Known IPs  — self-open / self-click filtering
+# ---------------------------------------------------------------------------
+
+_IP_EXPIRY_DAYS = 7  # auto-collected IPs expire after 1 week
+
+
+def _extract_ip(request) -> str | None:
+    """Best-effort client IP from proxy headers or socket."""
+    return (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or (request.client.host if request.client else None)
+    ) or None
+
+
+class _KnownIPCreate(_BaseModel):
+    ip_address: str
+    permanent: bool = True
+
+
+@router.get("/known-ips")
+async def list_known_ips(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Return all known IPs with a flag identifying the caller's current IP."""
+    from app import time as _time
+    now = _time.utcnow()
+    result = await db.execute(select(KnownIP).order_by(KnownIP.last_seen_at.desc()))
+    rows = result.scalars().all()
+    caller_ip = _extract_ip(request)
+    out = []
+    for r in rows:
+        # Skip expired non-permanent entries
+        if not r.permanent and r.expires_at and r.expires_at < now:
+            continue
+        out.append({
+            "id": r.id,
+            "ip_address": r.ip_address,
+            "permanent": r.permanent,
+            "is_current": r.ip_address == caller_ip,
+            "last_seen_at": r.last_seen_at.isoformat() + "Z" if r.last_seen_at else None,
+            "expires_at": r.expires_at.isoformat() + "Z" if r.expires_at else None,
+        })
+    return {"known_ips": out, "current_ip": caller_ip}
+
+
+@router.post("/known-ips", status_code=201)
+async def add_known_ip(
+    payload: _KnownIPCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually add a permanent (or timed) known IP."""
+    from app import time as _time
+    ip = payload.ip_address.strip()
+    if not ip:
+        raise HTTPException(400, "ip_address is required")
+    # Upsert: if already exists, update
+    result = await db.execute(select(KnownIP).where(KnownIP.ip_address == ip))
+    existing = result.scalar_one_or_none()
+    now = _time.utcnow()
+    if existing:
+        existing.permanent = payload.permanent
+        existing.last_seen_at = now
+        if payload.permanent:
+            existing.expires_at = None
+        else:
+            from datetime import timedelta
+            existing.expires_at = now + timedelta(days=_IP_EXPIRY_DAYS)
+        await db.commit()
+        await db.refresh(existing)
+        return {"ok": True, "id": existing.id}
+    entry = KnownIP(
+        ip_address=ip,
+        permanent=payload.permanent,
+        last_seen_at=now,
+        expires_at=None if payload.permanent else now + __import__('datetime').timedelta(days=_IP_EXPIRY_DAYS),
+    )
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+    return {"ok": True, "id": entry.id}
+
+
+@router.delete("/known-ips/{ip_id}")
+async def delete_known_ip(
+    ip_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a known IP entry."""
+    result = await db.execute(select(KnownIP).where(KnownIP.id == ip_id))
+    entry = result.scalar_one_or_none()
+    if not entry:
+        raise HTTPException(404, "Known IP not found")
+    await db.delete(entry)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/known-ips/heartbeat")
+async def known_ip_heartbeat(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Called by any frontend/backend session to register the caller's IP.
+
+    Creates or refreshes a non-permanent KnownIP entry that expires after
+    ``_IP_EXPIRY_DAYS`` days.  This is the automatic collection mechanism.
+    """
+    from app import time as _time
+    from datetime import timedelta
+    ip = _extract_ip(request)
+    if not ip:
+        return {"ok": False, "error": "Could not determine IP"}
+    now = _time.utcnow()
+    result = await db.execute(select(KnownIP).where(KnownIP.ip_address == ip))
+    existing = result.scalar_one_or_none()
+    if existing:
+        existing.last_seen_at = now
+        if not existing.permanent:
+            existing.expires_at = now + timedelta(days=_IP_EXPIRY_DAYS)
+        await db.commit()
+        return {"ok": True, "ip": ip, "known_ip_id": existing.id}
+    entry = KnownIP(
+        ip_address=ip,
+        permanent=False,
+        last_seen_at=now,
+        expires_at=now + timedelta(days=_IP_EXPIRY_DAYS),
+    )
+    db.add(entry)
+    await db.commit()
+    await db.refresh(entry)
+    return {"ok": True, "ip": ip, "known_ip_id": entry.id}
+
+
+# ---------------------------------------------------------------------------
+# Email Verification Settings
+# ---------------------------------------------------------------------------
+
+from app.app_settings import (
+    EMAIL_VERIFICATION_API_KEY,
+    EMAIL_VERIFICATION_PROVIDER,
+    EMAIL_VERIFICATION_ENABLED,
+    EMAIL_VERIFICATION_CUSTOM_URL,
+    EMAIL_VERIFICATION_CUSTOM_FIELD,
+    EMAIL_VERIFICATION_CUSTOM_VALID_VALUES,
+    EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES,
+    EMAIL_VERIFICATION_CUSTOM_METHOD,
+    get_setting,
+    put_setting,
+)
+
+
+class _EmailVerificationSettings(_BaseModel):
+    enabled: bool = False
+    provider: str = "mailtester_ninja"
+    api_key: str = ""  # empty means "keep existing"
+    # Custom provider fields
+    custom_url: str = ""
+    custom_field_path: str = ""
+    custom_valid_values: list[str] = []
+    custom_invalid_values: list[str] = []
+    custom_method: str = "GET"
+
+
+@router.get("/email-verification")
+async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
+    """Return the current email verification configuration."""
+    import json
+    enabled = (await get_setting(db, EMAIL_VERIFICATION_ENABLED) or "false").lower() in ("true", "1", "yes")
+    provider = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
+    raw_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
+    custom_url = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_URL) or ""
+    custom_field = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD) or ""
+    custom_valid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
+    custom_invalid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
+    custom_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
+    return {
+        "enabled": enabled,
+        "provider": provider,
+        "api_key_set": bool(raw_key),
+        "api_key_masked": _mask_secret(raw_key),
+        "providers": ["mailtester_ninja", "custom"],
+        "custom_url": custom_url,
+        "custom_field_path": custom_field,
+        "custom_valid_values": custom_valid,
+        "custom_invalid_values": custom_invalid,
+        "custom_method": custom_method,
+    }
+
+
+@router.post("/email-verification")
+async def save_email_verification_settings(
+    payload: _EmailVerificationSettings,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save email verification configuration."""
+    import json
+    await put_setting(db, EMAIL_VERIFICATION_ENABLED, str(payload.enabled).lower())
+    await put_setting(db, EMAIL_VERIFICATION_PROVIDER, payload.provider.strip() or "mailtester_ninja")
+    if payload.api_key.strip():
+        await put_setting(db, EMAIL_VERIFICATION_API_KEY, payload.api_key.strip())
+    # Custom provider settings
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_URL, payload.custom_url.strip())
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD, payload.custom_field_path.strip())
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES, json.dumps(payload.custom_valid_values))
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES, json.dumps(payload.custom_invalid_values))
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, payload.custom_method.strip().upper() or "GET")
+    await db.commit()
+    raw_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
+    return {"ok": True, "api_key_masked": _mask_secret(raw_key)}
+
+
+@router.post("/email-verification/test")
+async def test_email_verification(
+    db: AsyncSession = Depends(get_db),
+):
+    """Test the configured email verification key by verifying a known address."""
+    api_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
+    provider_name = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
+    if not api_key:
+        raise HTTPException(400, "No API key configured for email verification")
+    from app.email_verification import verify_single
+    result = await verify_single("test@gmail.com", api_key, provider_name)
+    return {
+        "ok": result.status != "unknown",
+        "status": result.status,
+        "message": result.message,
+    }
+
+
+# ── Custom provider test endpoint ─────────────────────────────────────────────
+
+class _CustomProviderTestRequest(_BaseModel):
+    url_template: str
+    field_path: str = ""
+    valid_values: list[str] = []
+    invalid_values: list[str] = []
+    method: str = "GET"
+    test_emails: list[str] = []  # leave empty → backend auto-selects sample emails
+
+
+from typing import Any
+
+
+@router.post("/email-verification/test-custom")
+async def test_custom_email_verification(
+    payload: _CustomProviderTestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Test a custom HTTP email verification provider configuration.
+
+    The endpoint builds a :class:`CustomHttpProvider` from the request
+    parameters (not from saved settings, so you can test before saving),
+    picks a set of sample emails (inbox addresses, lead addresses, and
+    synthetic addresses), verifies each one, and returns the results so the
+    user can confirm the field mapping is correct.
+
+    Pass ``test_emails`` to override the default sample selection.
+    """
+    from app.email_verification import CustomHttpProvider, _get_nested
+    from app.models import Inbox, Lead
+
+    if not payload.url_template or "{email}" not in payload.url_template:
+        raise HTTPException(400, "url_template must contain {email}")
+
+    provider = CustomHttpProvider(
+        url_template=payload.url_template.strip(),
+        field_path=payload.field_path.strip(),
+        valid_values=payload.valid_values,
+        invalid_values=payload.invalid_values,
+        method=payload.method,
+    )
+
+    # Build the list of (email, source) pairs to test
+    emails_with_source: list[tuple[str, str]] = []
+
+    if payload.test_emails:
+        for e in payload.test_emails[:20]:
+            emails_with_source.append((e.strip(), "user"))
+    else:
+        # Up to 2 inbox addresses
+        inbox_result = await db.execute(select(Inbox.email).limit(2))
+        for row in inbox_result.all():
+            emails_with_source.append((row[0], "inbox"))
+        # Up to 2 lead addresses not already included
+        existing_emails = {e for e, _ in emails_with_source}
+        from sqlalchemy import not_
+        lead_result = await db.execute(
+            select(Lead.email)
+            .where(not_(Lead.email.in_(existing_emails)))
+            .limit(2)
+        )
+        for row in lead_result.all():
+            emails_with_source.append((row[0], "lead"))
+        # Always append a couple of synthetic addresses
+        for synthetic in ["test@gmail.com", "invalid@nonexistent-domain-xyz123.com"]:
+            emails_with_source.append((synthetic, "synthetic"))
+
+    results = []
+    for email, source in emails_with_source:
+        vr = await provider.verify(email, "")
+        # Extract the mapped field value for display
+        raw_field_value = None
+        if vr.raw and payload.field_path:
+            raw_field_value = _get_nested(vr.raw, payload.field_path)
+        results.append({
+            "email": email,
+            "source": source,
+            "status": vr.status,
+            "raw_field_value": raw_field_value,
+            "raw_response": vr.raw,
+            "message": vr.message,
+        })
+
+    return {"results": results}
+

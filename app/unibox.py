@@ -634,10 +634,10 @@ async def _classify_and_notify_bg(
                 return  # classifier failed — normal webhook already sent
 
             # Statuses that should pause sending and delete queue slots
-            _PAUSE_STATUSES = {"not_interested", "wrong_person", "out_of_office"}
+            _PAUSE_STATUSES = {"not_interested", "wrong_person", "out_of_office", "unsubscribed"}
 
             # Update CampaignLead.interest_status (and optionally pause sending)
-            from app.models import CampaignLead as _CL
+            from app.models import CampaignLead as _CL, Lead as _Lead
             for camp_id in campaign_ids:
                 cl_res = await session.execute(
                     select(_CL).where(
@@ -656,6 +656,16 @@ async def _classify_and_notify_bg(
                         await session.execute(
                             _del(_QS).where(_QS.campaign_lead_id == cl.id)
                         )
+
+            # For unsubscribe requests, mark the lead record itself so they are
+            # excluded from all future campaigns.
+            if classification == "unsubscribed":
+                lead_res = await session.execute(
+                    select(_Lead).where(_Lead.id == lead_id)
+                )
+                lead_obj = lead_res.scalar_one_or_none()
+                if lead_obj:
+                    lead_obj.status = "unsubscribed"
 
             await session.commit()
 

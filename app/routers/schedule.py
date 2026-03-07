@@ -104,6 +104,7 @@ async def global_scheduled(db: AsyncSession = Depends(get_db)):
             (SeqAlias.campaign_id == Campaign.id)
             & (SeqAlias.position == QueueSlot.sequence_index),
         )
+        .where(CampaignLead.sending_paused == False)  # noqa: E712
         .order_by(QueueSlot.scheduled_date.asc(), QueueSlot.position_in_day)
     )
     rows = result.all()
@@ -343,6 +344,7 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
         .where(
             CampaignLead.campaign_id.in_(campaign_ids),
             Lead.status == "active",
+            CampaignLead.sending_paused == False,  # noqa: E712
         )
         .order_by(CampaignLead.campaign_id, CampaignLead.id)
     )

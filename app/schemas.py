@@ -36,6 +36,8 @@ class InboxCreate(BaseModel):
     wait_minutes_between: int = 5
     provider: str = "gmail"  # gmail (only supported provider)
     tracking_domain: Optional[str] = None  # custom hostname for tracking links
+    ramp_up_enabled: bool = False
+    ramp_up_period_days: int = 42
 
 
 class InboxUpdate(BaseModel):
@@ -44,7 +46,9 @@ class InboxUpdate(BaseModel):
     wait_minutes_between: Optional[int] = None
     provider: Optional[str] = None
     tracking_domain: Optional[str] = None  # set to "" to clear
-
+    ramp_up_enabled: Optional[bool] = None
+    ramp_up_period_days: Optional[int] = None
+    paused: Optional[bool] = None
 
 class InboxResponse(BaseModel):
     id: int
@@ -55,8 +59,52 @@ class InboxResponse(BaseModel):
     provider: str
     tracking_domain: Optional[str] = None
     created_at: datetime
+    ramp_up_enabled: bool = False
+    ramp_up_period_days: int = 42
+    paused: bool = False
+    effective_max_per_day: int = 0  # computed; 0 means use max_emails_per_day directly
     # how many emails have been sent from this inbox **today** (UTC)
     sent_today: int = 0
+    # how many future queue slots are pending on this inbox right now
+    pending_leads: int = 0
+
+    class Config:
+        from_attributes = True
+
+
+class PauseInboxRequest(BaseModel):
+    action: str  # "pause_leads" or "reassign"
+    target_inbox_id: Optional[int] = None
+
+
+class SequenceVariantCreate(BaseModel):
+    label: str = ""
+    subject: Optional[str] = None  # None = use sequence subject
+    body: str
+    is_html: Optional[bool] = None  # None = use sequence is_html
+    preview_text: Optional[str] = None
+    enabled: bool = True
+
+
+class SequenceVariantUpdate(BaseModel):
+    label: Optional[str] = None
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    is_html: Optional[bool] = None
+    preview_text: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+class SequenceVariantResponse(BaseModel):
+    id: int
+    sequence_id: int
+    label: str
+    subject: Optional[str]
+    body: str
+    is_html: Optional[bool] = None
+    preview_text: Optional[str] = None
+    enabled: bool
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -88,6 +136,7 @@ class SequenceResponse(BaseModel):
     wait_days_after_previous: int
     is_html: Optional[bool] = None
     preview_text: Optional[str] = None
+    variants: List["SequenceVariantResponse"] = []
 
     class Config:
         from_attributes = True
@@ -167,6 +216,7 @@ class CampaignStats(BaseModel):
 
 class CampaignResponse(BaseModel):
     id: int
+    public_id: str
     name: str
     inbox_ids: List[int]
     sending_days: List[int]

@@ -15,6 +15,29 @@ from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, Email
 log = logging.getLogger("quickly.queue")
 
 
+def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int:
+    """Return the effective daily send limit for an inbox on a given date.
+
+    When ramp-up is enabled the inbox starts at 1 email on the creation day and
+    gains 1 additional slot per calendar day until it reaches max_emails_per_day.
+    *for_date* should be the calendar date being scheduled (defaults to today UTC).
+    Using the target date rather than today means future queue slots respect the
+    warmup stage that will actually apply when those emails are sent.
+
+    Accepts either an Inbox ORM object or a plain integer (treated as a static
+    limit with no warmup), so existing callers that pre-compute max_per_day
+    continue to work unchanged.
+    """
+    if isinstance(inbox, int):
+        return inbox
+    if not getattr(inbox, "ramp_up_enabled", False):
+        return inbox.max_emails_per_day
+    ref = for_date or datetime.utcnow().date()
+    created = inbox.created_at.date() if isinstance(inbox.created_at, datetime) else inbox.created_at
+    days_old = max(0, (ref - created).days)
+    return min(days_old + 1, inbox.max_emails_per_day)
+
+
 def _parse_time(s: str) -> time:
     """Parse 'HH:MM' string to a time object."""
     try:
@@ -152,16 +175,21 @@ async def _next_available_send_time_today(
     # Determine whether the campaign uses a non-UTC timezone.
     tz = _get_tz(getattr(campaign, "timezone", None)) if campaign else None
 
-    # Skip the time cache for timezone-aware campaigns: the cache was
-    # pre-seeded with UTC minutes but we need campaign-local minutes.
-    use_time_cache = (tz is None)
+    # Always use the in-memory time cache when it is available.  The cache is
+    # pre-seeded with campaign-local minutes (fixed alongside this change), so
+    # it is safe for timezone-aware campaigns.  Without using the cache,
+    # unflushed QueueSlot objects added during the same bulk operation are
+    # invisible to the DB query — causing every lead to receive the same
+    # "first available" time-slot and violating inbox rate-limits.
+    use_time_cache = (cache is not None)
     time_key = ("times", inbox_id, day)
-    if use_time_cache and cache is not None and time_key in cache:
+    if use_time_cache and time_key in cache:
         existing_minutes = cache[time_key].copy()
-    elif use_time_cache and cache is not None and ("_preseeded",) in cache:
+    elif use_time_cache and ("_preseeded",) in cache:
         existing_minutes = set()
     else:
-        # Compute UTC day bounds (handles campaign timezone offset)
+        # No cache available: fall back to a DB query (used by the send job
+        # which does not carry a slot cache).
         if campaign:
             day_start, day_end = _utc_bounds_for_campaign_day(day, campaign)
         else:
@@ -182,8 +210,7 @@ async def _next_available_send_time_today(
             else:
                 dt_local = dt
             existing_minutes.add(dt_local.hour * 60 + dt_local.minute)
-        if use_time_cache and cache is not None:
-            cache[time_key] = existing_minutes.copy()
+        # Do not write back to cache here — there is no cache to write to.
 
     # First candidate: next slot on the grid that is >= max(now, start)
     base = max(now_min, start_min)
@@ -322,7 +349,7 @@ async def _check_all_sequences_fit(
     session: AsyncSession,
     start_date: date,
     sequences: List[Sequence],
-    inboxes: List[Tuple[int, int, int]],  # (inbox_id, max_per_day, wait_minutes)
+    inboxes: List[Tuple[int, any, int]],  # (inbox_id, inbox_obj, wait_minutes)
     sending_days: List[int],
     last_sent_sequence_index: int,
     cache: Optional[dict] = None,
@@ -361,7 +388,9 @@ async def _check_all_sequences_fit(
         
         # Check if ANY inbox has capacity on this date (including simulated loads)
         has_capacity = False
-        for inbox_id, max_per_day, _ in inboxes:
+        for inbox_id, inbox_obj, _ in inboxes:
+            # Use the date-specific warmup limit for accurate capacity checking
+            max_per_day = compute_effective_daily_limit(inbox_obj, current_date)
             count = await count_slots_on_date(session, inbox_id, current_date, cache)
             simulated_key = (inbox_id, current_date)
             simulated_count = simulated_loads.get(simulated_key, 0)
@@ -400,7 +429,7 @@ async def reserve_slots_for_lead(
     session: AsyncSession,
     campaign_lead_id: int,
     campaign: Campaign,
-    inboxes: List[Tuple[int, int, int]],  # (inbox_id, max_per_day, wait_minutes_between)
+    inboxes: List[Tuple[int, any, int]],  # (inbox_id, inbox_obj, wait_minutes_between)
     sequences: List[Sequence],
     lead_id: int,  # Add lead_id for inbox persistence
     start_date: Optional[date] = None,
@@ -460,7 +489,7 @@ async def reserve_slots_for_lead(
     if current_date < today:
         current_date = next_business_date(today, sending_days, 0)
     scheduled_dates: List[date] = []
-    round_robin = 0
+    round_robin = campaign_lead_id % len(inboxes) if inboxes else 0
 
     log.info(
         "reserve_slots_for_lead: cl=%s campaign=%s tz=%s inboxes=%s sequences=%d start=%s last_sent=%d",
@@ -487,7 +516,11 @@ async def reserve_slots_for_lead(
                     sending_days, last_sent_sequence_index, cache
                 )
             else:
-                for candidate in inboxes:
+                # Rotate starting inbox by campaign_lead_id so consecutive leads
+                # are distributed round-robin across the available inboxes.
+                start_idx = campaign_lead_id % len(inboxes)
+                rotated = inboxes[start_idx:] + inboxes[:start_idx]
+                for candidate in rotated:
                     if await _check_all_sequences_fit(
                         session, current_date, sequences, [candidate],
                         sending_days, last_sent_sequence_index, cache
@@ -552,9 +585,10 @@ async def reserve_slots_for_lead(
                 candidate_inboxes = [i for i in inboxes if i[0] == locked_inbox_id]
 
             picked = await _pick_inbox_with_capacity(
-                session, 
-                [(i[0], i[1]) for i in candidate_inboxes],  # Just (id, max_per_day) for capacity check
-                current_date, 
+                session,
+                # Compute the date-specific warmup limit for each candidate inbox
+                [(i[0], compute_effective_daily_limit(i[1], current_date)) for i in candidate_inboxes],
+                current_date,
                 round_robin,
                 cache
             )
@@ -584,6 +618,12 @@ async def reserve_slots_for_lead(
                 pos = await next_available_slot_position(session, inbox_id, current_date, cache)
 
                 scheduled_dt: datetime
+                # local_send_minutes: campaign-local minute-of-day for the
+                # slot we are about to create.  Tracked here so the time cache
+                # can be updated unconditionally (for both TZ-aware and
+                # non-TZ campaigns) with the correct local value.
+                local_send_minutes: int
+
                 if current_date == today:
                     # Today: check if estimated time is in the past (campaign-local)
                     est_time = _estimated_send_time(sending_start, wait_min, pos)
@@ -596,6 +636,7 @@ async def reserve_slots_for_lead(
                         if next_dt is not None:
                             # next_dt is campaign-tz naive; convert to UTC for storage
                             scheduled_dt = _to_utc_naive(next_dt, campaign)
+                            local_send_minutes = next_dt.hour * 60 + next_dt.minute
                             log.info(
                                 "  -> using next slot today for seq=%d: %s campaign-local (was past, now %s)",
                                 idx, next_dt.strftime("%H:%M"), now.strftime("%H:%M"),
@@ -615,6 +656,7 @@ async def reserve_slots_for_lead(
                     else:
                         # Campaign-local datetime → store as UTC
                         scheduled_dt = _to_utc_naive(datetime.combine(current_date, est_time), campaign)
+                        local_send_minutes = est_time.hour * 60 + est_time.minute
                 else:
                     # Future day: check if estimated time exceeds sending window
                     est_t = _estimated_send_time(sending_start, wait_min, pos)
@@ -633,6 +675,7 @@ async def reserve_slots_for_lead(
                     else:
                         # Campaign-local datetime → store as UTC
                         scheduled_dt = _to_utc_naive(datetime.combine(current_date, est_t), campaign)
+                        local_send_minutes = est_t.hour * 60 + est_t.minute
 
                 slot = QueueSlot(
                     campaign_lead_id=campaign_lead_id,
@@ -643,19 +686,16 @@ async def reserve_slots_for_lead(
                 )
                 session.add(slot)
                 # Update caches immediately (count + scheduled times).
-                # For timezone-aware campaigns scheduled_dt is in UTC while the
-                # time cache stores campaign-local minutes; _next_available_send_time_today
-                # bypasses the time cache for those campaigns anyway, so we only
-                # write the time cache entry when there is no campaign timezone.
-                tz_name = getattr(campaign, "timezone", None) or None
+                # Always store campaign-local minutes in the time cache so that
+                # _next_available_send_time_today can detect conflicts for
+                # subsequent leads before the session is flushed.
                 if cache is not None:
                     cache_key = (inbox_id, current_date)
                     cache[cache_key] = cache.get(cache_key, pos - 1) + 1
-                    if not tz_name:
-                        time_key = ("times", inbox_id, current_date)
-                        if time_key not in cache:
-                            cache[time_key] = set()
-                        cache[time_key].add(scheduled_dt.hour * 60 + scheduled_dt.minute)
+                    time_key = ("times", inbox_id, current_date)
+                    if time_key not in cache:
+                        cache[time_key] = set()
+                    cache[time_key].add(local_send_minutes)
                 else:
                     # Without cache, must flush for subsequent queries to see this slot
                     await session.flush()
@@ -696,11 +736,16 @@ async def _fetch_campaign_scheduling_data(
     result = await session.execute(
         select(CampaignInbox, Inbox)
         .join(Inbox, CampaignInbox.inbox_id == Inbox.id)
-        .where(CampaignInbox.campaign_id == campaign_id)
+        .where(
+            CampaignInbox.campaign_id == campaign_id,
+            Inbox.paused == False,  # noqa: E712
+        )
         .order_by(CampaignInbox.position, CampaignInbox.inbox_id)
     )
     rows = result.all()
-    inboxes = [(row[1].id, row[1].max_emails_per_day, row[1].wait_minutes_between) for row in rows]
+    # Store the full inbox object at index 1 so callers can compute the
+    # date-specific warmup limit via compute_effective_daily_limit(inbox_obj, date).
+    inboxes = [(row[1].id, row[1], row[1].wait_minutes_between) for row in rows]
 
     result = await session.execute(
         select(Sequence).where(Sequence.campaign_id == campaign_id).order_by(Sequence.position)
@@ -773,17 +818,24 @@ async def reserve_slots_for_new_leads_bulk(
                 QueueSlot.scheduled_date >= datetime.combine(time_provider.today(), time(0, 0)),
             )
         )
+        # Pre-seed with campaign-local dates/times so the time cache is
+        # consistent with the local-minute values written by reserve_slots_for_lead.
+        _preseed_tz = _get_tz(getattr(campaign, "timezone", None))
         for row in preseed_result.all():
             dt = row.scheduled_date
-            day = dt.date() if isinstance(dt, datetime) else dt
-            # count cache
-            count_key = (row.inbox_id, day)
+            if _preseed_tz and ZoneInfo:
+                dt_local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(_preseed_tz).replace(tzinfo=None)
+            else:
+                dt_local = dt
+            day_local = dt_local.date() if isinstance(dt_local, datetime) else dt_local
+            # count cache (keyed by campaign-local date)
+            count_key = (row.inbox_id, day_local)
             slot_cache[count_key] = slot_cache.get(count_key, 0) + 1
-            # time cache
-            time_key = ("times", row.inbox_id, day)
+            # time cache (campaign-local minutes)
+            time_key = ("times", row.inbox_id, day_local)
             if time_key not in slot_cache:
                 slot_cache[time_key] = set()
-            slot_cache[time_key].add(dt.hour * 60 + dt.minute)
+            slot_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
 
     slot_cache[("_preseeded",)] = True  # signal: missing keys mean 0
     log.info(
@@ -964,17 +1016,24 @@ async def _recalculate_queue_for_campaign_leads(
                 QueueSlot.scheduled_date >= datetime.combine(time_provider.today(), time(0, 0)),
             )
         )
+        # Pre-seed with campaign-local dates/times so the time cache is
+        # consistent with the local-minute values written by reserve_slots_for_lead.
+        _preseed_tz = _get_tz(getattr(campaign, "timezone", None))
         for row in preseed_result.all():
             dt = row.scheduled_date
-            day = dt.date() if isinstance(dt, datetime) else dt
-            # Count cache
-            count_key = (row.inbox_id, day)
+            if _preseed_tz and ZoneInfo:
+                dt_local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(_preseed_tz).replace(tzinfo=None)
+            else:
+                dt_local = dt
+            day_local = dt_local.date() if isinstance(dt_local, datetime) else dt_local
+            # Count cache (keyed by campaign-local date)
+            count_key = (row.inbox_id, day_local)
             slot_cache[count_key] = slot_cache.get(count_key, 0) + 1
-            # Time cache
-            time_key = ("times", row.inbox_id, day)
+            # Time cache (campaign-local minutes)
+            time_key = ("times", row.inbox_id, day_local)
             if time_key not in slot_cache:
                 slot_cache[time_key] = set()
-            slot_cache[time_key].add(dt.hour * 60 + dt.minute)
+            slot_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
 
         # Also count today's emails already sent (their QueueSlots were deleted after sending).
         # Without this, the capacity check sees only remaining unsent slots and allows
@@ -1172,11 +1231,11 @@ async def recalculate_queue_round_robin(
     total_daily_capacity = 0
     for cid in active_campaign_ids:
         _, inboxes, _ = campaign_data[cid]
-        for inbox_id, max_per_day, _ in inboxes:
+        for inbox_id, inbox_obj, _ in inboxes:
             if inbox_id not in seen_inbox_ids:
                 seen_inbox_ids.add(inbox_id)
                 all_inbox_ids.append(inbox_id)
-                total_daily_capacity += max_per_day
+                total_daily_capacity += compute_effective_daily_limit(inbox_obj)
 
     # Batch size: how many leads per campaign per rotation cycle
     if batch_size is None:

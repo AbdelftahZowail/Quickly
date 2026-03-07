@@ -24,6 +24,18 @@ GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY = "gmail_reply_sync_interval_minutes"
 # custom tracking domain (hostname only, e.g. "mail.yourclient.com")
 TRACKING_DOMAIN_KEY = "tracking_domain"
 
+# Email verification
+EMAIL_VERIFICATION_API_KEY = "email_verification_api_key"
+EMAIL_VERIFICATION_PROVIDER = "email_verification_provider"  # default: mailtester_ninja
+EMAIL_VERIFICATION_ENABLED = "email_verification_enabled"
+
+# Custom HTTP verification provider settings
+EMAIL_VERIFICATION_CUSTOM_URL = "email_verification_custom_url"
+EMAIL_VERIFICATION_CUSTOM_FIELD = "email_verification_custom_field"
+EMAIL_VERIFICATION_CUSTOM_VALID_VALUES = "email_verification_custom_valid_values"   # JSON array
+EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES = "email_verification_custom_invalid_values"  # JSON array
+EMAIL_VERIFICATION_CUSTOM_METHOD = "email_verification_custom_method"  # GET | POST
+
 
 # Generic helpers --------------------------------------------------------------
 

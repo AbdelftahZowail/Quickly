@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
 from app.database import get_db
-from app.models import EmailLog, EmailOpen, EmailClick, TrackedLink, Inbox, Lead, LeadUnsubscribeToken, CampaignLead, QueueSlot
+from app.models import EmailLog, EmailOpen, EmailClick, TrackedLink, Inbox, Lead, LeadUnsubscribeToken, CampaignLead, QueueSlot, KnownIP
 from app.tracking import PIXEL_GIF
 from app import time as time_provider
 from app.webhooks import fire_webhook_event
@@ -32,32 +32,78 @@ router = APIRouter(tags=["tracking"])
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _extract_ip(request: Request) -> str | None:
+    """Extract the client IP from the request, respecting proxy headers."""
+    return (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+        or (request.client.host if request.client else None)
+    ) or None
+
+
+async def _is_known_ip(db: AsyncSession, ip: str | None) -> bool:
+    """Return True if *ip* belongs to the app user (should be filtered)."""
+    if not ip:
+        return False
+    now = time_provider.utcnow()
+    result = await db.execute(
+        select(KnownIP).where(
+            KnownIP.ip_address == ip,
+            # permanent entries never expire; session entries expire after expires_at
+            (KnownIP.permanent == True) | (KnownIP.expires_at > now),  # noqa: E712
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+# ---------------------------------------------------------------------------
 # Open-tracking pixel
 # ---------------------------------------------------------------------------
 
-@router.get("/o/{log_id}", include_in_schema=False)
+@router.get("/o/{token}", include_in_schema=False)
 async def open_pixel(
-    log_id: int,
+    token: str,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Return a 1×1 transparent GIF and record the email open."""
-    result = await db.execute(select(EmailLog).where(EmailLog.id == log_id))
+    """Return a 1×1 transparent GIF and record the email open.
+
+    The *token* is a random URL-safe string stored in ``EmailLog.open_token``.
+    For backwards compatibility with older emails that used integer log IDs,
+    we fall back to an integer lookup when the token doesn't match.
+    """
+    # Try token-based lookup first, then fall back to integer ID for old emails
+    result = await db.execute(select(EmailLog).where(EmailLog.open_token == token))
     email_log = result.scalar_one_or_none()
+    if email_log is None:
+        try:
+            log_id = int(token)
+            result = await db.execute(select(EmailLog).where(EmailLog.id == log_id))
+            email_log = result.scalar_one_or_none()
+        except (ValueError, TypeError):
+            pass
 
     if email_log:
+        ip = _extract_ip(request)
+
+        # Skip recording if this IP belongs to the app user
+        if await _is_known_ip(db, ip):
+            log.debug("open_pixel: skipping known IP %s for log_id=%s", ip, email_log.id)
+            return Response(
+                content=PIXEL_GIF,
+                media_type="image/gif",
+                headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+            )
+
         if not email_log.opened:
             email_log.opened = True
 
-        ip = (
-            request.headers.get("X-Real-IP")
-            or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            or (request.client.host if request.client else None)
-        ) or None
-
         db.add(
             EmailOpen(
-                email_log_id=log_id,
+                email_log_id=email_log.id,
                 ip_address=ip,
                 opened_at=time_provider.utcnow(),
             )
@@ -66,7 +112,7 @@ async def open_pixel(
 
         # Fire webhook event for email open
         await fire_webhook_event(db, "email.opened", {
-            "email_log_id": log_id,
+            "email_log_id": email_log.id,
             "lead_id": email_log.lead_id,
             "campaign_id": email_log.campaign_id,
             "ip_address": ip,
@@ -105,33 +151,33 @@ async def click_redirect(
     email_log = email_log_result.scalar_one_or_none()
 
     if email_log:
-        if not email_log.clicked:
-            email_log.clicked = True
+        ip = _extract_ip(request)
 
-        ip = (
-            request.headers.get("X-Real-IP")
-            or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-            or (request.client.host if request.client else None)
-        ) or None
+        # Skip recording if this IP belongs to the app user
+        if not await _is_known_ip(db, ip):
+            if not email_log.clicked:
+                email_log.clicked = True
 
-        db.add(
-            EmailClick(
-                email_log_id=tracked.email_log_id,
-                ip_address=ip,
-                clicked_at=time_provider.utcnow(),
+            db.add(
+                EmailClick(
+                    email_log_id=tracked.email_log_id,
+                    ip_address=ip,
+                    clicked_at=time_provider.utcnow(),
+                )
             )
-        )
-        await db.commit()
+            await db.commit()
 
-        # Fire webhook event for email click
-        await fire_webhook_event(db, "email.clicked", {
-            "email_log_id": tracked.email_log_id,
-            "lead_id": email_log.lead_id,
-            "campaign_id": email_log.campaign_id,
-            "original_url": tracked.original_url,
-            "ip_address": ip,
-            "timestamp": time_provider.utcnow().isoformat() + "Z",
-        })
+            # Fire webhook event for email click
+            await fire_webhook_event(db, "email.clicked", {
+                "email_log_id": tracked.email_log_id,
+                "lead_id": email_log.lead_id,
+                "campaign_id": email_log.campaign_id,
+                "original_url": tracked.original_url,
+                "ip_address": ip,
+                "timestamp": time_provider.utcnow().isoformat() + "Z",
+            })
+        else:
+            log.debug("click_redirect: skipping known IP %s for log_id=%s", ip, email_log.id)
 
     return RedirectResponse(url=tracked.original_url, status_code=302)
 

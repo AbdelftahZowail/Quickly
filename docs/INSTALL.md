@@ -342,8 +342,10 @@ In the Quickly UI, go to **Inboxes → Add Inbox** and click **Connect Gmail Acc
 | `GOOGLE_CLIENT_ID` | Yes | — | Google OAuth client ID |
 | `GOOGLE_CLIENT_SECRET` | Yes | — | Google OAuth client secret |
 | `QUICKLY_MODE` | No | `production` | `production` or `development` |
+| `TEST_MODE` | No | `false` | Set to `true` to simulate sends without hitting Gmail |
+| `TIME_OFFSET_DAYS` | No | `0` | Shift the current date by N days (useful for development) |
 
-> All other settings (test mode, webhooks, scheduling strategy, etc.) are managed from the web UI **Settings** page and stored in the database.
+> All other settings (webhooks, scheduling strategy, AI, email verification, etc.) are managed from the web UI **Settings** page and stored in the database.
 
 ---
 

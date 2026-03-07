@@ -13,6 +13,7 @@ All request/response bodies use `Content-Type: application/json`.
 - [Status](#status)
 - [Campaigns](#campaigns)
 - [Sequences](#sequences)
+- [Sequence Variants (A/B Testing)](#sequence-variants-ab-testing)
 - [Leads](#leads)
 - [Inboxes](#inboxes)
 - [Schedule](#schedule)
@@ -22,6 +23,8 @@ All request/response bodies use `Content-Type: application/json`.
 - [Unibox](#unibox)
 - [Tracking](#tracking)
 - [Test Mode](#test-mode)
+- [Known IPs](#known-ips)
+- [Email Verification](#email-verification)
 
 ---
 
@@ -63,28 +66,32 @@ List all campaigns with aggregated stats.
 ```json
 {
   "id": 1,
+  "public_id": "aBcDeFgH",
   "name": "Q1 Outreach",
   "inbox_ids": [1, 2],
-  "sending_days": "1,2,3,4,5",
-  "sending_hours_start": 9,
-  "sending_hours_end": 17,
+  "sending_days": [0, 1, 2, 3, 4],
+  "sending_hours_start": "09:00",
+  "sending_hours_end": "17:00",
   "wait_minutes_between": 5,
   "stop_on_reply": true,
   "paused": false,
   "priority": 1,
   "timezone": "America/New_York",
-  "track_opens": true,
-  "track_clicks": true,
+  "track_opens": false,
+  "track_clicks": false,
+  "add_unsubscribe_header": true,
+  "send_first_as_text": false,
+  "send_all_as_text": false,
   "stats": {
     "total_leads": 150,
     "emails_sent": 300,
     "scheduled": 450,
-    "total_opens": 120,
-    "unique_opens": 80,
-    "total_clicks": 45,
-    "unique_clicks": 30,
+    "open_rate": 0.42,
+    "click_rate": 0.15,
     "replies": 15,
-    "sequences": 3
+    "sequences": 3,
+    "bounced": 2,
+    "unsubscribed": 1
   }
 }
 ```
@@ -105,17 +112,17 @@ Create a new campaign.
 |---|---|---|---|---|
 | `name` | string | Yes | — | Campaign name |
 | `inbox_ids` | int[] | Yes | — | Sending inboxes |
-| `sending_days` | string | No | `"1,2,3,4,5"` | Comma-separated ISO weekdays (1=Mon) |
-| `sending_hours_start` | int | No | `9` | Start of daily sending window (0-23) |
-| `sending_hours_end` | int | No | `17` | End of daily sending window (0-23) |
+| `sending_days` | int[] | No | `[0,1,2,3,4]` | Array of weekdays to send (0=Mon … 6=Sun) |
+| `sending_hours_start` | string | No | `"09:00"` | Start of daily sending window (HH:MM) |
+| `sending_hours_end` | string | No | `"17:00"` | End of daily sending window (HH:MM) |
 | `wait_minutes_between` | int | No | `5` | Minimum minutes between sends per inbox |
 | `stop_on_reply` | bool | No | `true` | Stop sending to a lead after they reply |
 | `paused` | bool | No | `false` | Start campaign in paused state |
 | `priority` | int | No | auto | Priority order (lower = higher priority) |
 | `timezone` | string | No | `null` | IANA timezone (e.g. `America/New_York`) |
-| `track_opens` | bool | No | `true` | Enable open tracking pixel |
-| `track_clicks` | bool | No | `true` | Enable click tracking |
-| `add_unsubscribe_header` | bool | No | `false` | Add List-Unsubscribe header |
+| `track_opens` | bool | No | `false` | Enable open tracking pixel |
+| `track_clicks` | bool | No | `false` | Enable click tracking |
+| `add_unsubscribe_header` | bool | No | `true` | Add List-Unsubscribe header |
 | `send_first_as_text` | bool | No | `false` | Send first sequence as plain text |
 | `send_all_as_text` | bool | No | `false` | Send all sequences as plain text |
 
@@ -176,14 +183,50 @@ Add a new sequence step. Triggers queue recalculation.
 | `body` | string | Yes | Email body (HTML or plain text) |
 | `wait_days_after_previous` | int | Yes | Days to wait after previous step |
 | `is_html` | bool | No | Whether body is HTML |
+| `preview_text` | string | No | Preheader / preview text (shown in inbox fragments) |
 
 ### `PATCH /api/campaigns/{id}/sequences/{seq_id}`
 
-Update a sequence. Recalculates queue if `wait_days_after_previous` changes.
+Update a sequence. Recalculates queue if `wait_days_after_previous` changes. Supports `preview_text`.
 
 ### `DELETE /api/campaigns/{id}/sequences/{seq_id}`
 
 Delete a sequence. Remaining sequences are renumbered. Triggers queue recalculation.
+
+---
+
+## Sequence Variants (A/B Testing)
+
+Each sequence step can have multiple A/B variants. When a step has one or more enabled variants, the sender picks one at random (uniform distribution among default + all enabled variants).
+
+### `GET /api/campaigns/{id}/sequences/{seq_id}/variants`
+
+List all A/B variants for a sequence step.
+
+### `POST /api/campaigns/{id}/sequences/{seq_id}/variants`
+
+Create a new variant. Returns `201 Created`.
+
+**Body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `label` | string | No | Descriptive name (e.g. "A", "B") |
+| `subject` | string | No | Override subject (null = use sequence subject) |
+| `body` | string | Yes | Email body |
+| `is_html` | bool | No | Override HTML flag (null = use sequence flag) |
+| `preview_text` | string | No | Override preheader text |
+| `enabled` | bool | No | Whether this variant participates in draws (default `true`) |
+
+**Response:** Variant object.
+
+### `PATCH /api/campaigns/{id}/sequences/{seq_id}/variants/{variant_id}`
+
+Partially update a variant. All fields optional.
+
+### `DELETE /api/campaigns/{id}/sequences/{seq_id}/variants/{variant_id}`
+
+Delete a variant. Existing email logs referencing the variant are preserved.
 
 ---
 
@@ -243,6 +286,13 @@ Email send history for a lead across all campaigns.
 
 Bulk add leads to a campaign. Creates leads that don't exist yet and schedules queue slots.
 
+**Query params:**
+
+| Param | Default | Description |
+|---|---|---|
+| `skip_duplicates` | `true` | When `true`, leads enrolled in any campaign are skipped. When `false`, only leads already in *this* campaign are skipped. |
+| `verify_emails` | `false` | When `true` and email verification is configured, triggers background verification for newly added leads. |
+
 **Body:** Array of lead objects:
 
 ```json
@@ -259,7 +309,10 @@ Bulk add leads to a campaign. Creates leads that don't exist yet and schedules q
   "ok": true,
   "added": 2,
   "already_enrolled": 0,
+  "duplicate_leads": [],
+  "duplicates_in_batch": 0,
   "errors": 0,
+  "verification_queued": false,
   "results": [
     { "email": "alice@example.com", "status": "added", "lead_id": 42, "slots_created": 3 }
   ]
@@ -270,11 +323,62 @@ Bulk add leads to a campaign. Creates leads that don't exist yet and schedules q
 
 List leads enrolled in a campaign with progress info.
 
-**Response:** Array of objects with `lead_id`, `email`, `name`, `status`, `stage`, `opened`, `clicked`, `replied`.
+**Response:** Array of objects:
+
+| Field | Description |
+|---|---|
+| `campaign_lead_id` | Enrollment row ID |
+| `lead_id` | Lead ID |
+| `email` | Lead email |
+| `name` | Lead name |
+| `status` | Lead status (`active`, `unsubscribed`, `bounced`, `replied`) |
+| `custom_data` | Key-value custom fields |
+| `enrolled_at` | Enrollment timestamp |
+| `stage` | Current step label (e.g. "Step 2", "Complete") |
+| `opened` | Whether this lead opened any email in this campaign |
+| `clicked` | Whether this lead clicked any link |
+| `replied` | Whether this lead replied |
+| `interest_status` | AI classification: `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `null` |
+| `sending_paused` | Whether sending is paused for this lead in this campaign |
+| `email_verification_status` | Verification status or `null` if unverified |
 
 ### `DELETE /api/campaigns/{id}/leads/{lead_id}`
 
 Remove a lead from a campaign and delete their pending queue slots.
+
+### `POST /api/campaigns/{id}/leads/verify`
+
+Trigger background email verification for all unverified leads in a campaign. Requires email verification to be configured in Settings.
+
+**Response:** `{ "ok": true, "queued": 42 }`
+
+### `GET /api/campaigns/{id}/leads/verification-status`
+
+Return a summary count of leads grouped by their `email_verification_status`.
+
+**Response:**
+
+```json
+{ "statuses": { "valid": 80, "invalid": 5, "catch_all": 10, "unverified": 55 } }
+```
+
+### `GET /api/campaigns/{id}/leads/export`
+
+Export the campaign's leads as a CSV file.
+
+**Query params:** `verification_status` (filter), `status` (filter)
+
+**Response:** `text/csv` download with columns: `email`, `name`, `status`, `email_verification_status`, and any `custom_data` keys.
+
+### `POST /api/campaigns/{id}/leads/import`
+
+Import leads from a CSV file. Expects an `email` column; `name` and any extra columns become `custom_data`.
+
+**Query params:** `skip_duplicates` (default `true`), `verify_emails` (default `false`)
+
+**Form data:** `file` (multipart CSV upload)
+
+**Response:** Same shape as the bulk add response.
 
 ---
 
@@ -296,22 +400,51 @@ Create an inbox.
 |---|---|---|---|
 | `email` | string | Yes | Sending email address |
 | `display_name` | string | No | Sender display name |
-| `max_emails_per_day` | int | No | Daily sending limit |
-| `wait_minutes_between` | int | No | Cooldown between sends |
+| `max_emails_per_day` | int | No | Daily sending limit (default `50`) |
+| `wait_minutes_between` | int | No | Cooldown between sends (default `5`) |
 | `provider` | string | No | Always `gmail` |
 | `tracking_domain` | string | No | Custom tracking domain hostname |
+| `ramp_up_enabled` | bool | No | Enable send-volume warm-up ramp (default `false`) |
+| `ramp_up_period_days` | int | No | Ramp-up duration in days (default `42`) |
+
+The `GET /api/inboxes` and `GET /api/inboxes/{id}` responses include computed fields:
+
+| Field | Description |
+|---|---|
+| `sent_today` | Emails sent from this inbox today (UTC) |
+| `pending_leads` | Pending queue slots assigned to this inbox |
+| `effective_max_per_day` | Actual daily limit accounting for ramp-up |
+| `paused` | Whether the inbox is paused |
 
 ### `GET /api/inboxes/{id}`
 
-Get a single inbox with today's sent count.
+Get a single inbox with today’s sent count.
 
 ### `PATCH /api/inboxes/{id}`
 
-Update inbox fields. Triggers queue recalculation if capacity changes.
+Update inbox fields. Triggers queue recalculation if capacity changes. Also accepts `ramp_up_enabled`, `ramp_up_period_days`, and `paused`.
 
 ### `DELETE /api/inboxes/{id}`
 
 Delete an inbox. Fails if the inbox is assigned to campaigns or has pending queue slots.
+
+### `POST /api/inboxes/{id}/pause`
+
+Pause an inbox. Choose how to handle leads currently assigned to it.
+
+**Body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | Yes | `pause_leads` — set `sending_paused=true` on affected leads; or `reassign` — run a full recalculation so other inboxes absorb the leads |
+
+**Response:** Updated inbox object.
+
+### `POST /api/inboxes/{id}/unpause`
+
+Resume a paused inbox. Also un-pauses any `CampaignLead` rows that were paused because of this inbox, then triggers a full queue recalculation.
+
+**Response:** Updated inbox object.
 
 ---
 
@@ -428,7 +561,7 @@ Quickly supports multiple outbound webhooks. Each webhook subscribes to any comb
 
 List all supported event type strings.
 
-**Response:** `["email.sent", "email.opened", "email.clicked", "email.bounced", "lead.replied", "lead.unsubscribed", "lead.status_changed", "daily_limit", "rate_limit", "token_expired"]`
+**Response:** `["email.sent", "email.opened", "email.clicked", "email.bounced", "lead.replied", "lead.unsubscribed", "lead.status_changed", "lead.interested", "lead.not_interested", "lead.out_of_office", "lead.wrong_person", "lead.auto_reply", "daily_limit", "rate_limit", "token_expired"]`
 
 ### `GET /api/settings/webhooks`
 
@@ -649,15 +782,28 @@ Toggle test mode (legacy endpoint).
 
 Preview a rendered email for a specific sequence and lead. Template variables are substituted.
 
-**Body:** `{ "sequence_id": 5, "lead_id": 42 }` (`lead_id` optional)
+**Body:**
 
-**Response:** `{ "subject": "Hi Alice", "body": "<p>...</p>", "is_html": true, "sequence_position": 1 }`
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `sequence_id` | int | Yes | Sequence to preview |
+| `lead_id` | int | No | Lead for variable substitution |
+| `variant_id` | int | No | Preview a specific A/B variant instead of the default content |
+
+**Response:** `{ "subject": "Hi Alice", "body": "<p>...</p>", "is_html": true, "sequence_position": 1, "variant_label": "B", "tracking_note": "..." }`
 
 ### `POST /api/campaigns/{id}/send-test`
 
 Send a real test email using the campaign's first inbox.
 
-**Body:** `{ "sequence_id": 5, "to_email": "test@example.com", "lead_id": 42 }`
+**Body:**
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `sequence_id` | int | Yes | Sequence to send |
+| `to_email` | string | Yes | Recipient address |
+| `lead_id` | int | No | Lead for variable substitution |
+| `variant_id` | int | No | Send a specific A/B variant |
 
 **Response:** `{ "ok": true, "message_id": "<abc@mail.gmail.com>" }`
 
@@ -688,65 +834,232 @@ List pending queue slots for a campaign.
 
 ### `GET /api/campaigns/{id}/sent`
 
-Sent email history for a campaign.
+Sent email history for a campaign, including variant and interest status per row.
 
 ### `POST /api/campaigns/{id}/recalculate-queue`
 
 Recalculate queue for a specific campaign after sequence or setting changes.
 
+### `GET /api/campaigns/{id}/analytics/steps`
+
+Per-step breakdown of sent/opens/clicks/replies, plus per-variant metrics for campaigns using A/B testing.
+
+**Response:** Array of step objects:
+
+```json
+[
+  {
+    "sequence_id": 1,
+    "sequence_index": 0,
+    "subject": "Hey {{name}}",
+    "total_sent": 100,
+    "total_opens": 42,
+    "total_clicks": 10,
+    "total_replies": 5,
+    "total_opportunities": 5,
+    "variants": [
+      { "variant_id": null, "variant_label": "Default", "sent": 50, "opens": 22, "clicks": 5, "replies": 3, "opportunities": 3, "enabled": true },
+      { "variant_id": 7, "variant_label": "B", "sent": 50, "opens": 20, "clicks": 5, "replies": 2, "opportunities": 2, "enabled": true }
+    ]
+  }
+]
+```
+
 ---
 
 ## AI Classification
 
+AI features are configured per-feature. Currently the only feature is `reply_classifier`, which classifies lead replies as interested, not interested, out of office, etc.
+
 ### `GET /api/settings/ai`
 
-Return the current AI classification settings. The API key is masked in the response.
+Return settings for **all** AI features.
+
+**Response:**
+
+```json
+{
+  "features": [
+    {
+      "id": "reply_classifier",
+      "label": "Reply Interest Classifier",
+      "description": "...",
+      "enabled": true,
+      "provider": "openai",
+      "model": "gpt-4o",
+      "api_key_set": true,
+      "api_key_masked": "sk***ey"
+    }
+  ]
+}
+```
+
+### `GET /api/settings/ai/{feature_id}`
+
+Return settings for a single AI feature (e.g. `reply_classifier`). Same shape as one item in the `features` array above.
+
+### `POST /api/settings/ai/{feature_id}`
+
+Save settings for a feature.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | Enable/disable this feature |
+| `provider` | string | Provider: `openai`, `anthropic`, `gemini`, `mistral`, `groq`, `cohere`, `together`, `deepseek`, `openrouter`, `perplexity`, `xai`, `ollama`, and more |
+| `model` | string | Model name (e.g. `gpt-4o`, `claude-sonnet-4-5`) |
+| `api_key` | string | API key (omit to keep the existing stored key) |
+
+### `POST /api/settings/ai/{feature_id}/verify`
+
+Verify that credentials work by sending a test prompt. Any field left empty is filled from the stored DB value.
+
+**Body:** `{"provider": "openai", "model": "gpt-4o", "api_key": "sk-..."}`
+
+**Response:** `{"ok": true}` or `{"ok": false, "error": "..."}`
+
+### `GET /api/settings/ai/providers`
+
+Return a list of all supported AI providers (most popular first).
+
+**Response:** `{"providers": [{"value": "openai", "label": "OpenAI"}, ...]}`
+
+### `GET /api/settings/ai/providers/{provider}/models`
+
+Fetch available models for a provider. Pass `?api_key=<key>` to use an unsaved key.
+
+**Response:** `{"models": [{"id": "gpt-4o", "name": "GPT-4o"}, ...]}`
+
+### `PATCH /api/campaigns/{id}/leads/{lead_id}`
+
+Update AI classification and sending state for a specific campaign-lead enrollment.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `interest_status` | string\|null | `"interested"`, `"not_interested"`, `"out_of_office"`, `"wrong_person"`, `"auto_reply"`, `"unsubscribed"`, or `""` to clear |
+| `sending_paused` | bool\|null | Pause or resume sending for this lead |
+
+**Response:** `{"ok": true, "interest_status": "interested", "sending_paused": false}`
+
+---
+
+## Known IPs
+
+The Known IPs system filters out opens and clicks from your own IP addresses, preventing self-opens/clicks from inflating analytics.
+
+### `GET /api/settings/known-ips`
+
+List all known IPs. The response includes a `current_ip` field (the caller's detected IP) and a `is_current` flag per entry.
+
+**Response:**
+
+```json
+{
+  "known_ips": [
+    {
+      "id": 1,
+      "ip_address": "203.0.113.5",
+      "permanent": true,
+      "is_current": false,
+      "last_seen_at": "2026-03-01T10:00:00Z",
+      "expires_at": null
+    }
+  ],
+  "current_ip": "203.0.113.5"
+}
+```
+
+### `POST /api/settings/known-ips`
+
+Manually add a known IP address.
+
+**Body:** `{ "ip_address": "203.0.113.5", "permanent": true }`
+
+**Response:** `{ "ok": true, "id": 1 }` (201 Created)
+
+### `DELETE /api/settings/known-ips/{id}`
+
+Remove a known IP entry.
+
+### `POST /api/settings/known-ips/heartbeat`
+
+Register the caller's IP as a non-permanent known IP (auto-expires after 7 days). Called automatically by the frontend on each session.
+
+**Response:** `{ "ok": true, "ip": "203.0.113.5", "known_ip_id": 1 }`
+
+---
+
+## Email Verification
+
+Email verification checks whether a lead's email address is deliverable before sending. When configured, invalid or risky addresses are automatically marked as bounced and their queue slots removed.
+
+Supported providers: `mailtester_ninja` (requires API key) and `custom` (any HTTP endpoint).
+
+### `GET /api/settings/email-verification`
+
+Return the current email verification configuration.
 
 **Response:**
 
 ```json
 {
   "enabled": true,
-  "provider": "openai",
-  "model": "gpt-4o",
+  "provider": "mailtester_ninja",
   "api_key_set": true,
-  "api_key_masked": "s***k"
+  "api_key_masked": "sk***ey",
+  "providers": ["mailtester_ninja", "custom"],
+  "custom_url": "",
+  "custom_field_path": "",
+  "custom_valid_values": [],
+  "custom_invalid_values": [],
+  "custom_method": "GET"
 }
 ```
 
-### `POST /api/settings/ai`
+### `POST /api/settings/email-verification`
 
-Save AI classification settings.
-
-**Body:**
-
-| Field | Type | Description |
-|---|---|---|
-| `enabled` | bool | Enable/disable AI classification |
-| `provider` | string | Provider name: openai, anthropic, mistral, cohere, groq, google, together |
-| `model` | string | Model name (e.g. gpt-4o, claude-sonnet-4-20250514) |
-| `api_key` | string | API key for the provider |
-
-### `POST /api/settings/ai/verify`
-
-Verify that AI credentials work by sending a test prompt.
-
-**Body:** `{"provider": "openai", "model": "gpt-4o", "api_key": "sk-..."}`
-
-**Response:** `{"ok": true}` or `{"ok": false, "error": "..."}`
-
-### `PATCH /api/campaigns/{id}/leads/{lead_id}`
-
-Update interest classification and sending status for a specific lead in a campaign.
+Save email verification settings.
 
 **Body:**
 
 | Field | Type | Description |
 |---|---|---|
-| `interest_status` | string\|null | "interested", "not_interested", or "" to clear |
-| `sending_paused` | bool\|null | Pause or resume sending for this lead |
+| `enabled` | bool | Enable/disable verification |
+| `provider` | string | `mailtester_ninja` or `custom` |
+| `api_key` | string | API key (omit to keep existing; not used for `custom`) |
+| `custom_url` | string | URL template with `{email}` placeholder (custom provider only) |
+| `custom_field_path` | string | Dot-path to the status field in the JSON response |
+| `custom_valid_values` | string[] | Field values that indicate a valid address |
+| `custom_invalid_values` | string[] | Field values that indicate an invalid address |
+| `custom_method` | string | `GET` or `POST` |
 
-**Response:** `{"ok": true, "interest_status": "interested", "sending_paused": false}`
+### `POST /api/settings/email-verification/test`
+
+Test the saved credentials by verifying a known address.
+
+**Response:** `{ "ok": true, "status": "valid", "message": "..." }`
+
+### `POST /api/settings/email-verification/test-custom`
+
+Test a custom provider configuration **without saving it** first. Picks sample inbox/lead/synthetic addresses and returns verification results for each.
+
+**Body:**
+
+```json
+{
+  "url_template": "https://api.example.com/verify?email={email}",
+  "field_path": "result.status",
+  "valid_values": ["valid"],
+  "invalid_values": ["invalid", "disposable"],
+  "method": "GET",
+  "test_emails": []
+}
+```
+
+**Response:** `{ "results": [{"email": "...", "source": "inbox", "status": "valid", "raw_field_value": "...", "raw_response": {...}}] }`
 
 ---
 
@@ -760,6 +1073,7 @@ Email bodies support Jinja2-style template substitution:
 | `{{email}}` | Lead email |
 | `{{company}}` | `custom_data.company` |
 | `{{*}}` | Any key from lead's `custom_data` |
+| `{{unsubscribe_link}}` | Auto-generated one-click unsubscribe URL |
 
 Example: `Hi {{name}}, I noticed {{company}} is growing fast...`
 

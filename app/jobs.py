@@ -1,10 +1,12 @@
 """Background job: send due emails from the queue."""
 import logging
+import random
 import re
 import secrets
 from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 try:
     from zoneinfo import ZoneInfo
 except ImportError:
@@ -17,6 +19,7 @@ from app.models import (
     CampaignLead,
     Campaign,
     Sequence,
+    SequenceVariant,
     Lead,
     Inbox,
     EmailLog,
@@ -29,7 +32,7 @@ from app.webhooks import fire_webhook_event
 from app.routers.gmail_oauth import refresh_access_token
 from app.app_settings import get_google_oauth_credentials
 from app import time as time_provider
-from app.queue_logic import _parse_time
+from app.queue_logic import _parse_time, compute_effective_daily_limit
 
 log = logging.getLogger(__name__)
 
@@ -77,7 +80,7 @@ async def run_send_job():
     async with AsyncSessionLocal() as session:
         today = now.date()
 
-        result = await session.execute(select(Inbox))
+        result = await session.execute(select(Inbox).where(Inbox.paused == False))  # noqa: E712
         inboxes = result.scalars().all()
 
         total_sent = 0
@@ -92,7 +95,8 @@ async def run_send_job():
         for inbox in inboxes:
             # compute how many emails already sent today so we enforce a hard
             # daily cap rather than only relying on ``sent_this_inbox`` below.
-            max_per_day = inbox.max_emails_per_day
+            # Use the warmup-aware effective limit so ramp-up is respected.
+            max_per_day = compute_effective_daily_limit(inbox)
             sent_count_result = await session.execute(
                 select(func.count(EmailLog.id))
                 .where(
@@ -104,12 +108,42 @@ async def run_send_job():
             quota_remaining = max_per_day - already_sent
             if quota_remaining <= 0:
                 # we would break the daily limit even before sending a single
-                # message; skip this inbox entirely and notify the webhook.
-                await fire_webhook_event(
-                    session,
-                    "daily_limit",
-                    {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
-                )
+                # message; try a recalculation to redistribute, then report.
+                log.warning("Daily limit hit for inbox %s; attempting recalculation", inbox.email)
+                try:
+                    from app.routers.schedule import recalculate_all_campaigns
+                    await recalculate_all_campaigns(session)
+                    # Re-check after recalculation
+                    recheck = await session.execute(
+                        select(func.count(EmailLog.id)).where(
+                            EmailLog.inbox_id == inbox.id,
+                            func.date(EmailLog.sent_at) == today,
+                        )
+                    )
+                    still_over = (recheck.scalar() or 0) >= max_per_day
+                    if still_over:
+                        await fire_webhook_event(
+                            session, "daily_limit",
+                            {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today),
+                             "recalculated": True, "resolved": False},
+                        )
+                    else:
+                        await fire_webhook_event(
+                            session, "daily_limit",
+                            {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today),
+                             "recalculated": True, "resolved": True,
+                             "message": "Daily limit was hit but resolved after recalculation"},
+                        )
+                        # Update quota_remaining after recalc
+                        quota_remaining = max_per_day - (recheck.scalar() or 0)
+                        if quota_remaining > 0:
+                            continue  # retry this inbox with fresh capacity
+                except Exception as e:
+                    log.error("Recalculation after daily_limit failed: %s", e)
+                    await fire_webhook_event(
+                        session, "daily_limit",
+                        {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
+                    )
                 continue
 
             # For Gmail inboxes, pre-fetch and refresh the access token
@@ -147,6 +181,7 @@ async def run_send_job():
                     (Sequence.campaign_id == Campaign.id)
                     & (Sequence.position == QueueSlot.sequence_index),
                 )
+                .options(selectinload(Sequence.variants))
                 .where(
                     QueueSlot.inbox_id == inbox.id,
                     func.date(QueueSlot.scheduled_date) == today,
@@ -157,7 +192,8 @@ async def run_send_job():
             rows = result.all()
 
             sent_this_inbox = 0
-            max_per_day = inbox.max_emails_per_day
+            # Use the warmup-aware effective limit as the per-inbox rate cap.
+            max_per_day = compute_effective_daily_limit(inbox)
 
             # compute last sent timestamp so we can enforce the wait-minutes
             last_sent_time = None
@@ -188,17 +224,49 @@ async def run_send_job():
                     required = timedelta(minutes=inbox.wait_minutes_between)
                     # allow up to 20 second of slack before firing rate_limit
                     if delta + timedelta(seconds=20) < required:
-                        await fire_webhook_event(
-                            session,
-                            "rate_limit",
-                            {
-                                "inbox_id": inbox.id,
-                                "inbox_email": inbox.email,
-                                "last_sent": last_sent_time.isoformat(),
-                                "now": now.isoformat(),
-                                "wait_minutes": inbox.wait_minutes_between,
-                            },
-                        )
+                        # Try recalculation to spread slots out
+                        try:
+                            from app.routers.schedule import recalculate_all_campaigns
+                            await recalculate_all_campaigns(session)
+                            # Re-fetch the last sent time after recalc
+                            recheck_res = await session.execute(
+                                select(EmailLog.sent_at)
+                                .where(EmailLog.inbox_id == inbox.id)
+                                .order_by(EmailLog.sent_at.desc())
+                                .limit(1)
+                            )
+                            new_last = recheck_res.scalar_one_or_none()
+                            new_delta = now - new_last if new_last else delta
+                            if new_delta + timedelta(seconds=20) < required:
+                                await fire_webhook_event(
+                                    session, "rate_limit",
+                                    {"inbox_id": inbox.id, "inbox_email": inbox.email,
+                                     "last_sent": (new_last or last_sent_time).isoformat(),
+                                     "now": now.isoformat(),
+                                     "wait_minutes": inbox.wait_minutes_between,
+                                     "recalculated": True, "resolved": False},
+                                )
+                            else:
+                                await fire_webhook_event(
+                                    session, "rate_limit",
+                                    {"inbox_id": inbox.id, "inbox_email": inbox.email,
+                                     "last_sent": (new_last or last_sent_time).isoformat(),
+                                     "now": now.isoformat(),
+                                     "wait_minutes": inbox.wait_minutes_between,
+                                     "recalculated": True, "resolved": True,
+                                     "message": "Rate limit was hit but resolved after recalculation"},
+                                )
+                                last_sent_time = new_last
+                                continue  # try next slot
+                        except Exception as e:
+                            log.error("Recalculation after rate_limit failed: %s", e)
+                            await fire_webhook_event(
+                                session, "rate_limit",
+                                {"inbox_id": inbox.id, "inbox_email": inbox.email,
+                                 "last_sent": last_sent_time.isoformat(),
+                                 "now": now.isoformat(),
+                                 "wait_minutes": inbox.wait_minutes_between},
+                            )
                         break
                 if getattr(campaign, 'paused', False):
                     continue  # Skip paused campaigns
@@ -206,6 +274,9 @@ async def run_send_job():
                     break
 
                 if lead.status not in ("active",):
+                    continue
+                # Skip leads with invalid/risky email verification
+                if getattr(lead, 'email_verification_status', None) in ("invalid", "risky"):
                     continue
                 # Skip leads whose sending is paused for this campaign
                 # (e.g. marked not_interested by the AI classifier).
@@ -224,7 +295,37 @@ async def run_send_job():
                 reply_to_msg_id = None
                 prev_thread_id = None
                 references_chain = None
-                if (sequence.subject or "").strip() == "":
+
+                # ── A/B variant selection ─────────────────────────────────────
+                chosen_variant_id = None
+                seq_subject      = sequence.subject
+                seq_body         = sequence.body
+                seq_is_html      = sequence.is_html
+                seq_preview_text = getattr(sequence, 'preview_text', None)
+
+                enabled_variants = [
+                    v for v in getattr(sequence, 'variants', []) if v.enabled
+                ]
+                if enabled_variants:
+                    # options: None = default content, or any enabled variant
+                    options = [None] + enabled_variants
+                    chosen = random.choice(options)
+                    if chosen is not None:
+                        chosen_variant_id = chosen.id
+                        if chosen.subject is not None:
+                            seq_subject = chosen.subject
+                        if chosen.body:
+                            seq_body = chosen.body
+                        if chosen.is_html is not None:
+                            seq_is_html = chosen.is_html
+                        if chosen.preview_text is not None:
+                            seq_preview_text = chosen.preview_text
+                        log.info(
+                            "A/B: slot=%s seq=%s chose variant_id=%s label=%r",
+                            slot.id, sequence.id, chosen_variant_id, chosen.label,
+                        )
+
+                if (seq_subject or "").strip() == "":
                     # Fetch ALL prior emails in this lead+campaign thread for proper References chain
                     all_logs_result = await session.execute(
                         select(EmailLog).where(
@@ -263,23 +364,52 @@ async def run_send_job():
                     else:
                         subject = "(no subject)"
                 else:
-                    subject = sequence.subject.strip()
+                    subject = seq_subject.strip()
 
                 # Apply lead-data variable substitution to the subject line
                 # (same {{firstName}} / {{company}} etc. tokens as the body).
                 subject = render_body(subject, get_lead_data(lead))
 
                 # ── Determine HTML mode ──────────────────────────────────────
-                # Priority: campaign-level overrides > per-sequence flag > auto-detect
+                # Override chain (highest → lowest priority):
+                #   1. Settings-level text-only (send_all_as_text / send_first_as_text)
+                #   2. Tracking requires HTML (tracking overrides text → html)
+                #   3. Sequence-level is_html checkbox
+                #   4. Legacy auto-detect from body content
+                format_override = None  # tracks if/why format was overridden
+
                 if getattr(campaign, 'send_all_as_text', False):
                     is_html = False
+                    # Check if tracking would have wanted HTML
+                    wants_tracking = (
+                        getattr(campaign, 'track_opens', False)
+                        or getattr(campaign, 'track_clicks', False)
+                    )
+                    if wants_tracking:
+                        format_override = "text_forced_tracking_disabled"
                 elif getattr(campaign, 'send_first_as_text', False) and slot.sequence_index == 0:
                     is_html = False
-                elif sequence.is_html is not None:
-                    is_html = bool(sequence.is_html)
+                    wants_tracking = (
+                        getattr(campaign, 'track_opens', False)
+                        or getattr(campaign, 'track_clicks', False)
+                    )
+                    if wants_tracking:
+                        format_override = "first_text_tracking_disabled"
                 else:
-                    # Legacy auto-detect: scan the raw body for HTML tags.
-                    is_html = bool(re.search(r'<[a-zA-Z][^>]*>', sequence.body or ""))
+                    # Determine base format from sequence or auto-detect
+                    if seq_is_html is not None:
+                        is_html = bool(seq_is_html)
+                    else:
+                        is_html = bool(re.search(r'<[a-zA-Z][^>]*>', seq_body or ""))
+
+                    # Tracking override: if tracking is on and sequence is plain text,
+                    # upgrade to HTML so the pixel/links can be injected
+                    if not is_html and (
+                        getattr(campaign, 'track_opens', False)
+                        or getattr(campaign, 'track_clicks', False)
+                    ):
+                        is_html = True
+                        format_override = "tracking_upgraded_to_html"
 
                 # ── Unsubscribe token (fetch or create) ──────────────────────
                 unsub_token_res = await session.execute(
@@ -304,10 +434,10 @@ async def run_send_job():
                 lead_data = get_lead_data(lead)
                 lead_data["unsubscribe_link"] = unsub_url
 
-                body = render_body(sequence.body, lead_data)
+                body = render_body(seq_body, lead_data)
                 # Inject hidden preheader so email clients show the custom preview text.
-                if is_html and getattr(sequence, 'preview_text', None):
-                    rendered_preview = render_body(sequence.preview_text, lead_data)
+                if is_html and seq_preview_text:
+                    rendered_preview = render_body(seq_preview_text, lead_data)
                     preheader = (
                         '<div style="display:none !important; visibility:hidden; '
                         'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
@@ -323,7 +453,9 @@ async def run_send_job():
                     campaign_id=campaign.id,
                     inbox_id=inbox.id,
                     sequence_index=slot.sequence_index,
+                    variant_id=chosen_variant_id,
                     subject=subject,
+                    format_override=format_override,
                     message_id="",      # filled in after successful send
                     thread_id=prev_thread_id,
                 )
@@ -345,6 +477,7 @@ async def run_send_job():
                         inbox_tracking_base,
                         track_opens=getattr(campaign, 'track_opens', False),
                         track_clicks=getattr(campaign, 'track_clicks', False),
+                        open_token=email_log_entry.open_token,
                     )
                     for _token, _url in link_pairs:
                         session.add(
@@ -450,6 +583,69 @@ async def run_send_job():
                     "thread_id": result.thread_id,
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })
+
+                # ── Test mode: simulate random engagement events ─────────
+                if settings.test_mode:
+                    from app.models import EmailOpen, EmailClick, TrackedLink as _TL
+                    fake_ip = f"10.0.{random.randint(0,255)}.{random.randint(1,254)}"
+
+                    # ~40% chance of open
+                    if random.random() < 0.4:
+                        email_log_entry.opened = True
+                        session.add(EmailOpen(
+                            email_log_id=email_log_entry.id,
+                            ip_address=fake_ip,
+                        ))
+                        await fire_webhook_event(session, "email.opened", {
+                            "email_log_id": email_log_entry.id,
+                            "lead_id": lead.id,
+                            "campaign_id": campaign.id,
+                            "ip_address": fake_ip,
+                            "timestamp": time_provider.utcnow().isoformat() + "Z",
+                        })
+                        log.info("TEST MODE: simulated open for email_log_id=%s", email_log_entry.id)
+
+                    # ~20% chance of click (only if opened)
+                    if email_log_entry.opened and random.random() < 0.5:
+                        email_log_entry.clicked = True
+                        session.add(EmailClick(
+                            email_log_id=email_log_entry.id,
+                            ip_address=fake_ip,
+                            clicked_at=time_provider.utcnow(),
+                        ))
+                        await fire_webhook_event(session, "email.clicked", {
+                            "email_log_id": email_log_entry.id,
+                            "lead_id": lead.id,
+                            "campaign_id": campaign.id,
+                            "original_url": "https://example.com/test-link",
+                            "ip_address": fake_ip,
+                            "timestamp": time_provider.utcnow().isoformat() + "Z",
+                        })
+                        log.info("TEST MODE: simulated click for email_log_id=%s", email_log_entry.id)
+
+                    # ~15% chance of reply
+                    if random.random() < 0.15:
+                        fake_reply = LeadReply(
+                            lead_id=lead.id,
+                            campaign_id=campaign.id,
+                            inbox_id=inbox.id,
+                            thread_id=email_log_entry.thread_id or "fake-thread",
+                            message_id=f"<fake-reply-{email_log_entry.id}@test>",
+                            snippet="This is a simulated test reply.",
+                            received_at=time_provider.utcnow(),
+                        )
+                        session.add(fake_reply)
+                        await fire_webhook_event(session, "lead.replied", {
+                            "lead_id": lead.id,
+                            "lead_email": lead.email,
+                            "lead_name": lead.name or "",
+                            "thread_id": email_log_entry.thread_id,
+                            "inbox_id": inbox.id,
+                            "inbox_email": inbox.email,
+                            "message_id": fake_reply.message_id,
+                            "timestamp": time_provider.utcnow().isoformat() + "Z",
+                        })
+                        log.info("TEST MODE: simulated reply for email_log_id=%s lead_id=%s", email_log_entry.id, lead.id)
 
         await session.commit()
 

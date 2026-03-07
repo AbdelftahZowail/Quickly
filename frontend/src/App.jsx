@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect } from 'react';
 import Layout from './components/Layout';
 import Campaigns from './pages/Campaigns';
 import AddCampaign from './pages/AddCampaign';
@@ -8,8 +9,13 @@ import Schedule from './pages/Schedule';
 import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Unibox from './pages/Unibox';
+import { api } from './api';
 
 export default function App() {
+  // Register this browser's IP as a known IP (auto-expires after 1 week)
+  useEffect(() => {
+    api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
+  }, []);
   return (
     <Layout>
       <Routes>

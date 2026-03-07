@@ -1,4 +1,7 @@
 """SQLAlchemy ORM models."""
+import secrets
+import uuid
+
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -20,6 +23,16 @@ from app.time import utcnow as _utcnow
 from app.database import Base
 
 
+def _make_public_id() -> str:
+    """Generate a short random public ID (11 chars, URL-safe)."""
+    return secrets.token_urlsafe(8)
+
+
+def _make_open_token() -> str:
+    """Generate a random token for open-tracking URLs (~11 chars, URL-safe)."""
+    return secrets.token_urlsafe(8)
+
+
 class Inbox(Base):
     __tablename__ = "inbox"
     id = Column(Integer, primary_key=True, index=True)
@@ -34,6 +47,9 @@ class Inbox(Base):
     # Leave NULL to use the app's base URL (default / PaaS-friendly behaviour).
     tracking_domain = Column(String(255), nullable=True, default=None)
     created_at = Column(DateTime, default=_utcnow)
+    ramp_up_enabled = Column(Boolean, default=False, nullable=False)
+    ramp_up_period_days = Column(Integer, default=42, nullable=False)  # kept for legacy compat; not used in formula
+    paused = Column(Boolean, default=False, nullable=False)
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     gmail_sync_state = relationship("GmailSyncState", uselist=False, cascade="all, delete-orphan")
@@ -47,6 +63,10 @@ class Lead(Base):
     name = Column(String(255), default="")
     custom_data = Column(JSON, default=dict)  # e.g. {"company": "...", "title": "..."}
     status = Column(String(32), default="active")  # active, unsubscribed, bounced, replied
+    # Email verification: pending, valid, invalid, catch_all, unknown, risky, or null (not verified)
+    email_verification_status = Column(String(32), nullable=True, default=None, index=True)
+    # Raw JSON result from the verification provider
+    email_verification_result = Column(JSON, nullable=True, default=None)
     created_at = Column(DateTime, default=_utcnow)
     campaign_leads = relationship("CampaignLead", back_populates="lead", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="lead")
@@ -61,6 +81,7 @@ class Lead(Base):
 class Campaign(Base):
     __tablename__ = "campaign"
     id = Column(Integer, primary_key=True, index=True)
+    public_id = Column(String(16), unique=True, nullable=False, index=True, default=_make_public_id)
     name = Column(String(255), nullable=False)
     paused = Column(Boolean, default=False)  # If True, skip sending from this campaign
     priority = Column(Integer, default=0, nullable=False)  # Lower = higher priority in priority-based scheduling
@@ -124,6 +145,35 @@ class Sequence(Base):
     preview_text = Column(String(512), nullable=True, default=None)
     wait_days_after_previous = Column(Integer, default=0)  # days after previous sequence
     campaign = relationship("Campaign", back_populates="sequences")
+    variants = relationship(
+        "SequenceVariant",
+        back_populates="sequence",
+        order_by="SequenceVariant.id",
+        cascade="all, delete-orphan",
+    )
+
+
+class SequenceVariant(Base):
+    """A/B test variant for a sequence step.
+
+    When a step has one or more enabled variants, the sender picks one at
+    random (uniform distribution) instead of the step's default content.
+    Both the default content AND named variants participate equally in the
+    random draw (i.e., default + N variants → N+1 options).
+    """
+    __tablename__ = "sequence_variant"
+    id = Column(Integer, primary_key=True, index=True)
+    sequence_id = Column(
+        Integer, ForeignKey("sequence.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    label = Column(String(64), nullable=False, default="")  # e.g. "A", "B", or a descriptive name
+    subject = Column(String(512), default=None)        # None → use sequence subject
+    body = Column(Text, nullable=False, default="")
+    is_html = Column(Boolean, nullable=True, default=None)  # None → use sequence is_html
+    preview_text = Column(String(512), nullable=True, default=None)
+    enabled = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    sequence = relationship("Sequence", back_populates="variants")
 
 
 class CampaignLead(Base):
@@ -167,6 +217,15 @@ class EmailLog(Base):
     # when unspecified, so include that default here to avoid failures when
     # callers omit the value.
     sequence_index = Column(Integer, nullable=False, default=0)
+    # A/B variant that was sent (NULL = default / no variant used)
+    variant_id = Column(
+        Integer, ForeignKey("sequence_variant.id", ondelete="SET NULL"), nullable=True, default=None
+    )
+    # using 16 characters here is plenty for the shorter tokens generated
+    # by ``_make_open_token``; adjust with a migration if you need to shrink
+    # the column further.
+    open_token = Column(String(16), unique=True, nullable=True, index=True, default=_make_open_token)
+    format_override = Column(String(64), nullable=True, default=None)  # why format was overridden
     sent_at = Column(DateTime, default=_utcnow)
     subject = Column(String(512), default="")
     message_id = Column(String(512), default=None)  # RFC 822 Message-ID for In-Reply-To threading
@@ -176,6 +235,7 @@ class EmailLog(Base):
     lead = relationship("Lead", back_populates="email_logs")
     campaign = relationship("Campaign", back_populates="email_logs")
     inbox = relationship("Inbox")
+    variant = relationship("SequenceVariant", foreign_keys=[variant_id])
     # ensure clicks/opens are removed when a log is deleted rather than
     # nullifying the FK (which would cause integrity errors since the
     # column is non-nullable).  our campaign deletion path cascades into
@@ -430,6 +490,22 @@ class Webhook(Base):
     description = Column(String(255), default="")  # optional human-readable label
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class KnownIP(Base):
+    """IP addresses belonging to the app user (collected from sessions).
+
+    Opens/clicks from these IPs are silently ignored to avoid inflating
+    analytics.  Addresses expire after ``expires_at`` unless ``permanent``
+    is ``True``.
+    """
+    __tablename__ = "known_ip"
+    id = Column(Integer, primary_key=True, index=True)
+    ip_address = Column(String(45), nullable=False, index=True)
+    permanent = Column(Boolean, default=False, nullable=False)
+    last_seen_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    expires_at = Column(DateTime, nullable=True)  # NULL for permanent entries
+    created_at = Column(DateTime, default=_utcnow)
 
 
 # All supported webhook event types
