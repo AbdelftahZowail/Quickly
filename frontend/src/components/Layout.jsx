@@ -1,12 +1,14 @@
 import React from 'react';
 import Sidebar from './ui/Sidebar';
 import TestModeBanner from './TestModeBanner';
+import Onboarding from './Onboarding';
 import { NotificationProvider } from '../context/NotificationContext';
 import { LoadingProvider } from '../context/LoadingContext';
 import { DarkModeProvider } from '../context/DarkModeContext';
 import { ConfirmProvider } from '../context/ConfirmContext';
 import { UniboxNotificationsProvider } from '../context/UniboxNotificationsContext';
 import { AppModeProvider, useAppMode } from '../context/AppModeContext';
+import { OnboardingProvider } from '../context/OnboardingContext';
 
 function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
   const { isProduction } = useAppMode();
@@ -53,12 +55,15 @@ export default function Layout({ children }) {
           <ConfirmProvider>
             <UniboxNotificationsProvider>
               <AppModeProvider>
-                <LayoutInner
-                  sidebarCollapsed={sidebarCollapsed}
-                  setSidebarCollapsed={setSidebarCollapsed}
-                >
-                  {children}
-                </LayoutInner>
+                <OnboardingProvider>
+                  <Onboarding />
+                  <LayoutInner
+                    sidebarCollapsed={sidebarCollapsed}
+                    setSidebarCollapsed={setSidebarCollapsed}
+                  >
+                    {children}
+                  </LayoutInner>
+                </OnboardingProvider>
               </AppModeProvider>
             </UniboxNotificationsProvider>
           </ConfirmProvider>

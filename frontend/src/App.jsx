@@ -9,6 +9,7 @@ import Schedule from './pages/Schedule';
 import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Unibox from './pages/Unibox';
+import DeliverabilityTips from './pages/DeliverabilityTips';
 import { api } from './api';
 
 export default function App() {
@@ -29,6 +30,7 @@ export default function App() {
         <Route path="/schedule" element={<Schedule />} />
         <Route path="/analytics" element={<Analytics />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
     </Layout>

@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import logo from '../../assets/quickly_logo.svg';
 import {
@@ -9,8 +9,10 @@ import {
   RiCalendarScheduleLine,
   RiSettingsLine,
   RiSidebarFoldLine,
+  RiInformationLine,
 } from 'react-icons/ri';
 import { useUniboxNotifications } from '../../context/UniboxNotificationsContext';
+import { useOnboarding } from '../../context/OnboardingContext';
 
 // links including icons
 const links = [
@@ -22,9 +24,86 @@ const links = [
   { to: '/settings', label: 'Settings', icon: <RiSettingsLine size={20} /> },
 ];
 
+const APP_VERSION = '0.1.0';
+
+function getOS() {
+  const ua = navigator.userAgent;
+  if (/Windows NT 10|Windows NT 11/.test(ua)) return 'Windows 10/11';
+  if (/Windows NT/.test(ua)) return 'Windows';
+  if (/Mac OS X/.test(ua)) return 'macOS';
+  if (/Android/.test(ua)) return 'Android';
+  if (/iPhone|iPad/.test(ua)) return 'iOS';
+  if (/Linux/.test(ua)) return 'Linux';
+  return 'Unknown';
+}
+
+function getBrowser() {
+  const ua = navigator.userAgent;
+  if (/Edg\//.test(ua)) return 'Edge';
+  if (/OPR\/|Opera/.test(ua)) return 'Opera';
+  if (/Chrome\//.test(ua)) return 'Chrome';
+  if (/Safari\//.test(ua)) return 'Safari';
+  if (/Firefox\//.test(ua)) return 'Firefox';
+  return 'Unknown';
+}
+
+function buildBugUrl() {
+  const body = [
+    '## 🐛 Bug Report',
+    '',
+    '**Describe the bug**',
+    'A clear description of what the bug is.',
+    '',
+    '**Steps to reproduce**',
+    '1. ',
+    '2. ',
+    '3. ',
+    '',
+    '**Expected behavior**',
+    '',
+    '**Actual behavior**',
+    '',
+    '**Screenshots**',
+    '',
+    '**Environment**',
+    `- OS: ${getOS()}`,
+    `- Browser: ${getBrowser()}`,
+    `- Quickly version: ${APP_VERSION}`,
+  ].join('\n');
+  return `https://github.com/AbdelftahZowail/Quickly/issues/new?labels=bug&title=%5BBug%5D%20&body=${encodeURIComponent(body)}`;
+}
+
+function buildFeatureUrl() {
+  const body = [
+    '## 💡 Feature Request',
+    '',
+    '**Is your feature request related to a problem?**',
+    '',
+    '**Describe the solution you\'d like**',
+    '',
+    '**Describe alternatives you\'ve considered**',
+    '',
+    '**Additional context**',
+  ].join('\n');
+  return `https://github.com/AbdelftahZowail/Quickly/issues/new?labels=enhancement&title=%5BFeature%5D%20&body=${encodeURIComponent(body)}`;
+}
+
 export default function Sidebar({ collapsed, onToggle }) {
   const location = useLocation();
   const { count: unreadCount } = useUniboxNotifications();
+  const { startOnboarding } = useOnboarding();
+  const [helpOpen, setHelpOpen] = useState(false);
+  const helpRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (helpRef.current && !helpRef.current.contains(e.target)) {
+        setHelpOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
   const widthClass = collapsed ? 'w-16' : 'w-44';
   const justifyLogo = collapsed ? 'justify-center' : '';
 
@@ -82,15 +161,84 @@ export default function Sidebar({ collapsed, onToggle }) {
         ))}
       </div>
 
-      {/* collapse button moved to right */}
-      <div className="mt-auto flex justify-end">
+      {/* Help item + collapse at bottom */}
+      <div className="mt-auto flex flex-col gap-2">
+
+        {/* Help — styled like nav links, popover opens to the right */}
+        <div className="relative group" ref={helpRef}>
+          <button
+            onClick={() => { setHelpOpen(prev => !prev); }}
+            className={`w-full flex items-center py-2 rounded px-2 transition-colors transition-transform transform-gpu active:scale-95 hover:scale-102 duration-150 whitespace-nowrap ${
+              helpOpen ? 'text-primary font-semibold bg-gray-700' : 'hover:bg-gray-700/50 text-gray-300'
+            }`}
+          >
+            <span className="flex-shrink-0"><RiInformationLine size={20} /></span>
+            {!collapsed && <span className="ml-2">Help</span>}
+          </button>
+
+          {/* Collapsed tooltip */}
+          {collapsed && (
+            <span className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-700 text-white text-xs rounded px-2 py-1 whitespace-nowrap z-10 pointer-events-none shadow-md">
+              Help
+            </span>
+          )}
+
+          {helpOpen && (
+            <div className="absolute bottom-0 left-full ml-2 w-52 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 overflow-hidden">
+
+              {/* Deliverability Tips — navigates to full page */}
+              <button
+                onClick={() => { setHelpOpen(false); startOnboarding(); }}
+                className="w-full text-left block px-3 py-2 text-sm text-gray-300 hover:text-primary hover:bg-gray-700"
+              >
+                App Tour
+              </button>
+
+              <div className="border-t border-gray-700" />
+
+              <NavLink
+                to="/deliverability-tips"
+                onClick={() => setHelpOpen(false)}
+                className="block px-3 py-2 text-sm text-gray-300 hover:text-primary hover:bg-gray-700 !no-underline"
+              >
+                Deliverability Tips
+              </NavLink>
+
+              <div className="border-t border-gray-700" />
+
+              {/* Report a Bug */}
+              <a
+                href={buildBugUrl()}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block px-3 py-2 text-sm text-gray-300 hover:text-primary hover:bg-gray-700"
+              >
+                Report a Bug
+              </a>
+
+              <div className="border-t border-gray-700" />
+
+              {/* Suggest a Feature */}
+              <a
+                href={buildFeatureUrl()}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block px-3 py-2 text-sm text-gray-300 hover:text-primary hover:bg-gray-700"
+              >
+                Suggest a Feature
+              </a>
+            </div>
+          )}
+        </div>
+
+        {/* Collapse toggle */}
+        <div className="flex justify-end mr-1">
         <button
           onClick={onToggle}
           onMouseDown={e => e.preventDefault()}
-          className="text-gray-400 hover:text-primary focus:outline-none focus-visible:outline-none focus:ring-0 bg-transparent focus:bg-transparent active:bg-transparent mr-1 transition-transform duration-200 active:scale-90"
+          className="text-gray-400 hover:text-primary focus:outline-none focus-visible:outline-none focus:ring-0 bg-transparent focus:bg-transparent active:bg-transparent transition-transform duration-200 active:scale-90"
           aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
         >
-          {/* single icon flipped based on state */}
           <RiSidebarFoldLine
             size={24}
             className={`transition-transform duration-300 ${
@@ -98,6 +246,7 @@ export default function Sidebar({ collapsed, onToggle }) {
             }`}
           />
         </button>
+        </div>
       </div>
     </nav>
   );
