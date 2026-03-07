@@ -4,6 +4,7 @@ import { useDarkMode } from '../context/DarkModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 import { useAppMode } from '../context/AppModeContext';
+import { useOnboarding } from '../context/OnboardingContext';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import EmailVerificationSettings from '../components/EmailVerificationSettings';
@@ -29,6 +30,7 @@ export default function Settings() {
   const { darkMode, toggleDarkMode } = useDarkMode();
   const confirm = useConfirm();
   const { isProduction } = useAppMode();
+  const { startOnboarding } = useOnboarding();
 
   /* ── state ── */
   const [strategy, setStrategy] = useState('priority');
@@ -440,11 +442,13 @@ export default function Settings() {
         {/* ──────────────── General ──────────────── */}
         <section id="general" className="mb-10">
           <h2 className="text-lg font-semibold mb-3 border-b pb-2">General</h2>
-          <div className="flex items-center gap-2">
-            <Button size="sm" variant="outline" onClick={toggleDarkMode}>
-              {darkMode ? 'Light Mode' : 'Dark Mode'}
-            </Button>
-            <span className="text-sm text-gray-500">(UI preference only)</span>
+          <div className="flex items-center gap-4 flex-wrap">
+            <div className="flex items-center gap-2">
+              <Button size="sm" variant="outline" onClick={toggleDarkMode}>
+                {darkMode ? 'Light Mode' : 'Dark Mode'}
+              </Button>
+              <span className="text-sm text-gray-500">(UI preference only)</span>
+            </div>
           </div>
         </section>
 
@@ -544,7 +548,7 @@ export default function Settings() {
                     </div>
                     <div className="flex items-center gap-1">
                       <Button size="sm" variant="ghost" onClick={() => toggleActive(wh.id, wh.active)}>
-                        {wh.active ? 'Disable' : 'Enable'}
+                        Enable
                       </Button>
                       <Button size="sm" variant="ghost" onClick={() => startEdit(wh)}>Edit</Button>
                       <Button size="sm" variant="ghost" onClick={() => testWebhook(wh.id)}>Test</Button>
@@ -663,7 +667,7 @@ export default function Settings() {
                       }}
                     />
                     <span className="text-xs font-medium text-gray-600 whitespace-nowrap">
-                      {feature.enabled ? 'Disable' : 'Enable'}
+                      Enable
                     </span>
                   </label>
                 </div>

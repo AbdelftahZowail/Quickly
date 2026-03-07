@@ -179,7 +179,7 @@ export default function EmailVerificationSettings() {
             onChange={e => setEnabled(e.target.checked)}
           />
           <span className="text-xs font-medium text-gray-600 whitespace-nowrap">
-            {enabled ? 'Disable' : 'Enable'}
+            Enable
           </span>
         </label>
       </div>
