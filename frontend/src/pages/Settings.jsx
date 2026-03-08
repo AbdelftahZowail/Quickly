@@ -5,6 +5,7 @@ import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 import { useAppMode } from '../context/AppModeContext';
 import { useOnboarding } from '../context/OnboardingContext';
+import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import EmailVerificationSettings from '../components/EmailVerificationSettings';
@@ -15,6 +16,8 @@ import EmailVerificationSettings from '../components/EmailVerificationSettings';
    ──────────────────────────────────────────────────────────────────────────── */
 const SECTIONS = [
   { id: 'general',           label: 'General' },
+  { id: 'account',           label: 'Account & Security' },
+  { id: 'api-keys',          label: 'API Keys' },
   { id: 'webhooks',          label: 'Webhooks' },
   { id: 'ai',                label: 'AI Features' },
   { id: 'optional-features', label: 'Optional Features' },
@@ -31,10 +34,23 @@ export default function Settings() {
   const confirm = useConfirm();
   const { isProduction } = useAppMode();
   const { startOnboarding } = useOnboarding();
+  const { user, logout } = useAuth();
 
   /* ── state ── */
   const [strategy, setStrategy] = useState('priority');
   const [testMode, setTestMode] = useState(false);
+
+  // Account & Security
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [changePwError, setChangePwError] = useState('');
+  const [changePwSuccess, setChangePwSuccess] = useState('');
+
+  // API Keys
+  const [apiKeys, setApiKeys] = useState([]);
+  const [newKeyName, setNewKeyName] = useState('');
+  const [newKeyExpiry, setNewKeyExpiry] = useState('');
+  const [createdKey, setCreatedKey] = useState(null); // shown once after creation
 
   // Webhooks (new CRUD system)
   const [webhooks, setWebhooks] = useState(() => apiCache.get('/settings/webhooks') || []);
@@ -71,7 +87,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -79,6 +95,7 @@ export default function Settings() {
         api.get('/settings/ai'),
         api.get('/settings/ai/providers'),
         api.get('/settings/known-ips'),
+        api.get('/auth/api-keys'),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
@@ -95,6 +112,7 @@ export default function Settings() {
       setAiProviders(provData.providers || []);
       setKnownIps(ipData.known_ips || []);
       setCurrentIp(ipData.current_ip || '');
+      setApiKeys(keysData || []);
     } catch {}
   }, []);
 
@@ -228,6 +246,40 @@ export default function Settings() {
     try {
       const resp = await api.post('/settings/add-opens');
       notify({ type: 'success', message: `Added opens to ${resp.added} email(s)` });
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  /* ── Account & Security ── */
+  const changePassword = async () => {
+    setChangePwError(''); setChangePwSuccess('');
+    try {
+      await api.put('/auth/change-password', { current_password: currentPassword, new_password: newPassword });
+      setChangePwSuccess('Password changed successfully.');
+      setCurrentPassword(''); setNewPassword('');
+    } catch (e) { setChangePwError(e.message || 'Failed to change password'); }
+  };
+
+  /* ── API Keys ── */
+  const createApiKey = async () => {
+    try {
+      const res = await api.post('/auth/api-keys', {
+        name: newKeyName,
+        ...(newKeyExpiry ? { expires_in_days: parseInt(newKeyExpiry, 10) } : {}),
+      });
+      setCreatedKey(res.key);
+      setNewKeyName(''); setNewKeyExpiry('');
+      const keysData = await api.get('/auth/api-keys');
+      setApiKeys(keysData || []);
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  const revokeApiKey = async id => {
+    const yes = await confirm('Revoke this API key? This cannot be undone.');
+    if (!yes) return;
+    try {
+      await api.delete(`/auth/api-keys/${id}`);
+      setApiKeys(prev => prev.filter(k => k.id !== id));
+      notify({ type: 'success', message: 'API key revoked.' });
     } catch (e) { notify({ type: 'error', message: e.message }); }
   };
 
@@ -450,6 +502,122 @@ export default function Settings() {
               <span className="text-sm text-gray-500">(UI preference only)</span>
             </div>
           </div>
+        </section>
+
+        {/* ──────────────── Account & Security ──────────────── */}
+        <section id="account" className="mb-10">
+          <h2 className="text-lg font-semibold mb-3 border-b pb-2">Account &amp; Security</h2>
+          {user && (
+            <div className="space-y-4">
+              <div className="text-sm">
+                <span className="text-gray-500">Logged in as </span>
+                <span className="font-medium">{user.username}</span>
+                <span className="ml-2 text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 uppercase">{user.role}</span>
+              </div>
+
+              <Card>
+                <h3 className="text-sm font-semibold mb-3">Change Password</h3>
+                <div className="space-y-2 max-w-sm">
+                  <input
+                    type="password"
+                    placeholder="Current password"
+                    className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                    value={currentPassword}
+                    onChange={e => setCurrentPassword(e.target.value)}
+                  />
+                  <input
+                    type="password"
+                    placeholder="New password"
+                    className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                    value={newPassword}
+                    onChange={e => setNewPassword(e.target.value)}
+                  />
+                  <p className="text-xs text-gray-400">Min 8 chars, with upper, lower, and a digit.</p>
+                  {changePwError && <p className="text-xs text-red-500">{changePwError}</p>}
+                  {changePwSuccess && <p className="text-xs text-green-600">{changePwSuccess}</p>}
+                  <Button size="sm" onClick={changePassword} disabled={!currentPassword || !newPassword}>
+                    Update Password
+                  </Button>
+                </div>
+              </Card>
+
+              <Button size="sm" variant="outline" onClick={logout}>Log Out</Button>
+            </div>
+          )}
+        </section>
+
+        {/* ──────────────── API Keys ──────────────── */}
+        <section id="api-keys" className="mb-10">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">API Keys</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Create keys to access the API programmatically. The full key is shown only once — copy it immediately.
+          </p>
+
+          {/* One-time key display */}
+          {createdKey && (
+            <Card className="mb-4 border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20">
+              <h3 className="text-sm font-semibold mb-1 text-green-700 dark:text-green-400">New API Key Created</h3>
+              <p className="text-xs text-gray-500 mb-2">Copy this key now — you won't be able to see it again.</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs bg-white dark:bg-gray-800 border rounded p-2 break-all select-all">{createdKey}</code>
+                <Button size="sm" variant="outline" onClick={() => { navigator.clipboard.writeText(createdKey); notify({ type: 'success', message: 'Copied!' }); }}>
+                  Copy
+                </Button>
+              </div>
+              <Button size="sm" variant="ghost" className="mt-2 text-xs" onClick={() => setCreatedKey(null)}>Dismiss</Button>
+            </Card>
+          )}
+
+          {/* Create key form */}
+          <Card className="mb-4">
+            <h3 className="text-sm font-semibold mb-3">Create API Key</h3>
+            <div className="flex gap-2 items-end">
+              <div className="flex-1">
+                <label className="text-xs text-gray-500">Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. CI/CD Pipeline"
+                  className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={newKeyName}
+                  onChange={e => setNewKeyName(e.target.value)}
+                />
+              </div>
+              <div className="w-32">
+                <label className="text-xs text-gray-500">Expires (days)</label>
+                <input
+                  type="number"
+                  placeholder="Never"
+                  min="1"
+                  className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={newKeyExpiry}
+                  onChange={e => setNewKeyExpiry(e.target.value)}
+                />
+              </div>
+              <Button size="sm" onClick={createApiKey} disabled={!newKeyName.trim()}>Create</Button>
+            </div>
+          </Card>
+
+          {/* Existing keys */}
+          {apiKeys.length === 0 && (
+            <p className="text-sm text-gray-400 italic">No API keys yet.</p>
+          )}
+          {apiKeys.length > 0 && (
+            <div className="space-y-2">
+              {apiKeys.map(k => (
+                <Card key={k.id} className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm font-medium">{k.name}</span>
+                    <span className="ml-2 text-xs text-gray-400">{k.prefix}•••</span>
+                    <span className="ml-2 text-xs text-gray-400">
+                      Created {new Date(k.created_at).toLocaleDateString()}
+                      {k.expires_at && <> · Expires {new Date(k.expires_at).toLocaleDateString()}</>}
+                    </span>
+                  </div>
+                  <Button size="sm" variant="danger" onClick={() => revokeApiKey(k.id)}>Revoke</Button>
+                </Card>
+              ))}
+            </div>
+          )}
         </section>
 
         {/* ──────────────── Webhooks ──────────────── */}
