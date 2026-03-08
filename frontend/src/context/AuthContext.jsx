@@ -2,6 +2,13 @@ import { createContext, useContext, useState, useEffect, useCallback } from 'rea
 
 const AuthContext = createContext(null);
 
+// Access token lifetime in minutes – must match ACCESS_TOKEN_EXPIRE_MINUTES in app/auth.py.
+// We refresh 5 minutes before expiry.
+const ACCESS_TOKEN_EXPIRE_MINUTES = 30;
+const AUTO_REFRESH_INTERVAL_MS = (ACCESS_TOKEN_EXPIRE_MINUTES - 5) * 60 * 1000;
+
+const AuthContext = createContext(null);
+
 // Store the access token in memory only (not localStorage) to prevent XSS access
 let _accessToken = null;
 
@@ -135,7 +142,7 @@ export function AuthProvider({ children }) {
     if (!user) return;
     const interval = setInterval(() => {
       refreshToken();
-    }, 25 * 60 * 1000);
+    }, AUTO_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [user, refreshToken]);
 

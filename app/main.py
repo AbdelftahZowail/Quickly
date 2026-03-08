@@ -131,6 +131,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,
     allow_credentials=True,
+    # Explicit method list; add new HTTP methods here if needed in future routes.
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )

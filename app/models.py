@@ -44,7 +44,7 @@ class User(Base):
     username = Column(String(150), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
     password_hash = Column(String(255), nullable=False)
-    role = Column(String(32), default="admin", nullable=False)  # admin or user
+    role = Column(String(32), default="user", nullable=False)  # admin or user (first user set explicitly to admin in router)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)

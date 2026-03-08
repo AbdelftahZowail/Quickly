@@ -152,7 +152,11 @@ export default function Login() {
                   Sign in
                 </button>
               </>
-            ) : null}
+            ) : (
+              <>
+                {/* Sign-up toggle removed – registration is admin-only after setup */}
+              </>
+            )}
           </p>
         )}
       </div>
