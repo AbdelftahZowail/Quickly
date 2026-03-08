@@ -111,20 +111,65 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Quickly", lifespan=lifespan)
 
-# enable CORS so the frontend (running on a different port) can talk to
-# the API.  The UI typically runs at http://localhost:5173 during
-# development; allow it (and other origins, if needed).  We explicitly
-# list the origin(s) instead of using "*" to avoid issues with
-# credentials later, but using "*" is acceptable for a local dev setup.
+# ---------------------------------------------------------------------------
+# Security middleware (CSP, HSTS, X-Frame-Options, …)
+# ---------------------------------------------------------------------------
+from app.security import SecurityHeadersMiddleware  # noqa: E402
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+# ---------------------------------------------------------------------------
+# CORS – configurable from environment, defaults to localhost dev setup.
+# ---------------------------------------------------------------------------
+import os as _os
 from fastapi.middleware.cors import CORSMiddleware
+
+_cors_origins_str = _os.getenv("CORS_ORIGINS", "http://localhost:5173")
+_cors_origins = [o.strip() for o in _cors_origins_str.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Explicit method list; add new HTTP methods here if needed in future routes.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
 )
+
+# ---------------------------------------------------------------------------
+# Rate limiting – 200 req/min per IP by default on all routes
+# ---------------------------------------------------------------------------
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
+
+limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# ---------------------------------------------------------------------------
+# Auth router (public endpoints: login, register, setup-status, refresh)
+# ---------------------------------------------------------------------------
+from app.routers import auth as auth_router
+app.include_router(auth_router.router)
+
+# ---------------------------------------------------------------------------
+# Protected routers – all require authentication
+# ---------------------------------------------------------------------------
+from app.auth import get_current_user as _auth_dep
+
+_auth_deps = [Depends(_auth_dep)]
+
+inbox.router.dependencies = _auth_deps
+leads.router.dependencies = _auth_deps
+campaigns.router.dependencies = _auth_deps
+test_mode.router.dependencies = _auth_deps
+gmail_oauth.router.dependencies = _auth_deps
+schedule_router.router.dependencies = _auth_deps
+settings_router.router.dependencies = _auth_deps
+unibox_router.router.dependencies = _auth_deps
+# tracking_router has public endpoints (open pixel, click redirect, unsubscribe)
+# so it does NOT get global auth — individual endpoints handle auth internally.
 
 app.include_router(inbox.router)
 app.include_router(leads.router)
@@ -154,7 +199,7 @@ if (BASE_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 @app.get("/api/status")
-async def api_status(request: Request):
+async def api_status(request: Request, user=Depends(_auth_dep)):
     """Schedule and send-job status so you can verify the worker is running."""
     import os
     schedule = getattr(request.app.state, "schedule", None)

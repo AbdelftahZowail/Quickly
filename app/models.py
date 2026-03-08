@@ -33,6 +33,46 @@ def _make_open_token() -> str:
     return secrets.token_urlsafe(8)
 
 
+# ---------------------------------------------------------------------------
+# Authentication models
+# ---------------------------------------------------------------------------
+
+class User(Base):
+    """Application user for authentication."""
+    __tablename__ = "app_user"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(150), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(32), default="user", nullable=False)  # admin or user (first user set explicitly to admin in router)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
+
+
+class APIKey(Base):
+    """HMAC-SHA256 hashed API keys for programmatic access.
+
+    The raw key is shown once at creation; only the HMAC hash is persisted.
+    The ``prefix`` (first 12 chars) lets users identify keys without
+    exposing the secret. Keys are soft-deleted via ``revoked`` flag to
+    preserve audit trails.
+    """
+    __tablename__ = "api_key"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False)
+    name = Column(String(255), nullable=False, default="")
+    key_hash = Column(String(512), nullable=False, unique=True, index=True)
+    prefix = Column(String(16), nullable=False, default="")
+    scopes = Column(JSON, default=list)
+    revoked = Column(Boolean, default=False, nullable=False)
+    last_used_at = Column(DateTime, nullable=True)
+    expires_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    user = relationship("User", back_populates="api_keys")
+
+
 class Inbox(Base):
     __tablename__ = "inbox"
     id = Column(Integer, primary_key=True, index=True)
