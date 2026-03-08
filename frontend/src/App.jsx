@@ -10,29 +10,75 @@ import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Unibox from './pages/Unibox';
 import DeliverabilityTips from './pages/DeliverabilityTips';
+import Login from './pages/Login';
 import { api } from './api';
+import { AuthProvider, useAuth } from './context/AuthContext';
 
-export default function App() {
+function ProtectedRoute({ children }) {
+  const { user, loading } = useAuth();
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-gray-500 text-sm">Loading...</div>
+      </div>
+    );
+  }
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
+}
+
+function AppRoutes() {
+  const { user, loading } = useAuth();
+
   // Register this browser's IP as a known IP (auto-expires after 1 week)
   useEffect(() => {
-    api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
-  }, []);
+    if (user) {
+      api.post('/settings/known-ips/heartbeat', {}).catch(() => {});
+    }
+  }, [user]);
+
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-gray-500 text-sm">Loading...</div>
+      </div>
+    );
+  }
+
   return (
-    <Layout>
-      <Routes>
-        {/* analytics becomes the landing page under root */}
-        <Route path="/" element={<Analytics />} />
-        <Route path="/campaigns" element={<Campaigns />} />
-        <Route path="/campaigns/add" element={<AddCampaign />} />
-        <Route path="/campaigns/:id" element={<CampaignDetail />} />
-        <Route path="/inboxes" element={<Inboxes />} />
-        <Route path="/unibox" element={<Unibox />} />
-        <Route path="/schedule" element={<Schedule />} />
-        <Route path="/analytics" element={<Analytics />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
-        <Route path="*" element={<Navigate to="/" />} />
-      </Routes>
-    </Layout>
+    <Routes>
+      <Route path="/login" element={
+        user ? <Navigate to="/" replace /> : <Login />
+      } />
+      <Route path="/*" element={
+        <ProtectedRoute>
+          <Layout>
+            <Routes>
+              <Route path="/" element={<Analytics />} />
+              <Route path="/campaigns" element={<Campaigns />} />
+              <Route path="/campaigns/add" element={<AddCampaign />} />
+              <Route path="/campaigns/:id" element={<CampaignDetail />} />
+              <Route path="/inboxes" element={<Inboxes />} />
+              <Route path="/unibox" element={<Unibox />} />
+              <Route path="/schedule" element={<Schedule />} />
+              <Route path="/analytics" element={<Analytics />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
+              <Route path="*" element={<Navigate to="/" />} />
+            </Routes>
+          </Layout>
+        </ProtectedRoute>
+      } />
+    </Routes>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
   );
 }
