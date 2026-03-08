@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import secrets
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Response, Request, status
 from pydantic import BaseModel, Field, field_validator
@@ -324,8 +324,7 @@ async def create_api_key(
 
     expires_at = None
     if data.expires_in_days:
-        import datetime as _dt
-        expires_at = utcnow() + _dt.timedelta(days=data.expires_in_days)
+        expires_at = utcnow() + timedelta(days=data.expires_in_days)
 
     api_key = APIKey(
         user_id=user.id,
