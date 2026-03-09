@@ -7,8 +7,6 @@ const AuthContext = createContext(null);
 const ACCESS_TOKEN_EXPIRE_MINUTES = 30;
 const AUTO_REFRESH_INTERVAL_MS = (ACCESS_TOKEN_EXPIRE_MINUTES - 5) * 60 * 1000;
 
-const AuthContext = createContext(null);
-
 // Store the access token in memory only (not localStorage) to prevent XSS access
 let _accessToken = null;
 
@@ -130,10 +128,8 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     (async () => {
       await checkSetup();
-      const refreshed = await refreshToken();
-      if (!refreshed) {
-        setLoading(false);
-      }
+      await refreshToken();
+      setLoading(false);
     })();
   }, [checkSetup, refreshToken]);
 

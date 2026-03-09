@@ -3,7 +3,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 import asyncio
 import urllib.parse as _urlparse
@@ -219,6 +219,14 @@ async def api_status(request: Request, user=Depends(_auth_dep)):
         "test_mode": settings.test_mode,
         "app_mode": os.environ.get("QUICKLY_MODE", "development").lower(),
     }
+
+
+@app.get("/darkmode-init.js")
+async def darkmode_init_js():
+    return FileResponse(
+        str(BASE_DIR / "frontend" / "dist" / "darkmode-init.js"),
+        media_type="application/javascript",
+    )
 
 
 @app.get("/", response_class=FileResponse)

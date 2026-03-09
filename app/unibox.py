@@ -513,7 +513,7 @@ async def _get_or_create_sync_state(db: AsyncSession, inbox_id: int) -> GmailSyn
 
 async def _ensure_access_token(db: AsyncSession, account: GmailAccount) -> str:
     now_utc = time_provider.utcnow()
-    if account.token_expiry and account.token_expiry <= (now_utc + timedelta(minutes=1)):
+    if account.token_expiry and account.token_expiry <= (now_utc + timedelta(minutes=5)):
         client_id, client_secret = await get_google_oauth_credentials(db)
         refreshed = refresh_access_token(account, client_id, client_secret)
         if not refreshed:

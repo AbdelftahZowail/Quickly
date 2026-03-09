@@ -106,7 +106,32 @@ async def run_send_job():
             )
             already_sent = sent_count_result.scalar() or 0
             quota_remaining = max_per_day - already_sent
+
+            result = await session.execute(
+                select(QueueSlot, CampaignLead, Campaign, Lead, Sequence)
+                .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+                .join(Campaign, CampaignLead.campaign_id == Campaign.id)
+                .join(Lead, CampaignLead.lead_id == Lead.id)
+                .join(
+                    Sequence,
+                    (Sequence.campaign_id == Campaign.id)
+                    & (Sequence.position == QueueSlot.sequence_index),
+                )
+                .options(selectinload(Sequence.variants))
+                .where(
+                    QueueSlot.inbox_id == inbox.id,
+                    func.date(QueueSlot.scheduled_date) == today,
+                    QueueSlot.scheduled_date <= now,
+                )
+                .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
+            )
+            rows = result.all()
+
             if quota_remaining <= 0:
+                if not rows:
+                    # An inbox that already exhausted its quota but has no due
+                    # work should not emit repeated daily_limit safeguards.
+                    continue
                 # we would break the daily limit even before sending a single
                 # message; try a recalculation to redistribute, then report.
                 log.warning("Daily limit hit for inbox %s; attempting recalculation", inbox.email)
@@ -146,6 +171,9 @@ async def run_send_job():
                     )
                 continue
 
+            if not rows:
+                continue
+
             # For Gmail inboxes, pre-fetch and refresh the access token
             gmail_token = ""
             ga_result = await session.execute(
@@ -153,8 +181,8 @@ async def run_send_job():
             )
             ga = ga_result.scalar_one_or_none()
             if ga:
-                # Refresh token if expired (or within 5 min of expiry)
-                if ga.token_expiry and ga.token_expiry <= time_provider.utcnow():
+                # Refresh token if expired or within 5 min of expiry
+                if ga.token_expiry and ga.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
                     refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
                     if refreshed:
                         await session.flush()
@@ -170,26 +198,6 @@ async def run_send_job():
             else:
                 log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
                 continue
-
-            result = await session.execute(
-                select(QueueSlot, CampaignLead, Campaign, Lead, Sequence)
-                .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
-                .join(Campaign, CampaignLead.campaign_id == Campaign.id)
-                .join(Lead, CampaignLead.lead_id == Lead.id)
-                .join(
-                    Sequence,
-                    (Sequence.campaign_id == Campaign.id)
-                    & (Sequence.position == QueueSlot.sequence_index),
-                )
-                .options(selectinload(Sequence.variants))
-                .where(
-                    QueueSlot.inbox_id == inbox.id,
-                    func.date(QueueSlot.scheduled_date) == today,
-                    QueueSlot.scheduled_date <= now,
-                )
-                .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
-            )
-            rows = result.all()
 
             sent_this_inbox = 0
             # Use the warmup-aware effective limit as the per-inbox rate cap.
@@ -506,6 +514,8 @@ async def run_send_job():
                     gmail_account=ga,
                     thread_id=prev_thread_id,
                     list_unsubscribe_url=list_unsub_url,
+                    google_client_id=g_client_id,
+                    google_client_secret=g_client_secret,
                 )
 
                 # ── Handle permanent failure (bounce / auth) ─────────────────
