@@ -142,8 +142,13 @@ async def get_current_user(
     api_key_header = request.headers.get("X-API-Key")
     if api_key_header:
         hashed = hash_api_key(api_key_header)
+        now = utcnow()
         result = await db.execute(
-            select(APIKey).where(APIKey.key_hash == hashed, APIKey.revoked == False)  # noqa: E712
+            select(APIKey).where(
+                APIKey.key_hash == hashed,
+                APIKey.revoked == False,  # noqa: E712
+                (APIKey.expires_at == None) | (APIKey.expires_at > now),  # noqa: E711
+            )
         )
         ak = result.scalar_one_or_none()
         if ak is None:

@@ -10,6 +10,7 @@ import urllib.request
 import urllib.error
 from dataclasses import dataclass
 import email.policy
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 from email.utils import make_msgid
 from pathlib import Path
@@ -260,6 +261,8 @@ def _send_via_gmail(
     gmail_account: GmailAccount | None = None,
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    google_client_id: str = "",
+    google_client_secret: str = "",
 ) -> Optional[SendResult]:
     """
     Send one email via Gmail API using an OAuth access token or ``GmailAccount``
@@ -277,9 +280,11 @@ def _send_via_gmail(
     """
     # prefer the token on the account if one is supplied
     if gmail_account:
-        # make sure the access token is fresh; the helper will update the model
-        if gmail_account.token_expiry and gmail_account.token_expiry <= time_provider.utcnow():
-            refreshed = refresh_access_token(gmail_account)
+        # make sure the access token is fresh; refresh proactively 5 min before expiry
+        if gmail_account.token_expiry and gmail_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
+            _cid = google_client_id or settings.google_client_id
+            _csec = google_client_secret or settings.google_client_secret
+            refreshed = refresh_access_token(gmail_account, _cid, _csec)
             if not refreshed:
                 log.error("Gmail send: token refresh failed for %s", gmail_account.google_email)
                 return None
@@ -298,8 +303,8 @@ def _send_via_gmail(
             {
                 "refresh_token": gmail_account.refresh_token,
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "client_id": settings.google_client_id,
-                "client_secret": settings.google_client_secret,
+                "client_id": google_client_id or settings.google_client_id,
+                "client_secret": google_client_secret or settings.google_client_secret,
                 "scopes": ["https://www.googleapis.com/auth/gmail.send"],
             }
         )
@@ -352,6 +357,7 @@ def _send_via_gmail(
             gmail_account.access_token = creds.token
             if getattr(creds, "expiry", None):
                 gmail_account.token_expiry = creds.expiry
+            gmail_account.updated_at = datetime.utcnow()
 
         # second call to get the real Message-ID header
         real_message_id = message_id
@@ -467,6 +473,8 @@ def send_email(
     gmail_account: Optional[GmailAccount] = None,
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    google_client_id: str = "",
+    google_client_secret: str = "",
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via Gmail API.
 
@@ -518,4 +526,6 @@ def send_email(
         gmail_account=gmail_account,
         thread_id=thread_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        google_client_id=google_client_id,
+        google_client_secret=google_client_secret,
     )

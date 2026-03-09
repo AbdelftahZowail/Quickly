@@ -29,6 +29,17 @@ from tests.conftest import (
 )
 
 
+class _SessionCtx:
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return None
+
+
 @pytest.mark.asyncio
 async def test_daily_limit_prevents_extra_sends_and_fires_webhook(session, monkeypatch):
     inbox = await make_inbox(session, max_emails_per_day=1)
@@ -66,6 +77,30 @@ async def test_daily_limit_prevents_extra_sends_and_fires_webhook(session, monke
     from app.models import QueueSlot
     res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
     assert res2.scalar() == 1
+
+
+@pytest.mark.asyncio
+async def test_daily_limit_does_not_fire_without_due_queue_rows(session, monkeypatch):
+    inbox = await make_inbox(session, max_emails_per_day=1)
+    campaign = await make_campaign(session, sending_hours_start="00:00", sending_hours_end="23:59")
+    lead = await make_lead(session)
+    await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id, sent_at=datetime.utcnow())
+    await session.flush()
+
+    events = []
+
+    async def fake_webhook(db, event, data):
+        events.append((event, data))
+
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
+    monkeypatch.setattr("app.jobs.get_google_oauth_credentials", lambda db: ("", ""))
+
+    await run_send_job()
+
+    assert not any(ev[0] == "daily_limit" and ev[1].get("inbox_id") == inbox.id for ev in events)
 
 
 @pytest.mark.asyncio
