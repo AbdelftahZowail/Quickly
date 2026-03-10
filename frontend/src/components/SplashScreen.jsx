@@ -1,0 +1,56 @@
+export default function SplashScreen() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <style>{`
+        @keyframes animate-svg-stroke-1 {
+          0% {
+            stroke-dashoffset: 5157.353544540851px;
+            stroke-dasharray: 5157.353544540851px;
+          }
+          100% {
+            stroke-dashoffset: 0;
+            stroke-dasharray: 5157.353544540851px;
+          }
+        }
+        @keyframes animate-svg-fill-1 {
+          0% { fill: transparent; }
+          100% { fill: rgb(20, 184, 166); }
+        }
+        .svg-elem-1 {
+          animation:
+            animate-svg-stroke-1 1s cubic-bezier(0.755, 0.05, 0.855, 0.06) 0s both,
+            animate-svg-fill-1 0.7s cubic-bezier(0.47, 0, 0.745, 0.715) 0.8s both;
+        }
+        @keyframes animate-svg-stroke-2 {
+          0% {
+            stroke-dashoffset: 3989.600341796875px;
+            stroke-dasharray: 3989.600341796875px;
+          }
+          100% {
+            stroke-dashoffset: 0;
+            stroke-dasharray: 3989.600341796875px;
+          }
+        }
+        @keyframes animate-svg-fill-2 {
+          0% { fill: transparent; }
+          100% { fill: rgb(255, 255, 255); }
+        }
+        .svg-elem-2 {
+          animation:
+            animate-svg-stroke-2 1s cubic-bezier(0.755, 0.05, 0.855, 0.06) 0.12s both,
+            animate-svg-fill-2 0.7s cubic-bezier(0.47, 0, 0.745, 0.715) 0.9s both;
+        }
+      `}</style>
+      <svg width="80" height="80" viewBox="0 0 1641 1641" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="820.5" cy="820.5" r="820.5" fill="#14B8A6" className="svg-elem-1" />
+        <path
+          d="M866.897 692.185L1200.86 228.584C1201.34 227.923 1200.86 227 1200.05 227H748.469C748.078 227 747.723 227.227 747.56 227.582L440.652 894.768C440.347 895.43 440.831 896.185 441.561 896.185H768.914C769.658 896.185 770.142 896.97 769.807 897.635L512.947 1408.18C512.433 1409.2 513.761 1410.15 514.558 1409.32L1200.4 702.94C1201.01 702.314 1200.58 701.263 1199.71 701.244L867.686 693.77C866.881 693.752 866.426 692.839 866.897 692.185Z"
+          fill="white"
+          stroke="white"
+          strokeWidth="63"
+          className="svg-elem-2"
+        />
+      </svg>
+    </div>
+  );
+}

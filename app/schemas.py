@@ -23,6 +23,7 @@ class LeadResponse(BaseModel):
     name: str
     custom_data: Dict[str, Any]
     status: str
+    provider: Optional[str] = None
     created_at: datetime
 
     class Config:
@@ -34,7 +35,7 @@ class InboxCreate(BaseModel):
     display_name: str = ""
     max_emails_per_day: int = 50
     wait_minutes_between: int = 5
-    provider: str = "gmail"  # gmail (only supported provider)
+    provider: str = "gmail"  # gmail | office365
     tracking_domain: Optional[str] = None  # custom hostname for tracking links
     ramp_up_enabled: bool = False
     ramp_up_period_days: int = 42
@@ -162,6 +163,8 @@ class CampaignCreate(BaseModel):
     send_all_as_text: bool = False
     # Timezone (IANA name e.g. "America/New_York"); None = user's local timezone
     timezone: Optional[str] = None
+    # When True, prefer inboxes matching the lead's email provider (Google → Gmail, O365 → Office 365)
+    match_lead_provider: bool = True
 
 
 class CampaignUpdate(BaseModel):
@@ -180,6 +183,7 @@ class CampaignUpdate(BaseModel):
     send_first_as_text: Optional[bool] = None
     send_all_as_text: Optional[bool] = None
     timezone: Optional[str] = None
+    match_lead_provider: Optional[bool] = None
 
 
 class CampaignStats(BaseModel):
@@ -232,6 +236,7 @@ class CampaignResponse(BaseModel):
     send_first_as_text: bool = False
     send_all_as_text: bool = False
     timezone: Optional[str] = None
+    match_lead_provider: bool = True
     created_at: datetime
 
     # new stats object; the frontend can always rely on ``stats`` being

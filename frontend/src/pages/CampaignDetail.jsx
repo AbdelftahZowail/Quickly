@@ -731,6 +731,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Name</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Stage</th>
+                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Provider</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Enrolled</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Sending</th>
                 {customFields.map(f => (
@@ -762,6 +763,17 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                   </td>
                   {/* stage */}
                   <td className="px-4 py-2.5 text-gray-600 whitespace-nowrap">{l.stage || '—'}</td>
+                  {/* provider */}
+                  <td className="px-4 py-2.5 whitespace-nowrap">
+                    {l.provider
+                      ? <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${
+                          l.provider === 'Google Workspace' ? 'bg-blue-100 text-blue-700' :
+                          l.provider === 'Office 365'       ? 'bg-orange-100 text-orange-700' :
+                          l.provider === 'Unknown'          ? 'bg-gray-100 text-gray-500' :
+                          'bg-purple-100 text-purple-700'
+                        }`}>{l.provider}</span>
+                      : <span className="text-gray-300 text-xs">—</span>}
+                  </td>
                   {/* enrolled date */}
                   <td className="px-4 py-2.5 text-gray-500 whitespace-nowrap">
                     {new Date(l.enrolled_at).toLocaleDateString()}
@@ -1539,6 +1551,7 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     add_unsubscribe_header:campaign.add_unsubscribe_header ?? true,
     send_first_as_text:    campaign.send_first_as_text    ?? false,
     send_all_as_text:      campaign.send_all_as_text      ?? false,
+    match_lead_provider:   campaign.match_lead_provider   ?? true,
     paused:                campaign.paused               ?? false,
     timezone:              campaign.timezone              ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
@@ -1613,6 +1626,7 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     { key: 'add_unsubscribe_header',   label: 'Add List-Unsubscribe header (recommended)' },
     { key: 'send_first_as_text',       label: 'Send first email as plain text', disabled: form.send_all_as_text },
     { key: 'send_all_as_text',         label: 'Send all emails as plain text' },
+    { key: 'match_lead_provider',      label: 'Match lead provider — send from Google inboxes to Google leads, Office 365 to Office 365 (falls back to any inbox if none match)' },
   ];
 
   return (

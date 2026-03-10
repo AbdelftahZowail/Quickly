@@ -71,6 +71,7 @@ def _campaign_to_response(
         send_first_as_text=bool(getattr(campaign, 'send_first_as_text', False)),
         send_all_as_text=bool(getattr(campaign, 'send_all_as_text', False)),
         timezone=getattr(campaign, 'timezone', None),
+        match_lead_provider=bool(getattr(campaign, 'match_lead_provider', False)),
         created_at=campaign.created_at,
         stats=stats,
     )
@@ -256,6 +257,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         send_first_as_text=data.send_first_as_text,
         send_all_as_text=data.send_all_as_text,
         timezone=data.timezone,
+        match_lead_provider=data.match_lead_provider,
     )
     db.add(campaign)
     await db.flush()
@@ -499,6 +501,18 @@ async def update_campaign(
         campaign.send_first_as_text = data.send_first_as_text
     if data.send_all_as_text is not None:
         campaign.send_all_as_text = data.send_all_as_text
+    if data.match_lead_provider is not None:
+        old_match = getattr(campaign, 'match_lead_provider', False)
+        campaign.match_lead_provider = data.match_lead_provider
+        if old_match != data.match_lead_provider:
+            # Inbox assignment logic changed; rebuild queue so leads get the right inbox
+            await db.flush()
+            log.info(
+                "Campaign %s match_lead_provider changed (%s -> %s); triggering queue recalculation",
+                campaign_id, old_match, data.match_lead_provider,
+            )
+            from app.routers.schedule import recalculate_all_campaigns
+            await recalculate_all_campaigns(db)
     if data.timezone is not None:
         old_tz = campaign.timezone
         campaign.timezone = data.timezone if data.timezone else None
@@ -538,6 +552,13 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
         sending_hours_end=original.sending_hours_end,
         wait_minutes_between=original.wait_minutes_between,
         stop_on_reply=original.stop_on_reply,
+        timezone=original.timezone,
+        track_opens=original.track_opens,
+        track_clicks=original.track_clicks,
+        add_unsubscribe_header=original.add_unsubscribe_header,
+        send_first_as_text=original.send_first_as_text,
+        send_all_as_text=original.send_all_as_text,
+        match_lead_provider=original.match_lead_provider,
     )
     db.add(new_campaign)
     await db.flush()
@@ -904,6 +925,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "interest_status": cl.interest_status,
             "sending_paused": cl.sending_paused,
             "email_verification_status": lead.email_verification_status,
+            "provider": lead.provider,
         }
         for cl, lead in rows
     ]
@@ -1388,9 +1410,11 @@ async def bulk_add_leads_to_campaign(
     For each entry: find existing lead by email (or create), then enroll if not already enrolled.
     Queues slots for each newly enrolled lead using the bulk schedule
     (accepts a single id as well; does NOT perform a full recalculate).    """
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-    if not result.scalar_one_or_none():
+    campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign_obj = campaign_result.scalar_one_or_none()
+    if not campaign_obj:
         raise HTTPException(404, "Campaign not found")
+    match_provider = getattr(campaign_obj, "match_lead_provider", False)
 
     if not leads_data:
         raise HTTPException(400, "No leads provided")
@@ -1411,6 +1435,8 @@ async def bulk_add_leads_to_campaign(
     already_enrolled = 0
     errors = 0
     duplicate_leads: list[str] = []
+    # Track new enrollments for bulk scheduling after provider detection
+    new_enrollments: list[tuple[int, int, str, bool]] = []  # (cl.id, lead.id, email, already_has_provider)
 
     for entry in leads_data:
         email = entry.email.strip().lower()
@@ -1468,23 +1494,12 @@ async def bulk_add_leads_to_campaign(
                     already_enrolled += 1
                     continue
 
-            # Enroll and queue
+            # Enroll — scheduling happens after all leads are enrolled (see below)
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)
             await db.flush()
-            # schedule using bulk API even for a single lead
-            await reserve_slots_for_new_leads_bulk(db, [cl.id], campaign_id)
-
-            # Count slots created
-            slot_count_result = await db.execute(
-                select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
-            )
-            slots = slot_count_result.scalar() or 0
-            log.info(
-                "bulk_add_leads: enrolled lead %s in campaign %s — %d slot(s)",
-                lead.id, campaign_id, slots,
-            )
-            results.append({"email": email, "status": "added", "lead_id": lead.id, "slots_created": slots})
+            new_enrollments.append((cl.id, lead.id, email, bool(lead.provider)))
+            results.append({"email": email, "status": "added", "lead_id": lead.id, "slots_created": 0})
             added += 1
 
         except Exception as exc:
@@ -1492,11 +1507,66 @@ async def bulk_add_leads_to_campaign(
             results.append({"email": email, "status": "error", "detail": str(exc)})
             errors += 1
 
+    # ── Detect providers then schedule all new enrollments ──────────────────
+    if new_enrollments:
+        if match_provider:
+            # Providers must be known before queue slot assignment so the correct
+            # inbox type is selected (Google → Gmail, Office 365 → Office365).
+            from app.email_provider import detect_provider_for_email
+            needs_detection = [
+                (cl_id, lead_id, email)
+                for cl_id, lead_id, email, has_prov in new_enrollments
+                if not has_prov
+            ]
+            for _, lead_id, email in needs_detection:
+                try:
+                    provider = await detect_provider_for_email(email)
+                    if provider:
+                        lr = await db.execute(select(Lead).where(Lead.id == lead_id))
+                        lead_obj = lr.scalar_one_or_none()
+                        if lead_obj and lead_obj.provider != provider:
+                            lead_obj.provider = provider
+                            log.info("Provider detected for lead %s (%s): %s", lead_id, email, provider)
+                except Exception as exc:
+                    log.debug("Provider detection failed for lead %s %s: %s", lead_id, email, exc)
+            if needs_detection:
+                await db.flush()
+
+        # Schedule all newly enrolled leads in one bulk call
+        new_cl_ids = [e[0] for e in new_enrollments]
+        await reserve_slots_for_new_leads_bulk(db, new_cl_ids, campaign_id)
+
+        # Count slots per lead and populate response
+        slot_counts_result = await db.execute(
+            select(QueueSlot.campaign_lead_id, func.count(QueueSlot.id))
+            .where(QueueSlot.campaign_lead_id.in_(new_cl_ids))
+            .group_by(QueueSlot.campaign_lead_id)
+        )
+        slot_counts = {row[0]: row[1] for row in slot_counts_result.all()}
+        cl_id_by_lead = {e[1]: e[0] for e in new_enrollments}
+        for r in results:
+            if r.get("status") == "added":
+                cl_id = cl_id_by_lead.get(r["lead_id"])
+                if cl_id:
+                    r["slots_created"] = slot_counts.get(cl_id, 0)
+                    log.info(
+                        "bulk_add_leads: enrolled lead %s in campaign %s — %d slot(s)",
+                        r["lead_id"], campaign_id, r["slots_created"],
+                    )
+
     # Trigger background email verification if requested
     added_lead_ids = [r["lead_id"] for r in results if r.get("status") == "added" and r.get("lead_id")]
     if verify_emails and added_lead_ids:
         import asyncio
         asyncio.create_task(_run_background_verification(added_lead_ids))
+
+    # When provider matching is disabled, still detect providers in the background
+    # for leads that don't have one yet (future use / analytics).
+    if not match_provider:
+        needs_bg = [(lead_id, email) for _, lead_id, email, has_prov in new_enrollments if not has_prov]
+        if needs_bg:
+            import asyncio
+            asyncio.create_task(_detect_providers_background(needs_bg))
 
     return {
         "ok": True,
@@ -1511,6 +1581,27 @@ async def bulk_add_leads_to_campaign(
 
 
 # ── Background email verification ────────────────────────────────────────────
+
+async def _detect_providers_background(lead_email_pairs: list[tuple[int, str]]) -> None:
+    """Detect email provider for each lead via DNS MX lookup and persist the result."""
+    from app.database import AsyncSessionLocal
+    from app.email_provider import detect_provider_for_email
+
+    async with AsyncSessionLocal() as db:
+        for lead_id, email in lead_email_pairs:
+            try:
+                provider = await detect_provider_for_email(email)
+                if provider:
+                    lead_result = await db.execute(select(Lead).where(Lead.id == lead_id))
+                    lead = lead_result.scalar_one_or_none()
+                    if lead and lead.provider != provider:
+                        lead.provider = provider
+                        await db.flush()
+                        log.info("Provider detected for lead %s (%s): %s", lead_id, email, provider)
+            except Exception as exc:
+                log.debug("Provider detection failed for lead %s %s: %s", lead_id, email, exc)
+        await db.commit()
+
 
 async def _run_background_verification(lead_ids: list[int]):
     """Verify emails for the given lead IDs in the background."""
@@ -1711,9 +1802,11 @@ async def import_campaign_leads(
     db: AsyncSession = Depends(get_db),
 ):
     """Import leads from a CSV file. Expects columns: email, name, and any custom fields."""
-    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
-    if not result.scalar_one_or_none():
+    campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign_obj = campaign_result.scalar_one_or_none()
+    if not campaign_obj:
         raise HTTPException(404, "Campaign not found")
+    match_provider = getattr(campaign_obj, "match_lead_provider", False)
 
     contents = await file.read()
     text = contents.decode("utf-8-sig")  # handle BOM from Excel
@@ -1742,6 +1835,8 @@ async def import_campaign_leads(
     duplicate_leads: list[str] = []
     results_list = []
     seen_emails: set[str] = set()
+    # Track new enrollments for bulk scheduling after provider detection
+    new_enrollments: list[tuple[int, int, str, bool]] = []  # (cl.id, lead.id, email, already_has_provider)
 
     for row_num, row in enumerate(reader, start=2):
         # Normalize keys
@@ -1811,7 +1906,7 @@ async def import_campaign_leads(
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)
             await db.flush()
-            await reserve_slots_for_new_leads_bulk(db, [cl.id], campaign_id)
+            new_enrollments.append((cl.id, lead.id, email, bool(lead.provider)))
             added += 1
             results_list.append({"row": row_num, "email": email, "status": "added", "lead_id": lead.id})
         except Exception as exc:
@@ -1819,11 +1914,48 @@ async def import_campaign_leads(
             results_list.append({"row": row_num, "email": email, "status": "error", "detail": str(exc)})
             errors += 1
 
+    # ── Detect providers then schedule all new enrollments ──────────────────
+    if new_enrollments:
+        if match_provider:
+            # Providers must be known before queue slot assignment so the correct
+            # inbox type is selected (Google → Gmail, Office 365 → Office365).
+            from app.email_provider import detect_provider_for_email
+            needs_detection = [
+                (cl_id, lead_id, email)
+                for cl_id, lead_id, email, has_prov in new_enrollments
+                if not has_prov
+            ]
+            for _, lead_id, email in needs_detection:
+                try:
+                    provider = await detect_provider_for_email(email)
+                    if provider:
+                        lr = await db.execute(select(Lead).where(Lead.id == lead_id))
+                        lead_obj = lr.scalar_one_or_none()
+                        if lead_obj and lead_obj.provider != provider:
+                            lead_obj.provider = provider
+                            log.info("Provider detected for lead %s (%s): %s", lead_id, email, provider)
+                except Exception as exc:
+                    log.debug("Provider detection failed for lead %s %s: %s", lead_id, email, exc)
+            if needs_detection:
+                await db.flush()
+
+        # Schedule all newly enrolled leads in one bulk call
+        new_cl_ids = [e[0] for e in new_enrollments]
+        await reserve_slots_for_new_leads_bulk(db, new_cl_ids, campaign_id)
+
     # Trigger background email verification if requested
     added_lead_ids = [r["lead_id"] for r in results_list if r.get("status") == "added" and r.get("lead_id")]
     if verify_emails and added_lead_ids:
         import asyncio
         asyncio.create_task(_run_background_verification(added_lead_ids))
+
+    # When provider matching is disabled, still detect providers in the background
+    # for leads that don't have one yet (future use / analytics).
+    if not match_provider:
+        needs_bg = [(lead_id, email) for _, lead_id, email, has_prov in new_enrollments if not has_prov]
+        if needs_bg:
+            import asyncio
+            asyncio.create_task(_detect_providers_background(needs_bg))
 
     return {
         "ok": True,
@@ -1835,3 +1967,34 @@ async def import_campaign_leads(
         "total_rows": added + already_enrolled + duplicates_in_batch + errors,
         "verification_queued": verify_emails and bool(added_lead_ids),
     }
+
+
+@router.post("/{campaign_id}/leads/detect-providers")
+async def detect_campaign_lead_providers(
+    campaign_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger background MX-based provider detection for all leads in this campaign.
+
+    Updates ``lead.provider`` for every enrolled lead that does not yet have
+    a detected provider (or re-detects if force=true).  Detection runs
+    asynchronously; the endpoint returns immediately.
+    """
+    result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, "Campaign not found")
+
+    # Fetch all distinct leads enrolled in this campaign
+    lead_result = await db.execute(
+        select(Lead.id, Lead.email)
+        .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+        .where(CampaignLead.campaign_id == campaign_id)
+        .distinct()
+    )
+    pairs = [(row.id, row.email) for row in lead_result.all()]
+
+    if pairs:
+        import asyncio
+        asyncio.create_task(_detect_providers_background(pairs))
+
+    return {"ok": True, "queued": len(pairs)}

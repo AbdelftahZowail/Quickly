@@ -17,6 +17,10 @@ from app.models import Inbox, GmailAccount
 log = logging.getLogger("quickly.gmail_oauth")
 
 router = APIRouter(tags=["gmail-oauth"])
+# Public router – no auth required. Google redirects the browser here
+# after the user consents; the httpOnly cookie may not be present on the
+# callback request (cross-site redirect, session expiry, dev overrides).
+callback_router = APIRouter(tags=["gmail-oauth"])
 
 # Google OAuth endpoints
 GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
@@ -207,7 +211,7 @@ async def google_authorize(
     return RedirectResponse(url)
 
 
-@router.get("/oauth/google/callback")
+@callback_router.get("/oauth/google/callback")
 async def google_callback(
     request: Request,
     background_tasks: BackgroundTasks,

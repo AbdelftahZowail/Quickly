@@ -25,12 +25,16 @@ from app.models import (
     EmailLog,
     LeadReply,
     GmailAccount,
+    Office365Account,
     LeadUnsubscribeToken,
+    GmailMessage,
+    Office365Message,
 )
-from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure
+from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
 from app.routers.gmail_oauth import refresh_access_token
-from app.app_settings import get_google_oauth_credentials
+from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
+from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
 
@@ -86,6 +90,8 @@ async def run_send_job():
         total_sent = 0
         # Pre-fetch Google OAuth credentials once for all Gmail inboxes
         g_client_id, g_client_secret = await get_google_oauth_credentials(session)
+        # Pre-fetch Office 365 OAuth credentials once for all O365 inboxes
+        o365_client_id, o365_client_secret, o365_tenant_id = await get_office365_oauth_credentials(session)
 
         # Fallback tracking base URL (used when an inbox has no custom domain)
         from app.settings_manager import settings as _settings
@@ -174,30 +180,55 @@ async def run_send_job():
             if not rows:
                 continue
 
-            # For Gmail inboxes, pre-fetch and refresh the access token
+            # ── Fetch provider-specific credentials ──────────────────────
             gmail_token = ""
-            ga_result = await session.execute(
-                select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
-            )
-            ga = ga_result.scalar_one_or_none()
-            if ga:
-                # Refresh token if expired or within 5 min of expiry
-                if ga.token_expiry and ga.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-                    refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
-                    if refreshed:
-                        await session.flush()
-                    else:
-                        log.error("Gmail token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
-                        await fire_webhook_event(
-                            session,
-                            "token_expired",
-                            {"inbox_id": inbox.id, "inbox_email": inbox.email},
-                        )
-                        continue
-                gmail_token = ga.access_token
+            ga = None
+            o365_account = None
+
+            if inbox.provider == "office365":
+                o365_res = await session.execute(
+                    select(Office365Account).where(Office365Account.inbox_id == inbox.id)
+                )
+                o365_account = o365_res.scalar_one_or_none()
+                if o365_account:
+                    if o365_account.token_expiry and o365_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
+                        refreshed = refresh_office365_token(o365_account, o365_client_id, o365_client_secret, o365_tenant_id)
+                        if refreshed:
+                            await session.flush()
+                        else:
+                            log.error("Office 365 token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
+                            await fire_webhook_event(
+                                session,
+                                "token_expired",
+                                {"inbox_id": inbox.id, "inbox_email": inbox.email},
+                            )
+                            continue
+                else:
+                    log.warning("Office 365 inbox %s (%s) has no Office365Account — skipping", inbox.id, inbox.email)
+                    continue
             else:
-                log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
-                continue
+                # Default: Gmail
+                ga_result = await session.execute(
+                    select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
+                )
+                ga = ga_result.scalar_one_or_none()
+                if ga:
+                    if ga.token_expiry and ga.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
+                        refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
+                        if refreshed:
+                            await session.flush()
+                        else:
+                            log.error("Gmail token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
+                            await fire_webhook_event(
+                                session,
+                                "token_expired",
+                                {"inbox_id": inbox.id, "inbox_email": inbox.email},
+                            )
+                            continue
+                    gmail_token = ga.access_token
+                else:
+                    log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
+                    continue
 
             sent_this_inbox = 0
             # Use the warmup-aware effective limit as the per-inbox rate cap.
@@ -303,6 +334,10 @@ async def run_send_job():
                 reply_to_msg_id = None
                 prev_thread_id = None
                 references_chain = None
+                reply_graph_message_id = None  # O365 Graph internal message ID for reply API
+                prev_email_body_plain: str = ""
+                prev_email_body_html: str = ""
+                prev_sent_at = None
 
                 # ── A/B variant selection ─────────────────────────────────────
                 chosen_variant_id = None
@@ -356,6 +391,26 @@ async def run_send_job():
                         )
                         # Gmail threadId from most recent
                         prev_thread_id = all_logs[-1].thread_id
+                        # Guard: reject a thread_id that belongs to a *different* campaign
+                        # for this lead.  Gmail may subject-match the very first email of
+                        # this campaign into an existing thread from a previous campaign with
+                        # the same subject — we must not continue that foreign thread.
+                        if prev_thread_id:
+                            _cross_camp_row = await session.execute(
+                                select(EmailLog.id).where(
+                                    EmailLog.lead_id == lead.id,
+                                    EmailLog.thread_id == prev_thread_id,
+                                    EmailLog.campaign_id != campaign.id,
+                                ).limit(1)
+                            )
+                            if _cross_camp_row.scalar_one_or_none():
+                                log.warning(
+                                    "Thread %s for lead_id=%s is shared with another "
+                                    "campaign – clearing thread_id to prevent "
+                                    "cross-campaign contamination",
+                                    prev_thread_id, lead.id,
+                                )
+                                prev_thread_id = None
                         # Subject: Re: <original subject> from the FIRST email that had a real subject
                         first_with_subject = next(
                             (e for e in all_logs if e.subject and e.subject.strip() and e.subject != "(no subject)"),
@@ -369,6 +424,80 @@ async def run_send_job():
                                 subject = f"Re: {orig_subj}"
                         else:
                             subject = "(no subject)"
+
+                        # Fetch the previous email's body for quoting from the
+                        # sequence/variant definition.  This is always available
+                        # (no dependency on Gmail/O365 unibox sync) and is
+                        # campaign-scoped by construction, so quoting can never
+                        # accidentally include content from a different campaign's thread.
+                        prev_sent_at = all_logs[-1].sent_at
+                        _prev_log = all_logs[-1]
+                        _prev_seq_row = await session.execute(
+                            select(Sequence).where(
+                                Sequence.campaign_id == campaign.id,
+                                Sequence.position == _prev_log.sequence_index,
+                            )
+                        )
+                        _prev_seq = _prev_seq_row.scalar_one_or_none()
+                        if _prev_seq:
+                            _prev_body_raw = _prev_seq.body or ""
+                            _prev_is_html_raw = _prev_seq.is_html
+                            # Override with the variant content if a variant was chosen
+                            # for the previous send (same logic used at send time).
+                            if _prev_log.variant_id:
+                                _prev_var_row = await session.execute(
+                                    select(SequenceVariant).where(
+                                        SequenceVariant.id == _prev_log.variant_id
+                                    )
+                                )
+                                _prev_var = _prev_var_row.scalar_one_or_none()
+                                if _prev_var and _prev_var.body:
+                                    _prev_body_raw = _prev_var.body
+                                    if _prev_var.is_html is not None:
+                                        _prev_is_html_raw = _prev_var.is_html
+                            _rendered_prev = render_body(_prev_body_raw, get_lead_data(lead))
+                            if _prev_is_html_raw:
+                                prev_email_body_html = _rendered_prev
+                            else:
+                                prev_email_body_plain = _rendered_prev
+
+                        # For O365 inboxes, look up the Graph internal message ID of
+                        # the message we are replying to so we can use the Graph
+                        # Reply API and preserve the correct conversationIndex.
+                        # Primary: match by internet_message_id (RFC 2822 Message-ID)
+                        # so the lookup is campaign-scoped regardless of which
+                        # conversation_id Gmail may have assigned.
+                        if inbox.provider == "office365" and reply_to_msg_id:
+                            _needle_msgid = (
+                                reply_to_msg_id
+                                if reply_to_msg_id.startswith("<")
+                                else f"<{reply_to_msg_id}>"
+                            )
+                            o365_real_row = await session.execute(
+                                select(Office365Message)
+                                .where(
+                                    Office365Message.inbox_id == inbox.id,
+                                    Office365Message.internet_message_id == _needle_msgid,
+                                    ~Office365Message.message_id.startswith("local-"),
+                                )
+                                .limit(1)
+                            )
+                            o365_real_msg = o365_real_row.scalar_one_or_none()
+                            # Fallback: latest real Graph message in the conversation.
+                            if not o365_real_msg and prev_thread_id:
+                                o365_real_row = await session.execute(
+                                    select(Office365Message)
+                                    .where(
+                                        Office365Message.inbox_id == inbox.id,
+                                        Office365Message.conversation_id == prev_thread_id,
+                                        ~Office365Message.message_id.startswith("local-"),
+                                    )
+                                    .order_by(Office365Message.received_at.desc())
+                                    .limit(1)
+                                )
+                                o365_real_msg = o365_real_row.scalar_one_or_none()
+                            if o365_real_msg:
+                                reply_graph_message_id = o365_real_msg.message_id
                     else:
                         subject = "(no subject)"
                 else:
@@ -496,6 +625,22 @@ async def run_send_job():
                             )
                         )
 
+                # ── Append quoted previous email (follow-up sequences only) ──
+                if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
+                    _from_name = inbox.display_name or inbox.email
+                    _from_email = inbox.email
+                    if is_html:
+                        _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
+                        send_body = send_body + build_quote_html(
+                            _prev_html, _from_name, _from_email, prev_sent_at
+                        )
+                    else:
+                        _prev_plain = prev_email_body_plain or _strip_html_tags(prev_email_body_html)
+                        if _prev_plain:
+                            send_body = send_body + build_quote_plain(
+                                _prev_plain, _from_name, _from_email, prev_sent_at
+                            )
+
                 # Unsubscribe header
                 list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
 
@@ -509,13 +654,19 @@ async def run_send_job():
                     reply_to_msg_id=reply_to_msg_id,
                     references=references_chain,
                     is_html=is_html,
-                    provider="gmail",
+                    provider=inbox.provider or "gmail",
                     gmail_access_token=gmail_token,
                     gmail_account=ga,
                     thread_id=prev_thread_id,
                     list_unsubscribe_url=list_unsub_url,
                     google_client_id=g_client_id,
                     google_client_secret=g_client_secret,
+                    office365_account=o365_account,
+                    office365_client_id=o365_client_id,
+                    office365_client_secret=o365_client_secret,
+                    office365_tenant_id=o365_tenant_id,
+                    conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                    reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
                 )
 
                 # ── Handle permanent failure (bounce / auth) ─────────────────
@@ -578,6 +729,53 @@ async def run_send_job():
                 quota_remaining -= 1
                 # update last_sent_time for rate-limit comparisons
                 last_sent_time = now
+
+                # For Gmail: save the sent message to the local mirror so the body
+                # is available for quoting in future follow-up emails.
+                if inbox.provider != "office365" and email_log_entry.thread_id:
+                    try:
+                        from app.unibox import upsert_sent_message as _upsert_sent_gmail
+                        await _upsert_sent_gmail(
+                            session,
+                            inbox_id=inbox.id,
+                            thread_id=email_log_entry.thread_id,
+                            gmail_message_id=result.gmail_message_id,
+                            rfc_message_id=result.message_id,
+                            subject=subject,
+                            to_email=lead.email,
+                            from_email=inbox.email,
+                            body=send_body,
+                            is_html=is_html,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to upsert sent Gmail message to unibox "
+                            "inbox_id=%s lead=%s",
+                            inbox.id, lead.email,
+                        )
+
+                # For Office 365: immediately save the sent message to the local
+                # mirror so it appears in the unibox thread before the next sync.
+                if inbox.provider == "office365" and email_log_entry.thread_id:
+                    try:
+                        from app.unibox import upsert_sent_o365_message
+                        await upsert_sent_o365_message(
+                            session,
+                            inbox_id=inbox.id,
+                            conversation_id=email_log_entry.thread_id,
+                            internet_message_id=result.message_id,
+                            subject=subject,
+                            to_email=lead.email,
+                            from_email=inbox.email,
+                            body=send_body,
+                            is_html=is_html,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to upsert sent O365 message to unibox "
+                            "inbox_id=%s lead=%s",
+                            inbox.id, lead.email,
+                        )
 
                 # Fire email.sent webhook
                 await fire_webhook_event(session, "email.sent", {

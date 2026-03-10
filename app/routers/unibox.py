@@ -15,7 +15,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox
+from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox, Office365Account, Office365Message
+from app.app_settings import get_office365_oauth_credentials
 from app.sender import SendResult, send_email
 from app.unibox import (
     BACKFILL_WINDOW_DAYS,
@@ -32,6 +33,7 @@ from app.unibox import (
     queue_sync_for_inbox,
     unibox_events,
     upsert_sent_message,
+    upsert_sent_o365_message,
 )
 
 log = logging.getLogger("quickly.unibox.router")
@@ -112,19 +114,22 @@ async def mark_unibox_thread_read(
     return {"ok": True, "thread_id": thread_id}
 
 
+_SYNC_PROVIDERS = ("gmail", "office365")
+
+
 @router.post("/sync")
 async def trigger_unibox_sync(data: UniboxSyncRequest, db: AsyncSession = Depends(get_db)):
     if data.inbox_id:
         inbox_row = await db.execute(
-            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider == "gmail")
+            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider.in_(_SYNC_PROVIDERS))
         )
         inbox_id = inbox_row.scalar_one_or_none()
         if not inbox_id:
-            raise HTTPException(status_code=404, detail="Gmail inbox not found")
+            raise HTTPException(status_code=404, detail="Inbox not found")
         await queue_sync_for_inbox(inbox_id, reason="manual")
         return {"ok": True, "queued": 1, "inbox_ids": [inbox_id]}
 
-    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(_SYNC_PROVIDERS)))
     inbox_ids = [int(row[0]) for row in inbox_rows.all()]
     if not inbox_ids:
         return {"ok": True, "queued": 0, "inbox_ids": []}
@@ -138,11 +143,11 @@ async def trigger_unibox_load_more(data: UniboxLoadMoreRequest, db: AsyncSession
     window_days = max(1, int(data.window_days))
     if data.inbox_id:
         inbox_row = await db.execute(
-            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider == "gmail")
+            select(Inbox.id).where(Inbox.id == data.inbox_id, Inbox.provider.in_(_SYNC_PROVIDERS))
         )
         inbox_id = inbox_row.scalar_one_or_none()
         if not inbox_id:
-            raise HTTPException(status_code=404, detail="Gmail inbox not found")
+            raise HTTPException(status_code=404, detail="Inbox not found")
         await queue_backfill_for_inbox(
             inbox_id,
             window_days=window_days,
@@ -150,7 +155,7 @@ async def trigger_unibox_load_more(data: UniboxLoadMoreRequest, db: AsyncSession
         )
         return {"ok": True, "queued": 1, "inbox_ids": [inbox_id], "window_days": window_days}
 
-    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+    inbox_rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(_SYNC_PROVIDERS)))
     inbox_ids = [int(row[0]) for row in inbox_rows.all()]
     if not inbox_ids:
         return {"ok": True, "queued": 0, "inbox_ids": [], "window_days": window_days}
@@ -198,28 +203,80 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
     inbox = inbox_row.scalar_one_or_none()
     if not inbox:
         raise HTTPException(status_code=404, detail="Inbox not found")
-    if inbox.provider != "gmail":
-        raise HTTPException(status_code=400, detail="Unibox send currently supports Gmail inboxes only")
 
-    account_row = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
-    account = account_row.scalar_one_or_none()
-    if account is None:
-        raise HTTPException(status_code=400, detail="Gmail account is not connected for this inbox")
-
+    provider = inbox.provider or "gmail"
+    gmail_account = None
+    o365_account = None
+    o365_client_id = o365_client_secret = o365_tenant_id = ""
     reply_to = data.in_reply_to
     references = data.references
-    if data.thread_id and not reply_to:
-        latest_row = await db.execute(
-            select(GmailMessage)
-            .where(GmailMessage.inbox_id == inbox.id, GmailMessage.thread_id == data.thread_id)
-            .order_by(GmailMessage.internal_date.desc(), GmailMessage.created_at.desc())
-            .limit(1)
-        )
-        latest_msg = latest_row.scalar_one_or_none()
-        if latest_msg:
-            reply_to = _extract_message_id_from_headers(latest_msg.headers_json or "")
-            if reply_to and not references:
-                references = reply_to
+
+    if provider == "office365":
+        from app.routers.office365_oauth import refresh_access_token as _refresh_o365
+        o365_row = await db.execute(select(Office365Account).where(Office365Account.inbox_id == inbox.id))
+        o365_account = o365_row.scalar_one_or_none()
+        if o365_account is None:
+            raise HTTPException(status_code=400, detail="Office 365 account is not connected for this inbox")
+        o365_client_id, o365_client_secret, o365_tenant_id = await get_office365_oauth_credentials(db)
+        refreshed = _refresh_o365(o365_account, o365_client_id, o365_client_secret, o365_tenant_id)
+        if not refreshed:
+            raise HTTPException(status_code=502, detail="Could not refresh Office 365 access token")
+        await db.flush()
+
+        # Auto-detect the Graph message ID to reply to so we can use the Graph
+        # Reply API (createReply → patch → send).  This is the only way to
+        # have Microsoft set conversationIndex correctly and keep the reply in
+        # the same Outlook thread.  We prefer the most-recently-received real
+        # Graph message (not a local-surrogate we created at send time).
+        reply_graph_message_id: str | None = None
+        if data.thread_id:
+            # Prefer the latest REAL Graph message (received from outside).
+            real_o365_row = await db.execute(
+                select(Office365Message)
+                .where(
+                    Office365Message.inbox_id == inbox.id,
+                    Office365Message.conversation_id == data.thread_id,
+                    ~Office365Message.message_id.startswith("local-"),
+                )
+                .order_by(Office365Message.received_at.desc(), Office365Message.created_at.desc())
+                .limit(1)
+            )
+            real_o365_msg = real_o365_row.scalar_one_or_none()
+            if real_o365_msg:
+                reply_graph_message_id = real_o365_msg.message_id
+                if not reply_to and real_o365_msg.internet_message_id:
+                    reply_to = real_o365_msg.internet_message_id
+            else:
+                # Fall back: any message in the thread (may be a local surrogate)
+                any_o365_row = await db.execute(
+                    select(Office365Message)
+                    .where(
+                        Office365Message.inbox_id == inbox.id,
+                        Office365Message.conversation_id == data.thread_id,
+                    )
+                    .order_by(Office365Message.received_at.desc())
+                    .limit(1)
+                )
+                any_o365_msg = any_o365_row.scalar_one_or_none()
+                if any_o365_msg and any_o365_msg.internet_message_id and not reply_to:
+                    reply_to = any_o365_msg.internet_message_id
+    else:
+        account_row = await db.execute(select(GmailAccount).where(GmailAccount.inbox_id == inbox.id))
+        gmail_account = account_row.scalar_one_or_none()
+        if gmail_account is None:
+            raise HTTPException(status_code=400, detail="Gmail account is not connected for this inbox")
+        if data.thread_id and not reply_to:
+            latest_row = await db.execute(
+                select(GmailMessage)
+                .where(GmailMessage.inbox_id == inbox.id, GmailMessage.thread_id == data.thread_id)
+                .order_by(GmailMessage.internal_date.desc(), GmailMessage.created_at.desc())
+                .limit(1)
+            )
+            latest_msg = latest_row.scalar_one_or_none()
+            if latest_msg:
+                reply_to = _extract_message_id_from_headers(latest_msg.headers_json or "")
+                if reply_to and not references:
+                    references = reply_to
 
     send_result = send_email(
         to_email=data.to_email,
@@ -230,37 +287,71 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         reply_to_msg_id=reply_to,
         references=references,
         is_html=data.is_html,
-        provider="gmail",
-        gmail_account=account,
+        provider=provider,
+        gmail_account=gmail_account,
+        office365_account=o365_account,
+        office365_client_id=o365_client_id,
+        office365_client_secret=o365_client_secret,
+        office365_tenant_id=o365_tenant_id,
         thread_id=data.thread_id,
+        conversation_id=data.thread_id if provider == "office365" else None,
+        reply_graph_message_id=reply_graph_message_id if provider == "office365" else None,
     )
     if not send_result:
-        raise HTTPException(status_code=502, detail="Gmail send failed; message was not stored")
+        raise HTTPException(status_code=502, detail="Send failed; message was not stored")
 
     if not isinstance(send_result, SendResult):
-        raise HTTPException(status_code=502, detail="Unexpected Gmail send response")
+        raise HTTPException(status_code=502, detail="Unexpected send response")
 
     thread_id = send_result.thread_id or data.thread_id
     if not thread_id:
-        raise HTTPException(status_code=502, detail="Gmail send succeeded but did not return thread id")
+        raise HTTPException(status_code=502, detail="Send succeeded but did not return thread id")
 
-    stored_message = await upsert_sent_message(
-        db,
-        inbox_id=inbox.id,
-        thread_id=thread_id,
-        gmail_message_id=send_result.gmail_message_id,
-        rfc_message_id=send_result.message_id,
-        subject=data.subject,
-        to_email=str(data.to_email),
-        from_email=inbox.email,
-        body=data.body,
-        is_html=data.is_html,
-    )
+    # Store the sent message in the appropriate provider's local mirror.
+    stored_message_id: str = send_result.message_id
+    if provider == "office365":
+        o365_msg = await upsert_sent_o365_message(
+            db,
+            inbox_id=inbox.id,
+            conversation_id=thread_id,
+            internet_message_id=send_result.message_id,
+            subject=data.subject,
+            to_email=str(data.to_email),
+            from_email=inbox.email,
+            body=data.body,
+            is_html=data.is_html,
+        )
+        if o365_msg:
+            stored_message_id = o365_msg.message_id
+    else:
+        stored_message = await upsert_sent_message(
+            db,
+            inbox_id=inbox.id,
+            thread_id=thread_id,
+            gmail_message_id=send_result.gmail_message_id,
+            rfc_message_id=send_result.message_id,
+            subject=data.subject,
+            to_email=str(data.to_email),
+            from_email=inbox.email,
+            body=data.body,
+            is_html=data.is_html,
+        )
+        stored_message_id = stored_message.message_id
 
-    sync_state_row = await db.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == inbox.id))
-    sync_state = sync_state_row.scalar_one_or_none()
-    if sync_state:
-        sync_state.last_sync_at = datetime.utcnow()
+    # Update sync state timestamp for whichever provider this inbox uses.
+    if provider == "office365":
+        from app.models import Office365SyncState
+        o365_ss_row = await db.execute(
+            select(Office365SyncState).where(Office365SyncState.inbox_id == inbox.id)
+        )
+        o365_ss = o365_ss_row.scalar_one_or_none()
+        if o365_ss:
+            o365_ss.last_sync_at = datetime.utcnow()
+    else:
+        sync_state_row = await db.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == inbox.id))
+        sync_state = sync_state_row.scalar_one_or_none()
+        if sync_state:
+            sync_state.last_sync_at = datetime.utcnow()
 
     # Commit before confirming success, so UI gets backend-confirmed state only.
     await db.commit()
@@ -280,7 +371,7 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         "status": "sent",
         "inbox_id": inbox.id,
         "thread_id": thread_id,
-        "message_id": stored_message.message_id,
+        "message_id": stored_message_id,
         "rfc_message_id": send_result.message_id,
         "timestamp": datetime.utcnow().isoformat() + "Z",
     }

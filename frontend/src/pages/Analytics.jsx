@@ -464,7 +464,7 @@ export default function Analytics() {
                 return (
                   <tr key={c.id} className="hover:bg-gray-50">
                     <td className="py-2">
-                      <Link to={`/campaigns/${c.id}`} className="text-teal-500">
+                      <Link to={`/campaigns/${c.id}#analytics`} className="text-teal-500">
                         {c.name}
                       </Link>
                     </td>

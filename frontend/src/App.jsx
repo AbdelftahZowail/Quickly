@@ -13,15 +13,12 @@ import DeliverabilityTips from './pages/DeliverabilityTips';
 import Login from './pages/Login';
 import { api } from './api';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import SplashScreen from './components/SplashScreen';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-gray-500 text-sm">Loading...</div>
-      </div>
-    );
+    return <SplashScreen />;
   }
   if (!user) {
     return <Navigate to="/login" replace />;
@@ -40,11 +37,7 @@ function AppRoutes() {
   }, [user]);
 
   if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-gray-500 text-sm">Loading...</div>
-      </div>
-    );
+    return <SplashScreen />;
   }
 
   return (
