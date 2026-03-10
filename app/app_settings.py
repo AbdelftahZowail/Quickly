@@ -179,3 +179,14 @@ def get_inbox_tracking_base(inbox, fallback_base_url: str) -> str:
     if td:
         return f"https://{td}"
     return fallback_base_url.rstrip("/")
+
+
+# Office 365 OAuth convenience -------------------------------------------------
+
+async def get_office365_oauth_credentials(db: AsyncSession | None = None) -> tuple[str, str, str]:
+    """Return ``(client_id, client_secret, tenant_id)`` from environment."""
+    return (
+        settings.office365_client_id,
+        settings.office365_client_secret,
+        settings.office365_tenant_id,
+    )

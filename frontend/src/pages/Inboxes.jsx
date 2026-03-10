@@ -124,6 +124,8 @@ export default function Inboxes() {
   const [message, setMessage] = useState(null);
   const [oauthConfigured, setOauthConfigured] = useState(false);
   const [redirectUri, setRedirectUri] = useState('');
+  const [o365Configured, setO365Configured] = useState(false);
+  const [o365RedirectUri, setO365RedirectUri] = useState('');
   const [editing, setEditing] = useState(null); // inbox being edited
   const [editDirty, setEditDirty] = useState(false);
   const [showEditWarning, setShowEditWarning] = useState(false);
@@ -153,12 +155,20 @@ export default function Inboxes() {
   };
   useEffect(() => {
     load();
-    // check oauth
+    // check Gmail OAuth
     fetch('/api/gmail/status')
       .then(r => r.json())
       .then(d => {
         setOauthConfigured(d.configured);
         setRedirectUri(d.redirect_uri || '');
+      })
+      .catch(() => {});
+    // check Office 365 OAuth
+    fetch('/api/office365/status')
+      .then(r => r.json())
+      .then(d => {
+        setO365Configured(d.configured);
+        setO365RedirectUri(d.redirect_uri || '');
       })
       .catch(() => {});
     // get server hostname for DNS instructions
@@ -178,8 +188,8 @@ export default function Inboxes() {
   };
 
   const canSubmit = () => {
-    if (form.provider === 'gmail') {
-      // allow click so user receives an error message; we still show warning below
+    if (form.provider === 'gmail' || form.provider === 'office365') {
+      // allow click so user receives an error message if OAuth is not configured
       return true;
     }
     return form.email.trim() !== '';
@@ -196,9 +206,22 @@ export default function Inboxes() {
         });
         return;
       }
-      // redirect to OAuth
+      // redirect to Gmail OAuth
       const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false' });
       window.location.href = '/oauth/google/authorize?' + params;
+      return;
+    }
+    if (form.provider === 'office365') {
+      if (!o365Configured) {
+        setMessage({
+          type: 'error',
+          text: 'Office 365 OAuth is not configured. Define OFFICE365_CLIENT_ID/SECRET/TENANT_ID in your environment and restart the server.',
+        });
+        return;
+      }
+      // redirect to Office 365 OAuth
+      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false' });
+      window.location.href = '/oauth/office365/authorize?' + params;
       return;
     }
     try {
@@ -392,7 +415,7 @@ export default function Inboxes() {
                       </div>
                       <div className="min-w-0">
                         <p className="font-medium text-gray-900 text-sm leading-tight truncate">
-                          {inbox.email || '(Gmail account)'}
+                          {inbox.email || '(Connected account)'}
                         </p>
                         {inbox.display_name && (
                           <p className="text-xs text-gray-500 leading-tight mt-0.5 truncate">{inbox.display_name}</p>
@@ -434,7 +457,7 @@ export default function Inboxes() {
                     {(selectedInbox.email || selectedInbox.display_name || 'I')[0].toUpperCase()}
                   </div>
                   <div className="min-w-0">
-                    <p className="font-semibold text-gray-900 text-sm leading-tight truncate">{selectedInbox.email || '(Gmail account)'}</p>
+                    <p className="font-semibold text-gray-900 text-sm leading-tight truncate">{selectedInbox.email || '(Connected account)'}</p>
                     {selectedInbox.display_name && (
                       <p className="text-xs text-gray-500 truncate leading-tight mt-0.5">{selectedInbox.display_name}</p>
                     )}
@@ -573,7 +596,8 @@ export default function Inboxes() {
               <div>
                 <label className="block text-sm font-medium text-gray-700">Provider</label>
                 <select name="provider" value={form.provider} onChange={handleProviderChange} className="mt-1 block w-full border-gray-300 rounded-md">
-                  <option value="gmail">Gmail OAuth</option>
+                  <option value="gmail">Gmail / Google Workspace</option>
+                  <option value="office365">Office 365 / Outlook</option>
                 </select>
               </div>
 
@@ -625,9 +649,23 @@ export default function Inboxes() {
                   )}
                 </>
               )}
+              {form.provider === 'office365' && (
+                <>
+                  {!o365Configured && (
+                    <div className="text-red-600">
+                      Office 365 OAuth credentials are not configured. Set OFFICE365_CLIENT_ID, OFFICE365_CLIENT_SECRET, and OFFICE365_TENANT_ID in your environment and restart the server.
+                    </div>
+                  )}
+                  {o365RedirectUri && (
+                    <div className="text-gray-500 text-sm mt-1">
+                      Redirect URI: <code className="font-mono">{o365RedirectUri}</code>
+                    </div>
+                  )}
+                </>
+              )}
               <div className="flex gap-2">
                 <Button type="submit" disabled={!canSubmit()} variant="default">
-                  {form.provider === 'gmail' ? 'Connect with Google' : 'Add inbox'}
+                  {form.provider === 'gmail' ? 'Connect with Google' : form.provider === 'office365' ? 'Connect with Microsoft' : 'Add inbox'}
                 </Button>
                 <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); }}>
                   Cancel
@@ -659,13 +697,19 @@ export default function Inboxes() {
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700">Provider</label>
-                <select name="provider" value={editing.provider || 'gmail'} onChange={e => { setEditing(prev => ({ ...prev, provider: e.target.value })); setEditDirty(true); }} className="mt-1 block w-full border-gray-300 rounded-md" disabled>
-                  <option value="gmail">Gmail OAuth</option>
+                <select name="provider" value={editing.provider || 'gmail'} className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100" disabled>
+                  <option value="gmail">Gmail / Google Workspace</option>
+                  <option value="office365">Office 365 / Outlook</option>
                 </select>
               </div>
-              {editing.provider === 'gmail' && (
+              {editing.provider === 'gmail' && redirectUri && (
                 <div className="text-gray-500 text-sm">
                   Redirect URI: <code className="font-mono">{redirectUri}</code>
+                </div>
+              )}
+              {editing.provider === 'office365' && o365RedirectUri && (
+                <div className="text-gray-500 text-sm">
+                  Redirect URI: <code className="font-mono">{o365RedirectUri}</code>
                 </div>
               )}
               <div>

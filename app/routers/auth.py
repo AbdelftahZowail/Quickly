@@ -201,6 +201,18 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
         max_age=7 * 24 * 60 * 60,  # 7 days
         path="/api/auth",
     )
+    # Also set the access token as an httpOnly cookie so logged-in browsers
+    # can reach API endpoints directly (e.g. /api/office365/graph-webhook/subscriptions)
+    # without needing a custom Authorization header.
+    response.set_cookie(
+        key="access_token",
+        value=access_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/api",
+    )
 
     return TokenResponse(access_token=access_token)
 
@@ -233,6 +245,16 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         samesite="lax",
         max_age=7 * 24 * 60 * 60,
         path="/api/auth",
+    )
+    # Rotate the access token cookie too
+    response.set_cookie(
+        key="access_token",
+        value=new_access,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        path="/api",
     )
 
     return TokenResponse(access_token=new_access)

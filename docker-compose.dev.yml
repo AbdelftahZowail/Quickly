@@ -41,8 +41,8 @@ services:
       - "443:443/udp"    # HTTP/3
     volumes:
       - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
-      - caddy_data_dev:/data
-      - caddy_config_dev:/config
+      - ./caddy_data_dev:/data
+      - ./caddy_config_dev:/config
     env_file: .env
     depends_on:
       - backend
@@ -69,5 +69,3 @@ services:
 
 volumes:
   pgdata_dev:
-  caddy_data_dev:
-  caddy_config_dev:

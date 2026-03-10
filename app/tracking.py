@@ -133,8 +133,7 @@ def inject_tracking_html(
         pixel_id = open_token if open_token else str(email_log_id)
         pixel_url = f"{tracking_base}/o/{pixel_id}"
         pixel = (
-            f'<img src="{pixel_url}" width="1" height="1" '
-            f'border="0" style="display:none" alt="" />'
+            f'<img src="{pixel_url}" width="1" height="1" alt="" />'
         )
         lower = new_html.lower()
         idx = lower.rfind("</body>")

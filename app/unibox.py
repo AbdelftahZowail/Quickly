@@ -1,4 +1,4 @@
-"""Unibox backend services: DB queries, Gmail sync, and realtime signaling."""
+"""Unibox backend services: DB queries, Gmail sync, Office 365 sync, and realtime signaling."""
 
 from __future__ import annotations
 
@@ -21,11 +21,16 @@ from sqlalchemy import and_, delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import time as time_provider
-from app.app_settings import get_gmail_sync_config, get_google_oauth_credentials
+from app.app_settings import get_gmail_sync_config, get_google_oauth_credentials, get_office365_oauth_credentials
 from app.webhooks import maybe_fire_email_event, fire_lead_reply_webhook
 from app.database import AsyncSessionLocal
-from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox, Lead, LeadReply, EmailLog, CampaignLead, QueueSlot
+from app.models import (
+    GmailAccount, GmailMessage, GmailSyncState, GmailThread,
+    Office365Account, Office365Message, Office365SyncState, Office365Thread,
+    Inbox, Lead, LeadReply, EmailLog, CampaignLead, QueueSlot,
+)
 from app.routers.gmail_oauth import refresh_access_token
+from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
 
 log = logging.getLogger("quickly.unibox")
 
@@ -1029,6 +1034,85 @@ async def upsert_sent_message(
     return row
 
 
+async def upsert_sent_o365_message(
+    db: AsyncSession,
+    *,
+    inbox_id: int,
+    conversation_id: str,
+    internet_message_id: str,
+    subject: str,
+    to_email: str,
+    from_email: str,
+    body: str,
+    is_html: bool,
+) -> Office365Message | None:
+    """Immediately save a just-sent Office 365 message to the local mirror.
+
+    This is the O365 equivalent of ``upsert_sent_message`` for Gmail: it lets
+    the unibox thread view show the outbound email right away, before the next
+    scheduled sync cycle picks it up from SentItems.
+
+    We use a ``local-<hash>`` prefix as the message_id PK since we don't have
+    the Graph API message id at send time.  The real entry (with the proper
+    Graph id) will be created when SentItems are synced; the local copy will
+    remain as a harmless extra record until then, since thread views are
+    ordered and deduplicated by ``internet_message_id`` in the UI.
+
+    Returns None when *conversation_id* is empty (first email where Microsoft
+    hasn't yet assigned a conversation; the sync will create the entry later).
+    """
+    if not conversation_id:
+        return None
+
+    now_dt = time_provider.utcnow()
+
+    # Use a stable hash of the RFC Message-ID as the local surrogate PK.
+    digest = hashlib.sha1(internet_message_id.encode("utf-8"), usedforsecurity=False).hexdigest()[:24]
+    message_pk = f"local-{digest}"
+
+    body_html = body if is_html else ""
+    body_plain = _strip_html_tags(body) if is_html else body
+
+    # Ensure the thread row exists / is up-to-date.
+    thread = await _upsert_o365_thread(db, inbox_id, conversation_id, subject, now_dt)
+
+    # Check if a local entry already exists (idempotent).
+    existing_res = await db.execute(
+        select(Office365Message).where(
+            Office365Message.inbox_id == inbox_id,
+            Office365Message.message_id == message_pk,
+        )
+    )
+    existing = existing_res.scalar_one_or_none()
+    if existing:
+        return existing
+
+    row = Office365Message(
+        inbox_id=inbox_id,
+        message_id=message_pk,
+        conversation_id=conversation_id,
+        internet_message_id=internet_message_id,
+        received_at=now_dt,
+        subject=subject,
+        from_address=from_email.lower(),
+        to_addresses=json.dumps([to_email.lower()]),
+        body_plain=body_plain,
+        body_html=body_html,
+        is_read=True,
+        has_attachments=False,
+    )
+    db.add(row)
+
+    # Mark the thread as a lead thread if the recipient is a known lead.
+    lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == to_email.lower()))
+    to_lead = lead_res.scalar_one_or_none()
+    if to_lead is not None and not thread.is_lead_thread:
+        thread.is_lead_thread = True
+
+    await db.flush()
+    return row
+
+
 async def _delete_message(db: AsyncSession, inbox_id: int, message_id: str) -> str | None:
     res = await db.execute(
         select(GmailMessage).where(
@@ -1091,24 +1175,8 @@ async def list_unibox_conversations(
 ) -> dict[str, Any]:
     offset = (page - 1) * page_size
 
-    latest_message_sq = (
-        select(
-            GmailMessage.inbox_id.label("inbox_id"),
-            GmailMessage.thread_id.label("thread_id"),
-            GmailMessage.snippet.label("snippet"),
-            GmailMessage.headers_json.label("headers_json"),
-            GmailMessage.internal_date.label("internal_date"),
-            func.row_number()
-            .over(
-                partition_by=(GmailMessage.inbox_id, GmailMessage.thread_id),
-                order_by=(desc(GmailMessage.internal_date), desc(GmailMessage.message_id)),
-            )
-            .label("rn"),
-        )
-        .subquery()
-    )
-
-    # Subquery: one lead per thread (the earliest email log entry)
+    # Shared: one lead per thread (works for both Gmail thread_id and O365 conversation_id
+    # because EmailLog.thread_id stores the conversation id for both providers).
     lead_sq = (
         select(
             EmailLog.thread_id.label("thread_id"),
@@ -1126,18 +1194,25 @@ async def list_unibox_conversations(
         .subquery()
     )
 
-    base_where = []
-    if leads_only:
-        base_where.append(GmailThread.is_lead_thread.is_(True))
-    if lead_status:
-        base_where.append(lead_sq.c.lead_status == lead_status)
+    # ── Gmail threads ─────────────────────────────────────────────────────
+    latest_message_sq = (
+        select(
+            GmailMessage.inbox_id.label("inbox_id"),
+            GmailMessage.thread_id.label("thread_id"),
+            GmailMessage.snippet.label("snippet"),
+            GmailMessage.headers_json.label("headers_json"),
+            GmailMessage.internal_date.label("internal_date"),
+            func.row_number()
+            .over(
+                partition_by=(GmailMessage.inbox_id, GmailMessage.thread_id),
+                order_by=(desc(GmailMessage.internal_date), desc(GmailMessage.message_id)),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
 
-    count_stmt = select(func.count()).select_from(GmailThread)
-    if leads_only:
-        count_stmt = count_stmt.where(GmailThread.is_lead_thread.is_(True))
-    total = (await db.execute(count_stmt)).scalar_one() or 0
-
-    stmt = (
+    gmail_stmt = (
         select(
             GmailThread.inbox_id,
             GmailThread.thread_id,
@@ -1168,52 +1243,136 @@ async def list_unibox_conversations(
             ),
         )
     )
-    if base_where:
-        stmt = stmt.where(*base_where)
+    if leads_only:
+        gmail_stmt = gmail_stmt.where(GmailThread.is_lead_thread.is_(True))
+    if lead_status:
+        gmail_stmt = gmail_stmt.where(lead_sq.c.lead_status == lead_status)
 
-    # Unread lead replies are pinned to the top, then sorted by date descending.
-    stmt = stmt.order_by(
-        desc(GmailThread.unread_lead_reply),
-        desc(GmailThread.last_internal_date),
-        desc(GmailThread.updated_at),
-    ).offset(offset).limit(page_size)
+    gmail_rows = (await db.execute(gmail_stmt)).all()
 
-    rows = (await db.execute(stmt)).all()
+    # ── Office 365 threads ────────────────────────────────────────────────
+    o365_latest_msg_sq = (
+        select(
+            Office365Message.inbox_id.label("inbox_id"),
+            Office365Message.conversation_id.label("thread_id"),
+            Office365Message.body_plain.label("snippet"),
+            func.row_number()
+            .over(
+                partition_by=(Office365Message.inbox_id, Office365Message.conversation_id),
+                order_by=desc(Office365Message.received_at),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
+
+    o365_stmt = (
+        select(
+            Office365Thread.inbox_id,
+            Office365Thread.conversation_id.label("thread_id"),
+            Office365Thread.last_received_at,
+            Office365Thread.subject,
+            Office365Thread.is_lead_thread,
+            Office365Thread.unread_lead_reply,
+            Inbox.email.label("account_email"),
+            o365_latest_msg_sq.c.snippet.label("last_snippet"),
+            lead_sq.c.lead_email.label("lead_email"),
+            lead_sq.c.lead_status.label("lead_status"),
+        )
+        .join(Inbox, Inbox.id == Office365Thread.inbox_id)
+        .outerjoin(
+            o365_latest_msg_sq,
+            and_(
+                o365_latest_msg_sq.c.inbox_id == Office365Thread.inbox_id,
+                o365_latest_msg_sq.c.thread_id == Office365Thread.conversation_id,
+                o365_latest_msg_sq.c.rn == 1,
+            ),
+        )
+        .outerjoin(
+            lead_sq,
+            and_(
+                lead_sq.c.thread_id == Office365Thread.conversation_id,
+                lead_sq.c.rn == 1,
+            ),
+        )
+    )
+    if leads_only:
+        o365_stmt = o365_stmt.where(Office365Thread.is_lead_thread.is_(True))
+    if lead_status:
+        o365_stmt = o365_stmt.where(lead_sq.c.lead_status == lead_status)
+
+    o365_rows = (await db.execute(o365_stmt)).all()
+
+    # ── Merge both providers into a single sorted list ────────────────────
     items: list[dict[str, Any]] = []
-    for row in rows:
+
+    for row in gmail_rows:
         subject = _header_value(row.last_headers_json or "", "Subject") or "(no subject)"
         last_snippet = row.last_snippet or row.thread_snippet or ""
-        timestamp = _dt_to_iso(_epoch_ms_to_dt(row.last_internal_date))
+        ts_dt = _epoch_ms_to_dt(row.last_internal_date)
         items.append(
             {
                 "thread_id": row.thread_id,
                 "inbox_id": row.inbox_id,
-                "gmail_account": row.account_email,
+                "inbox_account": row.account_email,
                 "subject": subject,
                 "last_message_snippet": last_snippet,
-                "timestamp": timestamp,
+                "timestamp": _dt_to_iso(ts_dt),
+                "_sort_ts": ts_dt.timestamp() if ts_dt else 0.0,
                 "is_lead_thread": bool(row.is_lead_thread),
                 "unread_lead_reply": bool(row.unread_lead_reply),
                 "lead_email": row.lead_email or None,
                 "lead_status": row.lead_status or None,
+                "provider": "gmail",
             }
         )
 
+    for row in o365_rows:
+        ts_dt = row.last_received_at
+        items.append(
+            {
+                "thread_id": row.thread_id,
+                "inbox_id": row.inbox_id,
+                "inbox_account": row.account_email,
+                "subject": row.subject or "(no subject)",
+                "last_message_snippet": (row.last_snippet or "")[:200],
+                "timestamp": _dt_to_iso(ts_dt),
+                "_sort_ts": ts_dt.timestamp() if ts_dt else 0.0,
+                "is_lead_thread": bool(row.is_lead_thread),
+                "unread_lead_reply": bool(row.unread_lead_reply),
+                "lead_email": row.lead_email or None,
+                "lead_status": row.lead_status or None,
+                "provider": "office365",
+            }
+        )
+
+    # Unread lead replies pinned to top, then most recent first.
+    items.sort(key=lambda x: (int(x["unread_lead_reply"]), x["_sort_ts"]), reverse=True)
+
+    total = len(items)
+    page_items = items[offset: offset + page_size]
+    for item in page_items:
+        del item["_sort_ts"]
+
     return {
-        "items": items,
+        "items": page_items,
         "page": page,
         "page_size": page_size,
-        "total": int(total),
+        "total": total,
     }
 
 
 async def get_notification_count(db: AsyncSession) -> int:
-    """Return the number of threads with an unread lead reply."""
-    stmt = select(func.count()).select_from(GmailThread).where(
+    """Return the number of threads with an unread lead reply (Gmail + Office 365)."""
+    gmail_stmt = select(func.count()).select_from(GmailThread).where(
         GmailThread.unread_lead_reply.is_(True)
     )
-    result = await db.execute(stmt)
-    return int(result.scalar_one() or 0)
+    o365_stmt = select(func.count()).select_from(Office365Thread).where(
+        Office365Thread.unread_lead_reply.is_(True)
+    )
+    gmail_count = int((await db.execute(gmail_stmt)).scalar_one() or 0)
+    o365_count = int((await db.execute(o365_stmt)).scalar_one() or 0)
+    return gmail_count + o365_count
 
 
 async def mark_thread_read(
@@ -1222,10 +1381,11 @@ async def mark_thread_read(
     thread_id: str,
     inbox_id: int,
 ) -> bool:
-    """Clear the unread_lead_reply flag on a thread.
+    """Clear the unread_lead_reply flag on a thread (Gmail or Office 365).
 
     Returns True if the thread was found and updated, False otherwise.
     """
+    # Try Gmail thread first
     res = await db.execute(
         select(GmailThread).where(
             GmailThread.inbox_id == inbox_id,
@@ -1233,8 +1393,33 @@ async def mark_thread_read(
         )
     )
     thread = res.scalar_one_or_none()
+
     if thread is None:
-        return False
+        # Try Office 365 conversation
+        o365_res = await db.execute(
+            select(Office365Thread).where(
+                Office365Thread.inbox_id == inbox_id,
+                Office365Thread.conversation_id == thread_id,
+            )
+        )
+        o365_thread = o365_res.scalar_one_or_none()
+        if o365_thread is None:
+            return False
+        if o365_thread.unread_lead_reply:
+            o365_thread.unread_lead_reply = False
+            await db.flush()
+            new_count = await get_notification_count(db)
+            asyncio.create_task(
+                unibox_events.publish(
+                    {
+                        "type": "unibox.notification.count",
+                        "count": new_count,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+            )
+        return True
+
     if thread.unread_lead_reply:
         thread.unread_lead_reply = False
         await db.flush()
@@ -1250,6 +1435,70 @@ async def mark_thread_read(
             )
         )
     return True
+
+
+async def _get_o365_thread_messages(
+    db: AsyncSession,
+    *,
+    thread_id: str,
+    inbox_id: int,
+) -> dict[str, Any] | None:
+    """Return a thread+messages dict for an Office 365 conversation."""
+    thread_res = await db.execute(
+        select(Office365Thread, Inbox.email)
+        .join(Inbox, Inbox.id == Office365Thread.inbox_id)
+        .where(
+            Office365Thread.inbox_id == inbox_id,
+            Office365Thread.conversation_id == thread_id,
+        )
+    )
+    row = thread_res.first()
+    if row is None:
+        return None
+    thread, account_email = row
+
+    msg_rows = await db.execute(
+        select(Office365Message)
+        .where(
+            Office365Message.inbox_id == inbox_id,
+            Office365Message.conversation_id == thread_id,
+        )
+        .order_by(Office365Message.received_at.asc(), Office365Message.created_at.asc())
+    )
+    messages = msg_rows.scalars().all()
+
+    inbox_email_lower = account_email.lower()
+    out_messages: list[dict[str, Any]] = []
+    for msg in messages:
+        direction = "sent" if msg.from_address.lower() == inbox_email_lower else "received"
+        try:
+            to_str = ", ".join(json.loads(msg.to_addresses or "[]"))
+        except Exception:
+            to_str = msg.to_addresses or ""
+        out_messages.append(
+            {
+                "message_id": msg.message_id,
+                "thread_id": thread_id,
+                "timestamp": _dt_to_iso(msg.received_at),
+                "snippet": (msg.body_plain or "")[:200],
+                "body_plain": msg.body_plain or "",
+                "body_html": msg.body_html or "",
+                "subject": msg.subject or "",
+                "from": msg.from_address or "",
+                "to": to_str,
+                "direction": direction,
+                "label_ids": [],
+            }
+        )
+
+    return {
+        "thread_id": thread_id,
+        "inbox_id": inbox_id,
+        "inbox_account": account_email,
+        "subject": thread.subject or "(no subject)",
+        "last_message_timestamp": _dt_to_iso(thread.last_received_at),
+        "messages": out_messages,
+    }
 
 
 async def get_thread_messages(
@@ -1269,7 +1518,20 @@ async def get_thread_messages(
         ).all()
         inbox_ids = [int(row[0]) for row in inbox_rows]
         if not inbox_ids:
-            return None
+            # Not in Gmail – try Office 365
+            o365_rows = (
+                await db.execute(
+                    select(Office365Message.inbox_id)
+                    .where(Office365Message.conversation_id == thread_id)
+                    .distinct()
+                )
+            ).all()
+            o365_inbox_ids = [int(row[0]) for row in o365_rows]
+            if not o365_inbox_ids:
+                return None
+            if len(o365_inbox_ids) > 1:
+                raise ValueError("thread_id exists in multiple inboxes; pass inbox_id explicitly")
+            return await _get_o365_thread_messages(db, thread_id=thread_id, inbox_id=o365_inbox_ids[0])
         if len(inbox_ids) > 1:
             raise ValueError("thread_id exists in multiple inboxes; pass inbox_id explicitly")
         chosen_inbox_id = inbox_ids[0]
@@ -1284,7 +1546,8 @@ async def get_thread_messages(
     )
     thread_with_account = thread_row.first()
     if not thread_with_account:
-        return None
+        # Not a Gmail thread – try Office 365
+        return await _get_o365_thread_messages(db, thread_id=thread_id, inbox_id=chosen_inbox_id)
     thread, account_email = thread_with_account
 
     msg_rows = await db.execute(
@@ -1330,7 +1593,7 @@ async def get_thread_messages(
     return {
         "thread_id": thread_id,
         "inbox_id": chosen_inbox_id,
-        "gmail_account": account_email,
+        "inbox_account": account_email,
         "subject": subject,
         "last_message_timestamp": _dt_to_iso(_epoch_ms_to_dt(thread.last_internal_date)),
         "messages": out_messages,
@@ -1948,12 +2211,16 @@ async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
     hydrate_thread_ids: set[str] = set()
     try:
         async with AsyncSessionLocal() as db:
-            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider == "gmail"))
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365"])))
             inbox = inbox_res.scalar_one_or_none()
             if not inbox:
                 await db.rollback()
                 return False
-            touched, hydrate_thread_ids = await _sync_inbox(db, inbox, reason)
+            if inbox.provider == "office365":
+                touched = await _sync_inbox_office365(db, inbox, reason)
+                hydrate_thread_ids = set()
+            else:
+                touched, hydrate_thread_ids = await _sync_inbox(db, inbox, reason)
             await db.commit()
     except Exception:
         log.exception("Failed unibox sync for inbox_id=%s reason=%s", inbox_id, reason)
@@ -1993,12 +2260,17 @@ async def backfill_single_inbox(
     touched: set[tuple[int, str]] = set()
     try:
         async with AsyncSessionLocal() as db:
-            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider == "gmail"))
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365"])))
             inbox = inbox_res.scalar_one_or_none()
             if not inbox:
                 await db.rollback()
                 return False
-            touched, _meta = await _backfill_older_window(db, inbox, window_days=window_days)
+            if inbox.provider == "office365":
+                # Office 365 doesn't have a separate backfill; re-use full sync
+                touched = await _sync_inbox_office365(db, inbox, reason)
+                _meta = {}
+            else:
+                touched, _meta = await _backfill_older_window(db, inbox, window_days=window_days)
             await db.commit()
     except Exception:
         log.exception("Failed unibox backfill for inbox_id=%s reason=%s", inbox_id, reason)
@@ -2021,7 +2293,7 @@ async def backfill_single_inbox(
 
 async def sync_all_inboxes(reason: str = "scheduled") -> int:
     async with AsyncSessionLocal() as db:
-        rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+        rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365"])))
         inbox_ids = [row[0] for row in rows.all()]
 
     synced = 0
@@ -2070,12 +2342,602 @@ async def queue_backfill_for_all_inboxes(
 ) -> None:
     async def _runner() -> None:
         async with AsyncSessionLocal() as db:
-            rows = await db.execute(select(Inbox.id).where(Inbox.provider == "gmail"))
+            rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365"])))
             inbox_ids = [row[0] for row in rows.all()]
         for inbox_id in inbox_ids:
             await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)
 
     asyncio.create_task(_runner())
+
+
+# ---------------------------------------------------------------------------
+# Office 365 / Microsoft Graph sync implementation
+# ---------------------------------------------------------------------------
+
+GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
+O365_SYNC_WINDOW_DAYS = 7
+
+
+def _graph_request_json(
+    method: str,
+    url: str,
+    access_token: str,
+    *,
+    params: dict[str, Any] | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Make an HTTP request to Microsoft Graph API and return JSON."""
+    if params:
+        encoded = urllib.parse.urlencode(params, doseq=True)
+        url = f"{url}?{encoded}"
+
+    body = None
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+    if payload is not None:
+        body = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    req = urllib.request.Request(url=url, data=body, method=method, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            raw = resp.read().decode("utf-8")
+            return json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as exc:
+        body_text = ""
+        try:
+            body_text = exc.read().decode("utf-8")
+        except Exception:
+            body_text = str(exc)
+        raise GmailAPIError(exc.code, body_text) from exc
+    except Exception as exc:
+        raise GmailAPIError(0, str(exc)) from exc
+
+
+def _graph_list_messages(
+    access_token: str,
+    *,
+    folder: str = "",
+    top: int = 100,
+    filter_str: str = "",
+    select_fields: str = "id,conversationId,internetMessageId,receivedDateTime,subject,from,toRecipients,body,isRead,hasAttachments",
+    delta_link: str = "",
+    use_delta_endpoint: bool = False,
+) -> tuple[list[dict[str, Any]], str]:
+    """Fetch messages from Microsoft Graph, returning (messages, next_delta_link).
+
+    If *delta_link* is provided, uses it for incremental sync.
+    If *use_delta_endpoint* is True (and no delta_link), uses the /delta endpoint
+    so that Graph returns a deltaLink usable for future incremental syncs.
+    Otherwise fetches from the regular messages endpoint with optional folder/filter.
+    """
+    messages: list[dict[str, Any]] = []
+    next_link: str | None = None
+
+    if delta_link:
+        url = delta_link
+    elif use_delta_endpoint:
+        _folder = folder or "Inbox"
+        base = f"{GRAPH_API_BASE}/me/mailFolders/{_folder}/messages/delta"
+        params: dict[str, str] = {
+            "$top": str(top),
+            "$select": select_fields,
+            # NOTE: $orderby is not supported on the delta endpoint
+        }
+        if filter_str:
+            params["$filter"] = filter_str
+        url = f"{base}?{urllib.parse.urlencode(params)}"
+    else:
+        base = f"{GRAPH_API_BASE}/me/mailFolders/{folder}/messages" if folder else f"{GRAPH_API_BASE}/me/messages"
+        params = {
+            "$top": str(top),
+            "$select": select_fields,
+            "$orderby": "receivedDateTime desc",
+        }
+        if filter_str:
+            params["$filter"] = filter_str
+        url = f"{base}?{urllib.parse.urlencode(params)}"
+
+    new_delta_link = ""
+
+    while url:
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                "Prefer": "odata.maxpagesize=100",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body_text = ""
+            try:
+                body_text = exc.read().decode("utf-8")
+            except Exception:
+                pass
+            raise GmailAPIError(exc.code, body_text) from exc
+
+        for msg in data.get("value", []):
+            if isinstance(msg, dict):
+                messages.append(msg)
+
+        # Check for delta link or next page
+        if "@odata.deltaLink" in data:
+            new_delta_link = data["@odata.deltaLink"]
+        next_link = data.get("@odata.nextLink")
+        url = next_link if next_link else ""
+
+    return messages, new_delta_link
+
+
+async def _ensure_o365_access_token(db: AsyncSession, account: Office365Account) -> str:
+    """Ensure the Office 365 access token is fresh, refreshing if needed."""
+    now_utc = time_provider.utcnow()
+    if account.token_expiry and account.token_expiry <= (now_utc + timedelta(minutes=5)):
+        client_id, client_secret, tenant_id = await get_office365_oauth_credentials(db)
+        refreshed = refresh_office365_token(account, client_id, client_secret, tenant_id)
+        if not refreshed:
+            try:
+                await maybe_fire_email_event(
+                    db,
+                    "token_expired",
+                    {"inbox_id": account.inbox_id, "at": now_utc.isoformat()},
+                )
+            except Exception:
+                log.exception("failed firing token_expired webhook")
+            raise RuntimeError(f"Could not refresh Office 365 access token for inbox_id={account.inbox_id}")
+        await db.flush()
+    return account.access_token
+
+
+async def _get_or_create_o365_sync_state(db: AsyncSession, inbox_id: int) -> Office365SyncState:
+    res = await db.execute(select(Office365SyncState).where(Office365SyncState.inbox_id == inbox_id))
+    state = res.scalar_one_or_none()
+    if state:
+        return state
+    state = Office365SyncState(inbox_id=inbox_id)
+    db.add(state)
+    await db.flush()
+    return state
+
+
+async def _upsert_o365_thread(
+    db: AsyncSession,
+    inbox_id: int,
+    conversation_id: str,
+    subject: str,
+    received_at: datetime | None,
+) -> Office365Thread:
+    """Get or create an Office365Thread row."""
+    res = await db.execute(
+        select(Office365Thread).where(
+            Office365Thread.inbox_id == inbox_id,
+            Office365Thread.conversation_id == conversation_id,
+        )
+    )
+    thread = res.scalar_one_or_none()
+    if thread:
+        if received_at and (thread.last_received_at is None or received_at > thread.last_received_at):
+            thread.last_received_at = received_at
+        if subject and not thread.subject:
+            thread.subject = subject
+        thread.updated_at = time_provider.utcnow()
+        return thread
+    thread = Office365Thread(
+        inbox_id=inbox_id,
+        conversation_id=conversation_id,
+        subject=subject or "",
+        last_received_at=received_at,
+    )
+    db.add(thread)
+    await db.flush()
+    return thread
+
+
+async def _upsert_o365_message(
+    db: AsyncSession,
+    inbox_id: int,
+    graph_message: dict[str, Any],
+) -> tuple[Office365Message, bool]:
+    """Upsert a message from Microsoft Graph API data. Returns (row, created)."""
+    msg_id = str(graph_message.get("id", ""))
+    conv_id = str(graph_message.get("conversationId", ""))
+    internet_msg_id = str(graph_message.get("internetMessageId", ""))
+    subject = str(graph_message.get("subject", ""))
+
+    received_str = graph_message.get("receivedDateTime", "")
+    received_at = None
+    if received_str:
+        try:
+            received_at = datetime.fromisoformat(received_str.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+
+    from_data = graph_message.get("from", {}) or {}
+    from_addr = ""
+    if isinstance(from_data, dict):
+        ea = from_data.get("emailAddress", {}) or {}
+        from_addr = str(ea.get("address", "")).lower()
+
+    to_list = []
+    for recip in graph_message.get("toRecipients", []) or []:
+        if isinstance(recip, dict):
+            ea = recip.get("emailAddress", {}) or {}
+            addr = str(ea.get("address", "")).lower()
+            if addr:
+                to_list.append(addr)
+
+    body_data = graph_message.get("body", {}) or {}
+    body_type = str(body_data.get("contentType", "")).lower()
+    body_content = str(body_data.get("content", ""))
+    body_html = body_content if body_type == "html" else ""
+    body_plain = body_content if body_type == "text" else ""
+    if body_html and not body_plain:
+        body_plain = _strip_html_tags(body_html)
+
+    is_read = bool(graph_message.get("isRead", False))
+    has_attachments = bool(graph_message.get("hasAttachments", False))
+
+    # Ensure thread exists
+    await _upsert_o365_thread(db, inbox_id, conv_id, subject, received_at)
+
+    # Check existing
+    res = await db.execute(
+        select(Office365Message).where(
+            Office365Message.inbox_id == inbox_id,
+            Office365Message.message_id == msg_id,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing:
+        existing.subject = subject
+        existing.body_plain = body_plain
+        existing.body_html = body_html
+        existing.is_read = is_read
+        existing.updated_at = time_provider.utcnow()
+        return existing, False
+
+    # Before inserting, delete any local surrogate that was created at send-time
+    # for this exact RFC 2822 Message-ID so the message doesn't appear twice.
+    if internet_msg_id:
+        local_res = await db.execute(
+            select(Office365Message).where(
+                Office365Message.inbox_id == inbox_id,
+                Office365Message.internet_message_id == internet_msg_id,
+                Office365Message.message_id.startswith("local-"),
+            )
+        )
+        for local_row in local_res.scalars().all():
+            await db.delete(local_row)
+
+    row = Office365Message(
+        inbox_id=inbox_id,
+        message_id=msg_id,
+        conversation_id=conv_id,
+        internet_message_id=internet_msg_id,
+        received_at=received_at,
+        subject=subject,
+        from_address=from_addr,
+        to_addresses=json.dumps(to_list),
+        body_plain=body_plain,
+        body_html=body_html,
+        is_read=is_read,
+        has_attachments=has_attachments,
+    )
+    db.add(row)
+    await db.flush()
+    return row, True
+
+
+async def _sync_inbox_office365(
+    db: AsyncSession,
+    inbox: Inbox,
+    reason: str,
+) -> set[tuple[int, str]]:
+    """Sync an Office 365 inbox using Microsoft Graph API.
+
+    Returns set of (inbox_id, conversation_id) for touched threads.
+    """
+    touched_threads: set[tuple[int, str]] = set()
+
+    account_res = await db.execute(select(Office365Account).where(Office365Account.inbox_id == inbox.id))
+    account = account_res.scalar_one_or_none()
+    if account is None:
+        return touched_threads
+
+    state = await _get_or_create_o365_sync_state(db, inbox.id)
+    access_token = await _ensure_o365_access_token(db, account)
+
+    sync_end = time_provider.utcnow()
+    sync_start = sync_end - timedelta(days=O365_SYNC_WINDOW_DAYS)
+    date_filter = f"receivedDateTime ge {sync_start.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+    # ── Helper: sync one folder (Inbox / SentItems / JunkEmail) ────────────
+    async def _sync_folder(
+        folder: str,
+        delta_attr: str,
+    ) -> list[dict[str, Any]]:
+        """Sync a single mailFolder using delta or full scan.
+
+        Returns the list of changed messages.  Updates *state.<delta_attr>*
+        and calls db.flush() internally but does NOT commit.
+        """
+        stored_delta: str = getattr(state, delta_attr, "") or ""
+        folder_messages: list[dict[str, Any]] = []
+        _delta_expired = False
+
+        if stored_delta:
+            try:
+                msgs, new_delta = await asyncio.to_thread(
+                    _graph_list_messages,
+                    access_token,
+                    delta_link=stored_delta,
+                )
+            except GmailAPIError as exc:
+                if exc.status_code in (400, 410):
+                    log.info(
+                        "O365 delta link expired for folder=%s inbox_id=%s; full scan",
+                        folder, inbox.id,
+                    )
+                    setattr(state, delta_attr, "")
+                    _delta_expired = True
+                else:
+                    raise
+
+            if not _delta_expired:
+                folder_messages = msgs
+                if new_delta:
+                    setattr(state, delta_attr, new_delta)
+                await db.flush()
+                return folder_messages
+
+        # Full scan for this folder
+        msgs, new_delta = await asyncio.to_thread(
+            _graph_list_messages,
+            access_token,
+            folder=folder,
+            filter_str=date_filter,
+            use_delta_endpoint=True,
+        )
+        folder_messages = msgs
+        if new_delta:
+            setattr(state, delta_attr, new_delta)
+        await db.flush()
+        return folder_messages
+
+    # ── Sync Inbox ────────────────────────────────────────────────────────
+    inbox_messages = await _sync_folder("Inbox", "delta_link")
+    for idx, msg in enumerate(inbox_messages, start=1):
+        row, _created = await _upsert_o365_message(db, inbox.id, msg)
+        touched_threads.add((inbox.id, row.conversation_id))
+        if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+            state.last_sync_at = time_provider.utcnow()
+            await db.commit()
+            log.info(
+                "Unibox O365 Inbox sync progress inbox_id=%s processed=%s/%s",
+                inbox.id, idx, len(inbox_messages),
+            )
+
+    # ── Sync SentItems ────────────────────────────────────────────────────
+    sent_messages = await _sync_folder("SentItems", "sent_delta_link")
+    for idx, msg in enumerate(sent_messages, start=1):
+        row, _created = await _upsert_o365_message(db, inbox.id, msg)
+        touched_threads.add((inbox.id, row.conversation_id))
+        if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+            state.last_sync_at = time_provider.utcnow()
+            await db.commit()
+            log.info(
+                "Unibox O365 SentItems sync progress inbox_id=%s processed=%s/%s",
+                inbox.id, idx, len(sent_messages),
+            )
+
+    # ── Sync JunkEmail (Spam/Junk) ─────────────────────────────────────────
+    junk_messages = await _sync_folder("JunkEmail", "junk_delta_link")
+    for idx, msg in enumerate(junk_messages, start=1):
+        row, _created = await _upsert_o365_message(db, inbox.id, msg)
+        touched_threads.add((inbox.id, row.conversation_id))
+        if idx % FULL_SYNC_PROGRESS_COMMIT_INTERVAL == 0:
+            state.last_sync_at = time_provider.utcnow()
+            await db.commit()
+            log.info(
+                "Unibox O365 JunkEmail sync progress inbox_id=%s processed=%s/%s",
+                inbox.id, idx, len(junk_messages),
+            )
+
+    all_messages = inbox_messages + sent_messages + junk_messages
+    state.last_sync_at = time_provider.utcnow()
+    await db.flush()
+
+    # Detect lead replies (inbound) and mark sent-to-lead threads (outbound)
+    if all_messages:
+        await _detect_o365_lead_replies(db, inbox, inbox_messages + junk_messages)
+        await _detect_o365_sent_to_lead(db, inbox, sent_messages)
+
+    log.info(
+        "Unibox O365 sync inbox_id=%s reason=%s inbox=%s sent=%s junk=%s touched=%s",
+        inbox.id, reason,
+        len(inbox_messages), len(sent_messages), len(junk_messages),
+        len(touched_threads),
+    )
+    return touched_threads
+
+
+async def _detect_o365_lead_replies(
+    db: AsyncSession,
+    inbox: Inbox,
+    messages: list[dict[str, Any]],
+) -> None:
+    """Detect lead replies among newly synced Office 365 messages (Inbox + JunkEmail).
+
+    Mirrors the Gmail reply detection logic: any inbound message whose sender
+    is a known lead marks the thread as a lead thread and fires reply logic.
+    """
+    inbox_email = inbox.email.lower()
+
+    for msg in messages:
+        from_data = msg.get("from", {}) or {}
+        from_ea = from_data.get("emailAddress", {}) or {}
+        from_addr = str(from_ea.get("address", "")).lower()
+
+        if not from_addr or from_addr == inbox_email:
+            continue  # Skip our own outgoing messages
+
+        conv_id = str(msg.get("conversationId", ""))
+        if not conv_id:
+            continue
+
+        lead_res = await db.execute(
+            select(Lead).where(func.lower(Lead.email) == from_addr)
+        )
+        lead = lead_res.scalar_one_or_none()
+        if not lead:
+            continue
+
+        # Always mark the thread as a lead thread when this lead sent us a message,
+        # regardless of whether they're in an active campaign (matches Gmail behaviour).
+        thread_res = await db.execute(
+            select(Office365Thread).where(
+                Office365Thread.inbox_id == inbox.id,
+                Office365Thread.conversation_id == conv_id,
+            )
+        )
+        thread = thread_res.scalar_one_or_none()
+        if thread and not thread.is_lead_thread:
+            thread.is_lead_thread = True
+            thread.unread_lead_reply = True
+            await db.flush()
+
+        # Find campaign_leads associated with this inbox so we can record a reply
+        # and cancel remaining queue slots.  Primary lookup: EmailLog thread_id.
+        log_res = await db.execute(
+            select(EmailLog.campaign_id).where(
+                EmailLog.thread_id == conv_id,
+                EmailLog.lead_id == lead.id,
+            ).distinct()
+        )
+        campaign_ids = [r[0] for r in log_res.all()]
+
+        # Fallback: any campaign this lead is enrolled in that uses this inbox.
+        if not campaign_ids:
+            from app.models import CampaignInbox
+            cl_res = await db.execute(
+                select(CampaignLead.campaign_id)
+                .join(CampaignInbox, CampaignLead.campaign_id == CampaignInbox.campaign_id)
+                .where(
+                    CampaignLead.lead_id == lead.id,
+                    CampaignInbox.inbox_id == inbox.id,
+                )
+            )
+            campaign_ids = [r[0] for r in cl_res.all()]
+
+        for camp_id in campaign_ids:
+            existing_reply = await db.execute(
+                select(LeadReply).where(
+                    LeadReply.lead_id == lead.id,
+                    LeadReply.campaign_id == camp_id,
+                )
+            )
+            if existing_reply.scalar_one_or_none():
+                continue
+
+            db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
+
+            if lead.status in ("active", ""):
+                lead.status = "replied"
+
+            # Delete remaining queue slots
+            cl_ids_res = await db.execute(
+                select(CampaignLead.id).where(
+                    CampaignLead.lead_id == lead.id,
+                    CampaignLead.campaign_id == camp_id,
+                )
+            )
+            cl_ids = [r[0] for r in cl_ids_res.all()]
+            if cl_ids:
+                await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids)))
+
+            # Ensure thread marked as lead thread + unread
+            if thread and not thread.unread_lead_reply:
+                thread.is_lead_thread = True
+                thread.unread_lead_reply = True
+
+            await db.flush()
+
+            # Fire webhook
+            try:
+                await fire_lead_reply_webhook(db, {
+                    "lead_id": lead.id,
+                    "lead_email": lead.email,
+                    "campaign_id": camp_id,
+                    "inbox_id": inbox.id,
+                    "conversation_id": conv_id,
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+            except Exception:
+                log.exception("Failed to fire lead reply webhook for lead_id=%s", lead.id)
+
+            log.info(
+                "O365 lead reply detected: lead=%s campaign=%s inbox=%s conv=%s",
+                lead.email, camp_id, inbox.id, conv_id,
+            )
+
+
+async def _detect_o365_sent_to_lead(
+    db: AsyncSession,
+    inbox: Inbox,
+    messages: list[dict[str, Any]],
+) -> None:
+    """Mark O365 threads as lead threads when we sent an email to a known lead.
+
+    Mirrors the Gmail 'Sent-to-lead detection' in _upsert_message_from_gmail.
+    Called for SentItems messages so that outbound emails show up in the
+    unibox even before the lead replies.
+    """
+    inbox_email = inbox.email.lower()
+
+    for msg in messages:
+        conv_id = str(msg.get("conversationId", ""))
+        if not conv_id:
+            continue
+
+        # Determine the TO address(es)
+        for recip in msg.get("toRecipients", []) or []:
+            if not isinstance(recip, dict):
+                continue
+            ea = recip.get("emailAddress", {}) or {}
+            to_addr = str(ea.get("address", "")).lower()
+            if not to_addr or to_addr == inbox_email:
+                continue
+
+            lead_res = await db.execute(
+                select(Lead).where(func.lower(Lead.email) == to_addr)
+            )
+            lead = lead_res.scalar_one_or_none()
+            if not lead:
+                continue
+
+            # Mark the thread as a lead thread
+            thread_res = await db.execute(
+                select(Office365Thread).where(
+                    Office365Thread.inbox_id == inbox.id,
+                    Office365Thread.conversation_id == conv_id,
+                )
+            )
+            thread = thread_res.scalar_one_or_none()
+            if thread and not thread.is_lead_thread:
+                thread.is_lead_thread = True
+                await db.flush()
+                log.debug(
+                    "O365 sent-to-lead thread marked: lead=%s inbox=%s conv=%s",
+                    to_addr, inbox.id, conv_id,
+                )
+            break  # one matching lead recipient is enough
 
 
 def decode_push_message_data(raw_data: str) -> dict[str, Any]:

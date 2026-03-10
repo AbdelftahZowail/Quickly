@@ -14,3 +14,9 @@ venv/
 *.pyc
 .idea/
 temp/
+
+# Caddy TLS certificates (persisted locally to avoid Let's Encrypt rate limits)
+caddy_data/
+caddy_config/
+caddy_data_dev/
+caddy_config_dev/

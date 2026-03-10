@@ -125,7 +125,7 @@ export default function Schedule() {
   const [statusFilter, setStatusFilter] = useState('');
   const [searchFilter, setSearchFilter] = useState('');
 
-  const [pastExpanded, setPastExpanded] = useState(false);
+  const [pastExpanded, setPastExpanded] = useState(true);
   const [expandedId, setExpandedId] = useState(null);
   const [previewItem, setPreviewItem] = useState(null);
 
@@ -224,8 +224,6 @@ export default function Schedule() {
     return diff < 1 ? 'Just now' : diff + 'm ago';
   };
   const recalculateAll = async () => {
-    const ok = await confirm('Recalculate queue slots for ALL campaigns? This will recompute all scheduled emails while preserving already-sent sequences.');
-    if (!ok) return;
     setRecalcState({ busy: true, text: '⚡ Recalculating...' });
     try {
       const res = await fetch('/api/schedule/recalculate-all',{method:'POST'});
@@ -250,8 +248,6 @@ export default function Schedule() {
     }
   };
   const validateQueue = async () => {
-    const ok = await confirm('Run validation checks for scheduled emails?');
-    if (!ok) return;
     setValidateState({ busy: true, text: '🔍 Validating...' });
     try {
       const res = await fetch('/api/schedule/validate-queue',{method:'POST'});
@@ -309,7 +305,7 @@ export default function Schedule() {
           <div className="time-col">{time}</div>
           <div className="status-col"><span className={`badge-status ${statusCls}`}>{statusLabel}</span></div>
           <div className="lead-col" title={item.lead_email}>
-            {item.lead_email}{item.lead_status && <span className={`badge ${item.lead_status}`} style={{marginLeft:'0.3rem',fontSize:'0.75rem'}}>{item.lead_status}</span>}
+            {/* {item.lead_email}{item.lead_status && <span className={`badge ${item.lead_status}`} style={{marginLeft:'0.3rem',fontSize:'0.75rem'}}>{item.lead_status}</span>} */}
           </div>
           <div className="subj-col" title={subject}>{subject}</div>
           <div className="camp-col" title={item.campaign_name}>{item.campaign_name}</div>

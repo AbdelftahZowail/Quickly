@@ -39,6 +39,11 @@ class Settings:
         # Google OAuth (also stored in AppSetting for backward compat)
         self.google_client_id: str = os.getenv("GOOGLE_CLIENT_ID", "")
         self.google_client_secret: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+
+        # Office 365 / Microsoft OAuth
+        self.office365_client_id: str = os.getenv("OFFICE365_CLIENT_ID", "")
+        self.office365_client_secret: str = os.getenv("OFFICE365_CLIENT_SECRET", "")
+        self.office365_tenant_id: str = os.getenv("OFFICE365_TENANT_ID", "common")
         
         # Background job interval
         self.queue_check_interval_minutes: int = 1
@@ -67,6 +72,10 @@ class Settings:
     @property
     def google_redirect_uri(self) -> str:
         return f"{self.base_url.rstrip('/')}/oauth/google/callback"
+
+    @property
+    def office365_redirect_uri(self) -> str:
+        return f"{self.base_url.rstrip('/')}/oauth/office365/callback"
     
     def reload_from_dict(self, data: dict):
         """Update settings from a dictionary (typically loaded from DB)."""

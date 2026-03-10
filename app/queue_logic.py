@@ -10,7 +10,7 @@ try:
 except ImportError:
     ZoneInfo = None  # type: ignore[assignment,misc]  # Python < 3.9 fallback
 
-from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, EmailLog, CampaignInbox
+from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, EmailLog, CampaignInbox, Lead
 
 log = logging.getLogger("quickly.queue")
 
@@ -719,6 +719,30 @@ async def reserve_slots_for_lead(
     log.info("reserve_slots_for_lead: done, created %d slots", len(scheduled_dates))
 
 
+def _filter_inboxes_for_lead_provider(
+    inboxes: List[Tuple],
+    lead_provider: Optional[str],
+    match_enabled: bool,
+) -> List[Tuple]:
+    """Filter campaign inboxes to those matching the lead's email provider.
+
+    When ``match_enabled`` is True and the lead has a recognised provider
+    (e.g. "Google Workspace" → "gmail", "Office 365" → "office365"), only
+    inboxes with a matching ``provider`` field are returned.  Falls back to
+    the full inbox list when no matching inbox is available, ensuring every
+    lead gets scheduled even if the provider split isn't perfect.
+    """
+    if not match_enabled or not lead_provider:
+        return inboxes
+    from app.email_provider import get_inbox_provider_for_lead
+    required = get_inbox_provider_for_lead(lead_provider)
+    if not required:
+        return inboxes  # Unknown/unsupported provider — no filtering
+    # inboxes tuple: (inbox_id, inbox_obj, wait_minutes_between)
+    filtered = [i for i in inboxes if getattr(i[1], "provider", None) == required]
+    return filtered if filtered else inboxes  # Fallback to all if none match
+
+
 async def _fetch_campaign_scheduling_data(
     session: AsyncSession, campaign_id: int
 ) -> Optional[Tuple[Campaign, List[Tuple[int, int, int]], List[Sequence]]]:
@@ -844,10 +868,24 @@ async def reserve_slots_for_new_leads_bulk(
     )
 
     # ── Step 4: schedule each lead sharing the same cache ────────────────────
+    # Fetch lead providers if provider matching is enabled
+    match_provider = getattr(campaign, "match_lead_provider", False)
+    lead_providers: dict[int, Optional[str]] = {}
+    if match_provider:
+        lead_ids_list = [cl.lead_id for cl in campaign_leads]
+        if lead_ids_list:
+            prov_result = await session.execute(
+                select(Lead.id, Lead.provider).where(Lead.id.in_(lead_ids_list))
+            )
+            lead_providers = {row.id: row.provider for row in prov_result.all()}
+
     base_start = start_date or time_provider.today()
     for cl in campaign_leads:
+        effective_inboxes = _filter_inboxes_for_lead_provider(
+            inboxes, lead_providers.get(cl.lead_id), match_provider
+        )
         await reserve_slots_for_lead(
-            session, cl.id, campaign, inboxes, sequences,
+            session, cl.id, campaign, effective_inboxes, sequences,
             lead_id=cl.lead_id,
             start_date=base_start,
             last_sent_sequence_index=-1,  # brand-new leads: schedule everything
@@ -951,6 +989,15 @@ async def _recalculate_queue_for_campaign_leads(
         .order_by(QueueSlot.campaign_lead_id, QueueSlot.sequence_index.asc())
     )
     preferred_inbox_from_slot = {row.campaign_lead_id: row.inbox_id for row in preferred_inbox_from_slot_query.all()}
+
+    # Query 4: Lead providers (for provider-matched sending)
+    match_provider = getattr(campaign, "match_lead_provider", False)
+    lead_providers: dict[int, Optional[str]] = {}
+    if match_provider and lead_ids:
+        prov_result = await session.execute(
+            select(Lead.id, Lead.provider).where(Lead.id.in_(lead_ids))
+        )
+        lead_providers = {row.id: row.provider for row in prov_result.all()}
 
     # ============================================================================
     # END BULK QUERIES
@@ -1083,8 +1130,19 @@ async def _recalculate_queue_for_campaign_leads(
 
         start_date = last_sent_date_by_lead.get(cl.lead_id, _campaign_now(campaign).date())
 
+        effective_inboxes = _filter_inboxes_for_lead_provider(
+            inboxes, lead_providers.get(cl.lead_id), match_provider
+        )
+        # When provider filtering reduced the inbox set, the preferred inbox
+        # from the history may no longer be in the filtered set — clear it so
+        # reserve_slots_for_lead picks from the filtered candidates instead.
+        if preferred_inbox is not None and effective_inboxes is not inboxes:
+            effective_inbox_ids = {i[0] for i in effective_inboxes}
+            if preferred_inbox not in effective_inbox_ids:
+                preferred_inbox = None
+
         await reserve_slots_for_lead(
-            session, cl.id, campaign, inboxes, sequences,
+            session, cl.id, campaign, effective_inboxes, sequences,
             lead_id=cl.lead_id,
             start_date=start_date,
             last_sent_sequence_index=last_sent,

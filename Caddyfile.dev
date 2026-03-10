@@ -23,7 +23,10 @@
 # Primary entry point — HTTP on :80 for local dev (no certificate needed).
 # Override with CADDY_HOST=yourdomain.com in .env for HTTPS.
 {$CADDY_HOST::80} {
-    reverse_proxy backend:8000
+    reverse_proxy backend:8000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
 }
 
 # localhost — serve with a Caddy-managed internal (self-signed) certificate
@@ -31,7 +34,10 @@
 # or the public ACME CA.
 localhost {
     tls internal
-    reverse_proxy backend:8000
+    reverse_proxy backend:8000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
 }
 
 # Catch-all for custom tracking domains arriving on :443.
@@ -41,5 +47,8 @@ localhost {
     tls {
         on_demand
     }
-    reverse_proxy backend:8000
+    reverse_proxy backend:8000 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
 }

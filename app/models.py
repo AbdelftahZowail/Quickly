@@ -80,7 +80,7 @@ class Inbox(Base):
     display_name = Column(String(255), default="")
     max_emails_per_day = Column(Integer, default=50, nullable=False)
     wait_minutes_between = Column(Integer, default=5, nullable=False)  # Minutes between emails from this inbox
-    provider = Column(String(32), default="gmail")  # gmail
+    provider = Column(String(32), default="gmail")  # gmail | office365
     # Custom tracking domain for this inbox (hostname only, e.g. "mail.client.com").
     # When set, open/click tracking URLs for emails sent from this inbox will use
     # https://<tracking_domain>/o/... instead of the app's own base URL.
@@ -94,6 +94,10 @@ class Inbox(Base):
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     gmail_sync_state = relationship("GmailSyncState", uselist=False, cascade="all, delete-orphan")
     gmail_threads = relationship("GmailThread", back_populates="inbox", cascade="all, delete-orphan")
+    office365_account = relationship("Office365Account", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
+    office365_sync_state = relationship("Office365SyncState", uselist=False, cascade="all, delete-orphan")
+    office365_threads = relationship("Office365Thread", back_populates="inbox", cascade="all, delete-orphan")
+    office365_graph_subscription = relationship("Office365GraphSubscription", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
 
 
 class Lead(Base):
@@ -107,6 +111,8 @@ class Lead(Base):
     email_verification_status = Column(String(32), nullable=True, default=None, index=True)
     # Raw JSON result from the verification provider
     email_verification_result = Column(JSON, nullable=True, default=None)
+    # Detected email hosting provider (e.g. "Google Workspace", "Office 365") via MX lookup
+    provider = Column(String(64), nullable=True, default=None, index=True)
     created_at = Column(DateTime, default=_utcnow)
     campaign_leads = relationship("CampaignLead", back_populates="lead", cascade="all, delete-orphan")
     email_logs = relationship("EmailLog", back_populates="lead")
@@ -141,6 +147,9 @@ class Campaign(Base):
     send_all_as_text = Column(Boolean, default=False, nullable=False)    # Force every sequence to plain text
     # Timezone for scheduling (IANA timezone name, e.g. "America/New_York")
     timezone = Column(String(64), nullable=True, default=None)
+    # Provider matching: when True, prefer inboxes whose provider matches the lead's email provider
+    # (Google leads → Gmail inboxes, Office 365 leads → Office 365 inboxes; falls back to any inbox)
+    match_lead_provider = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship(
         "CampaignInbox",
@@ -261,10 +270,7 @@ class EmailLog(Base):
     variant_id = Column(
         Integer, ForeignKey("sequence_variant.id", ondelete="SET NULL"), nullable=True, default=None
     )
-    # using 16 characters here is plenty for the shorter tokens generated
-    # by ``_make_open_token``; adjust with a migration if you need to shrink
-    # the column further.
-    open_token = Column(String(16), unique=True, nullable=True, index=True, default=_make_open_token)
+    open_token = Column(String(32), unique=True, nullable=True, index=True, default=_make_open_token)
     format_override = Column(String(64), nullable=True, default=None)  # why format was overridden
     sent_at = Column(DateTime, default=_utcnow)
     subject = Column(String(512), default="")
@@ -512,6 +518,108 @@ class GmailAttachment(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
 
     message = relationship("GmailMessage", back_populates="attachments")
+
+
+# ---------------------------------------------------------------------------
+# Office 365 / Microsoft Graph integration models
+# ---------------------------------------------------------------------------
+
+class Office365Account(Base):
+    """Stores Microsoft Office 365 OAuth 2.0 tokens linked to an Inbox."""
+    __tablename__ = "office365_account"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    microsoft_email = Column(String(255), nullable=False)
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=False)
+    token_expiry = Column(DateTime, nullable=True)
+    scopes = Column(String(1024), default="Mail.ReadWrite Mail.Send User.Read offline_access")
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="office365_account")
+
+
+class Office365SyncState(Base):
+    """Tracks Microsoft Graph delta sync checkpoints per inbox."""
+    __tablename__ = "office365_sync_state"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    delta_link = Column(Text, default="")            # Graph API delta link for Inbox
+    sent_delta_link = Column(Text, default="")       # Graph API delta link for SentItems
+    junk_delta_link = Column(Text, default="")        # Graph API delta link for JunkEmail
+    last_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="office365_sync_state")
+
+
+class Office365Thread(Base):
+    """Local metadata mirror for Office 365 conversation threads."""
+    __tablename__ = "office365_thread"
+    __table_args__ = (
+        Index("ix_o365_thread_inbox_last_date", "inbox_id", "last_received_at"),
+    )
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), primary_key=True)
+    conversation_id = Column(String(256), primary_key=True)
+    subject = Column(Text, default="")
+    last_received_at = Column(DateTime, nullable=True)
+    is_lead_thread = Column(Boolean, default=False, nullable=False)
+    unread_lead_reply = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="office365_threads")
+    messages = relationship("Office365Message", back_populates="thread", cascade="all, delete-orphan")
+
+
+class Office365Message(Base):
+    """Local Office 365 message mirror (metadata eager, bodies lazy)."""
+    __tablename__ = "office365_message"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["inbox_id", "conversation_id"],
+            ["office365_thread.inbox_id", "office365_thread.conversation_id"],
+            name="fk_o365_message_thread",
+            ondelete="CASCADE",
+        ),
+        Index("ix_o365_message_inbox_conv_date", "inbox_id", "conversation_id", "received_at"),
+        Index("ix_o365_message_inbox_received", "inbox_id", "received_at"),
+    )
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), primary_key=True)
+    message_id = Column(String(256), primary_key=True)  # Graph API message id
+    conversation_id = Column(String(256), nullable=False)
+    internet_message_id = Column(String(512), nullable=True)  # RFC 822 Message-ID
+    received_at = Column(DateTime, nullable=True)
+    subject = Column(Text, default="")
+    from_address = Column(String(255), default="")
+    to_addresses = Column(Text, default="")  # JSON array of recipients
+    body_plain = Column(Text, default="")
+    body_html = Column(Text, default="")
+    is_read = Column(Boolean, default=False, nullable=False)
+    has_attachments = Column(Boolean, default=False, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox")
+    thread = relationship("Office365Thread", back_populates="messages")
+
+
+class Office365GraphSubscription(Base):
+    """Microsoft Graph change notification subscription for an Office 365 inbox.
+
+    Subscriptions notify Quickly in real time when new mail arrives,
+    eliminating the polling delay for reply detection and unibox updates.
+    Subscriptions are valid for up to ~3 days and must be periodically renewed.
+    """
+    __tablename__ = "office365_graph_subscription"
+    id = Column(Integer, primary_key=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False, unique=True)
+    subscription_id = Column(String(256), nullable=False, index=True)  # Microsoft-assigned GUID
+    client_state = Column(String(128), nullable=False)  # Random secret for notification validation
+    resource = Column(String(512), default="me/mailFolders/Inbox/messages")
+    change_type = Column(String(64), default="created")
+    expiry = Column(DateTime, nullable=False)  # UTC expiry from Microsoft Graph
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    inbox = relationship("Inbox", back_populates="office365_graph_subscription")
 
 
 class Webhook(Base):

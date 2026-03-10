@@ -34,8 +34,9 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
     """All sent emails across every campaign with full details."""
     # We need: EmailLog + Lead + Campaign + Sequence (matched by campaign_id & sequence_index)
     SeqAlias = aliased(Sequence)
+    InboxAlias = aliased(Inbox)
     result = await db.execute(
-        select(EmailLog, Lead, Campaign, SeqAlias)
+        select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias)
         # eager-load opens and clicks so we don't trigger a lazy load
         # (async sessions don't support lazy-loading outside of a
         # greenlet context; the MissingGreenlet error was occurring
@@ -51,6 +52,7 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
             (SeqAlias.campaign_id == Campaign.id)
             & (SeqAlias.position == EmailLog.sequence_index),
         )
+        .outerjoin(InboxAlias, EmailLog.inbox_id == InboxAlias.id)
         .order_by(EmailLog.sent_at.desc())
     )
     rows = result.all()
@@ -79,13 +81,17 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
             "campaign_hours_end": campaign.sending_hours_end or "17:00",
             "campaign_wait_minutes": campaign.wait_minutes_between or 5,
             "campaign_stop_on_reply": campaign.stop_on_reply,
+            "inbox_id": el.inbox_id,
+            "inbox_email": inbox.email if inbox else "",
+            "inbox_display_name": inbox.display_name if inbox else "",
+            "inbox_provider": inbox.provider if inbox else "",
             # include open/click events (ip + timestamp)
             "opens": [ {"ip": o.ip_address, "at": _utc_iso(o.opened_at)} for o in el.opens ],
             "clicks": [ {"ip": c.ip_address, "at": _utc_iso(c.clicked_at)} for c in el.clicks ],
             "opened": bool(el.opens),
             "clicked": bool(el.clicks),
         }
-        for el, lead, campaign, seq in rows
+        for el, lead, campaign, seq, inbox in rows
     ]
 
 

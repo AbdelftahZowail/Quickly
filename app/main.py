@@ -22,10 +22,13 @@ from app.database import init_db
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
+from app.routers import office365_oauth
+from app.routers import office365_webhook as office365_webhook_router
 from app.routers import schedule as schedule_router
 from app.routers import settings as settings_router
 from app.routers import unibox as unibox_router
 from app.routers import tracking as tracking_router
+from app.routers import email_provider as email_provider_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
@@ -63,6 +66,12 @@ async def lifespan(app: FastAPI):
         minute=f"*/{unibox_interval_minutes}",
         second=10,
         id="unibox_sync",
+    )
+    schedule.add_job(
+        office365_webhook_router.renew_expiring_subscriptions,
+        "interval",
+        hours=6,
+        id="office365_graph_subscription_renewal",
     )
     schedule.start()
     app.state.schedule = schedule
@@ -140,10 +149,28 @@ app.add_middleware(
 # Rate limiting – 200 req/min per IP by default on all routes
 # ---------------------------------------------------------------------------
 from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
-limiter = Limiter(key_func=get_remote_address, default_limits=["200/minute"])
+
+def _get_real_ip(request: Request) -> str:
+    """Return the real client IP, honouring Caddy's X-Real-IP header.
+
+    When the app runs behind the Caddy reverse proxy, ``request.client.host``
+    is Caddy's Docker-internal IP, not the browser/bot's address.  Caddy sets
+    ``X-Real-IP`` to the true remote address (configured in the Caddyfile), so
+    we prefer that.  Falling back to ``X-Forwarded-For`` and finally to the
+    direct client address ensures the function works in all environments.
+    """
+    real_ip = (
+        request.headers.get("X-Real-IP")
+        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+    )
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
+
+
+limiter = Limiter(key_func=_get_real_ip, default_limits=["200/minute"])
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -165,6 +192,10 @@ leads.router.dependencies = _auth_deps
 campaigns.router.dependencies = _auth_deps
 test_mode.router.dependencies = _auth_deps
 gmail_oauth.router.dependencies = _auth_deps
+office365_oauth.router.dependencies = _auth_deps
+# Callback routes are public – the provider's redirect carries no auth cookie.
+# office365_webhook_router has a public notification endpoint called by Microsoft,
+# so auth is NOT applied globally.  Management routes enforce auth individually.
 schedule_router.router.dependencies = _auth_deps
 settings_router.router.dependencies = _auth_deps
 unibox_router.router.dependencies = _auth_deps
@@ -176,10 +207,17 @@ app.include_router(leads.router)
 app.include_router(campaigns.router)
 app.include_router(test_mode.router)
 app.include_router(gmail_oauth.router)
+app.include_router(gmail_oauth.callback_router)
+app.include_router(office365_oauth.router)
+app.include_router(office365_oauth.callback_router)
+app.include_router(office365_webhook_router.router)
 app.include_router(schedule_router.router)
 app.include_router(settings_router.router)
 app.include_router(unibox_router.router)
 app.include_router(tracking_router.router)
+
+# lightweight public utility for MX-based provider detection
+app.include_router(email_provider_router.router)
 
 # ---------------------------------------------------------------------------
 # Static assets and SPA fallback
@@ -249,6 +287,21 @@ async def index(request: Request):
     return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
 
 
+import re as _re
+
+# Reject any path that looks like a probe for sensitive files or a traversal.
+# This ensures scanners get 404 instead of the SPA shell (200), which would
+# falsely signal that a resource exists.
+_SENSITIVE_PATH_RE = _re.compile(
+    r"(\.\.|%2e%2e|%252e|%5c|%255c)"  # path traversal variants
+    r"|/\.(env|git|aws|ssh|htaccess|htpasswd|dockerenv|npmrc|yarnrc|svn)"  # dot-files
+    r"|(credentials|id_rsa|authorized_keys|passwd|shadow|\.pem|\.key|\.pfx|\.p12)"  # secrets
+    r"|(wp-config|php\.ini|web\.config|server\.xml|\.DS_Store)"  # CMS / server configs
+    r"|(info\.php|phpinfo|\.well-known/acme-challenge)",  # common scanner probes
+    _re.IGNORECASE,
+)
+
+
 @app.get("/{full_path:path}", response_class=FileResponse)
 async def spa(request: Request, full_path: str):
     # ── Custom tracking domain guard ─────────────────────────────────────────
@@ -270,6 +323,13 @@ async def spa(request: Request, full_path: str):
             _res = await _db.execute(_select(Inbox).where(Inbox.tracking_domain == host))
             if _res.scalar_one_or_none() is not None:
                 return JSONResponse({"ts": None, "ref": 0}, status_code=200)
+
+    # ── Sensitive-path / path-traversal guard ─────────────────────────────────
+    # Decode percent-encoding before pattern matching so %2e%2e == ..
+    decoded_path = _urlparse.unquote(request.url.path)
+    if _SENSITIVE_PATH_RE.search(decoded_path) or _SENSITIVE_PATH_RE.search(request.url.path):
+        raise HTTPException(status_code=404)
+
     # ── Normal SPA / API routing ─────────────────────────────────────────────
     # Guard: let the normal routing machinery handle API / asset requests.
     if (

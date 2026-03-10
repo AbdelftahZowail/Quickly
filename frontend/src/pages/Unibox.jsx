@@ -330,7 +330,7 @@ export default function Unibox() {
         body: JSON.stringify({}),
       });
       if ((res?.queued || 0) <= 0) {
-        notify({ type: 'error', message: 'No Gmail inboxes available for sync.' });
+        notify({ type: 'error', message: 'No inboxes available for sync.' });
       } else {
         // notify({ type: 'success', message: `Sync queued for ${res.queued} inbox(es).` });
         await loadSyncStatus({ silent: true });
@@ -355,7 +355,7 @@ export default function Unibox() {
         body: JSON.stringify(body),
       });
       if ((res?.queued || 0) <= 0) {
-        notify({ type: 'error', message: 'No Gmail inboxes available for backfill.' });
+        notify({ type: 'error', message: 'No inboxes available for backfill.' });
       } else {
         const scopeMsg = selectedThread?.inbox_id ? 'selected inbox' : 'all inboxes';
         notify({
@@ -506,7 +506,7 @@ export default function Unibox() {
             </span>
           )}
         </div>
-        <span className="text-sm text-gray-500">Gmail thread view and replies</span>
+          <span className="text-sm text-gray-500">Email inbox and replies</span>
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4 flex-1 min-h-0">
@@ -577,7 +577,7 @@ export default function Unibox() {
                   }`}
                 >
                   <div className="flex items-center justify-between mb-1">
-                    <div className="text-xs text-gray-500 truncate">{item.gmail_account}</div>
+                    <div className="text-xs text-gray-500 truncate">{item.inbox_account || item.gmail_account}</div>
                     <div className="flex items-center gap-1.5 shrink-0 ml-1">
                       {item.lead_status && (
                         <span className={`text-[10px] border rounded-full px-1.5 py-0.5 font-medium ${STATUS_COLORS[item.lead_status] || 'bg-gray-100 text-gray-600 border-gray-300'}`}>
@@ -621,7 +621,7 @@ export default function Unibox() {
               <div className="border-b border-gray-200 pb-3 mb-3">
                 <h2 className="text-lg font-semibold truncate">{selectedThread.subject || '(no subject)'}</h2>
                 <p className="text-xs text-gray-500">
-                  Inbox: {selectedThread.gmail_account} | Last update: {formatDateTime(selectedThread.last_message_timestamp)}
+                  Inbox: {selectedThread.inbox_account || selectedThread.gmail_account} | Last update: {formatDateTime(selectedThread.last_message_timestamp)}
                 </p>
               </div>
 
