@@ -211,12 +211,15 @@ export default function Schedule() {
   const fmtTime = iso => {
     if (!iso) return '';
     const d = new Date(iso);
-    return String(d.getHours()).padStart(2,'0')+':' + String(d.getMinutes()).padStart(2,'0');
+    const base = String(d.getHours()).padStart(2,'0')+':' + String(d.getMinutes()).padStart(2,'0');
+    return isProduction ? base : base + ':' + String(d.getSeconds()).padStart(2,'0');
   };
   const fmtDateTime = iso => {
     if (!iso) return '—';
     const d = new Date(iso);
-    return d.toLocaleDateString() + ' ' + String(d.getHours()).padStart(2,'0')+':' + String(d.getMinutes()).padStart(2,'0');
+    const base = String(d.getHours()).padStart(2,'0')+':' + String(d.getMinutes()).padStart(2,'0');
+    const t = isProduction ? base : base + ':' + String(d.getSeconds()).padStart(2,'0');
+    return d.toLocaleDateString() + ' ' + t;
   };
   const renderLastRun = iso => {
     if (!iso) return '—';

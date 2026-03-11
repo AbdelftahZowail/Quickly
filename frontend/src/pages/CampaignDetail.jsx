@@ -7,6 +7,7 @@ import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import DatePicker from '../components/ui/DatePicker';
 import { useConfirm } from '../context/ConfirmContext';
+import { useAppMode } from '../context/AppModeContext';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import {
@@ -53,6 +54,7 @@ export default function CampaignDetail() {
   const confirm = useConfirm();
   const notify = useNotify();
   const loadingCtrl = useLoading();
+  const { isProduction } = useAppMode();
 
   // Sync hash ↔ tab
   useEffect(() => {
@@ -115,7 +117,8 @@ export default function CampaignDetail() {
   function formatTime(isoStr) {
     if (!isoStr) return '';
     const d = new Date(isoStr);
-    return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    const base = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    return isProduction ? base : base + `:${String(d.getSeconds()).padStart(2,'0')}`;
   }
 
   function renderQueue() {

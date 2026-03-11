@@ -95,6 +95,7 @@ async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
         display_name=data.display_name,
         max_emails_per_day=data.max_emails_per_day,
         wait_minutes_between=data.wait_minutes_between,
+        max_jitter_seconds=data.max_jitter_seconds,
         provider=data.provider,
         tracking_domain=td or None,
         ramp_up_enabled=data.ramp_up_enabled,
@@ -152,6 +153,9 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
         capacity_changed = True
     if data.wait_minutes_between is not None:
         inbox.wait_minutes_between = data.wait_minutes_between
+        capacity_changed = True
+    if data.max_jitter_seconds is not None:
+        inbox.max_jitter_seconds = data.max_jitter_seconds
         capacity_changed = True
     if data.provider is not None:
         if data.provider != inbox.provider:
