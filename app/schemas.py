@@ -35,6 +35,7 @@ class InboxCreate(BaseModel):
     display_name: str = ""
     max_emails_per_day: int = 50
     wait_minutes_between: int = 5
+    max_jitter_seconds: int = 180
     provider: str = "gmail"  # gmail | office365
     tracking_domain: Optional[str] = None  # custom hostname for tracking links
     ramp_up_enabled: bool = False
@@ -45,6 +46,7 @@ class InboxUpdate(BaseModel):
     display_name: Optional[str] = None
     max_emails_per_day: Optional[int] = None
     wait_minutes_between: Optional[int] = None
+    max_jitter_seconds: Optional[int] = None
     provider: Optional[str] = None
     tracking_domain: Optional[str] = None  # set to "" to clear
     ramp_up_enabled: Optional[bool] = None
@@ -57,6 +59,7 @@ class InboxResponse(BaseModel):
     display_name: str
     max_emails_per_day: int
     wait_minutes_between: int
+    max_jitter_seconds: int = 180
     provider: str
     tracking_domain: Optional[str] = None
     created_at: datetime

@@ -1,5 +1,6 @@
 """Queue slot reservation and recalculation logic."""
 import logging
+import random
 from datetime import datetime, date, time, timedelta
 from app import time as time_provider
 from typing import List, Optional, Tuple
@@ -71,6 +72,17 @@ def _estimated_send_time(sending_hours_start: str, wait_minutes: int, position_i
 def _time_to_minutes(t: time) -> int:
     """Minutes from midnight."""
     return t.hour * 60 + t.minute
+
+
+def _apply_jitter(dt: datetime, inbox) -> datetime:
+    """Add a random [0, max_jitter_seconds] offset to dt.
+
+    Returns dt unchanged when the inbox has no jitter configured (0 or unset).
+    """
+    max_s = getattr(inbox, "max_jitter_seconds", 0)
+    if not max_s:
+        return dt
+    return dt + timedelta(seconds=random.randint(0, max_s))
 
 
 # ── Timezone helpers ───────────────────────────────────────────────────────────
@@ -618,14 +630,23 @@ async def reserve_slots_for_lead(
                 pos = await next_available_slot_position(session, inbox_id, current_date, cache)
 
                 scheduled_dt: datetime
-                # local_send_minutes: campaign-local minute-of-day for the
-                # slot we are about to create.  Tracked here so the time cache
-                # can be updated unconditionally (for both TZ-aware and
-                # non-TZ campaigns) with the correct local value.
+                # local_send_minutes: the GRID minute (unjittered) stored in the
+                # ("times", ...) conflict-detection cache.  Using the grid value
+                # keeps _next_available_send_time_today accurate even after jitter
+                # shifts the actual send time away from the grid point.
                 local_send_minutes: int
+                # jittered_local_dt: actual campaign-local datetime after jitter;
+                # stored in the ("last_dt", ...) cache so subsequent slots chain
+                # off the real previous send time rather than the grid anchor.
+                jittered_local_dt: datetime
+
+                inbox_obj = next(i[1] for i in inboxes if i[0] == inbox_id)
+                last_dt_key = ("last_dt", inbox_id, current_date)
+                last_actual_dt = cache.get(last_dt_key) if cache is not None else None
+                end_boundary = datetime.combine(current_date, end_time)
 
                 if current_date == today:
-                    # Today: check if estimated time is in the past (campaign-local)
+                    # Today: check if estimated grid time is in the past (campaign-local)
                     est_time = _estimated_send_time(sending_start, wait_min, pos)
                     if est_time <= now.time():
                         next_dt = await _next_available_send_time_today(
@@ -634,8 +655,12 @@ async def reserve_slots_for_lead(
                             cache, campaign=campaign,
                         )
                         if next_dt is not None:
-                            # next_dt is campaign-tz naive; convert to UTC for storage
-                            scheduled_dt = _to_utc_naive(next_dt, campaign)
+                            # Apply jitter to the grid-aligned next_dt; guard against window overflow.
+                            jittered_local_dt = _apply_jitter(next_dt, inbox_obj)
+                            if jittered_local_dt > end_boundary:
+                                jittered_local_dt = next_dt
+                            scheduled_dt = _to_utc_naive(jittered_local_dt, campaign)
+                            # Conflict detection uses the grid minute, not the jittered minute.
                             local_send_minutes = next_dt.hour * 60 + next_dt.minute
                             log.info(
                                 "  -> using next slot today for seq=%d: %s campaign-local (was past, now %s)",
@@ -654,28 +679,45 @@ async def reserve_slots_for_lead(
                                 current_date += timedelta(days=1)
                             continue
                     else:
-                        # Campaign-local datetime → store as UTC
-                        scheduled_dt = _to_utc_naive(datetime.combine(current_date, est_time), campaign)
+                        # Grid time is still in the future — chain from the last jittered slot
+                        # so the actual gap between consecutive emails stays >= wait_min.
+                        base_local_dt = (
+                            last_actual_dt + timedelta(minutes=wait_min)
+                            if last_actual_dt is not None
+                            else datetime.combine(current_date, est_time)
+                        )
+                        if base_local_dt.time() > end_time:
+                            current_date += timedelta(days=1)
+                            while current_date.weekday() not in sending_days:
+                                current_date += timedelta(days=1)
+                            continue
+                        jittered_local_dt = _apply_jitter(base_local_dt, inbox_obj)
+                        if jittered_local_dt > end_boundary:
+                            jittered_local_dt = base_local_dt
+                        scheduled_dt = _to_utc_naive(jittered_local_dt, campaign)
                         local_send_minutes = est_time.hour * 60 + est_time.minute
                 else:
-                    # Future day: check if estimated time exceeds sending window
+                    # Future day — chain from last jittered slot or fall back to grid.
                     est_t = _estimated_send_time(sending_start, wait_min, pos)
-                    if est_t > end_time:
-                        # Time would overflow the sending window — the inbox is full for this day.
-                        # Move to the next business day for ALL sequence types; forcing end_time
-                        # causes a pile-up of multiple leads at the same timestamp.
+                    base_local_dt = (
+                        last_actual_dt + timedelta(minutes=wait_min)
+                        if last_actual_dt is not None
+                        else datetime.combine(current_date, est_t)
+                    )
+                    if base_local_dt.time() > end_time:
                         log.info(
-                            "  -> seq=%d pos=%d would send at %s (past %s); moving to next day",
-                            idx, pos, est_t.strftime("%H:%M"), end_time.strftime("%H:%M"),
+                            "  -> seq=%d pos=%d base would send at %s (past %s); moving to next day",
+                            idx, pos, base_local_dt.strftime("%H:%M"), end_time.strftime("%H:%M"),
                         )
                         current_date += timedelta(days=1)
                         while current_date.weekday() not in sending_days:
                             current_date += timedelta(days=1)
                         continue
-                    else:
-                        # Campaign-local datetime → store as UTC
-                        scheduled_dt = _to_utc_naive(datetime.combine(current_date, est_t), campaign)
-                        local_send_minutes = est_t.hour * 60 + est_t.minute
+                    jittered_local_dt = _apply_jitter(base_local_dt, inbox_obj)
+                    if jittered_local_dt > end_boundary:
+                        jittered_local_dt = base_local_dt
+                    scheduled_dt = _to_utc_naive(jittered_local_dt, campaign)
+                    local_send_minutes = est_t.hour * 60 + est_t.minute
 
                 slot = QueueSlot(
                     campaign_lead_id=campaign_lead_id,
@@ -696,6 +738,9 @@ async def reserve_slots_for_lead(
                     if time_key not in cache:
                         cache[time_key] = set()
                     cache[time_key].add(local_send_minutes)
+                    # Store jittered local datetime so subsequent slots in this
+                    # bulk run chain off the real previous send time, not the grid.
+                    cache[("last_dt", inbox_id, current_date)] = jittered_local_dt
                 else:
                     # Without cache, must flush for subsequent queries to see this slot
                     await session.flush()
@@ -860,6 +905,17 @@ async def reserve_slots_for_new_leads_bulk(
             if time_key not in slot_cache:
                 slot_cache[time_key] = set()
             slot_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
+
+    # Seed last_dt from existing slots: find the latest grid minute per inbox/day
+    # so new slots can chain off pre-existing ones instead of restarting at the grid.
+    for _k in list(slot_cache):
+        if not (isinstance(_k, tuple) and len(_k) == 2 and isinstance(_k[0], int)):
+            continue
+        _ibx, _day = _k
+        _tk = ("times", _ibx, _day)
+        if _tk in slot_cache and slot_cache[_tk]:
+            _lm = max(slot_cache[_tk])
+            slot_cache[("last_dt", _ibx, _day)] = datetime.combine(_day, time(_lm // 60, _lm % 60))
 
     slot_cache[("_preseeded",)] = True  # signal: missing keys mean 0
     log.info(
@@ -1098,6 +1154,16 @@ async def _recalculate_queue_for_campaign_leads(
         for row in today_sent_result.all():
             count_key = (row.inbox_id, _today)
             slot_cache[count_key] = slot_cache.get(count_key, 0) + row.sent_count
+
+    # Seed last_dt from existing slots for chaining.
+    for _k in list(slot_cache):
+        if not (isinstance(_k, tuple) and len(_k) == 2 and isinstance(_k[0], int)):
+            continue
+        _ibx, _day = _k
+        _tk = ("times", _ibx, _day)
+        if _tk in slot_cache and slot_cache[_tk]:
+            _lm = max(slot_cache[_tk])
+            slot_cache[("last_dt", _ibx, _day)] = datetime.combine(_day, time(_lm // 60, _lm % 60))
 
     slot_cache[("_preseeded",)] = True  # Signal that cache is complete
     log.info(
@@ -1454,6 +1520,16 @@ async def recalculate_queue_round_robin(
         for row in today_sent.all():
             count_key = (row.inbox_id, _today)
             shared_cache[count_key] = shared_cache.get(count_key, 0) + row.sent_count
+
+    # Seed last_dt from existing slots for chaining.
+    for _k in list(shared_cache):
+        if not (isinstance(_k, tuple) and len(_k) == 2 and isinstance(_k[0], int)):
+            continue
+        _ibx, _day = _k
+        _tk = ("times", _ibx, _day)
+        if _tk in shared_cache and shared_cache[_tk]:
+            _lm = max(shared_cache[_tk])
+            shared_cache[("last_dt", _ibx, _day)] = datetime.combine(_day, time(_lm // 60, _lm % 60))
 
     shared_cache[("_preseeded",)] = True  # signal: missing keys → 0 slots
     log.info(
