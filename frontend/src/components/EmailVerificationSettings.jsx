@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api';
 import { useNotify } from '../context/NotificationContext';
 import { Button } from './ui/Button';
@@ -24,6 +24,7 @@ export default function EmailVerificationSettings() {
   const [apiKeyMasked, setApiKeyMasked] = useState('');
   const [providers,    setProviders]    = useState([]);
   const [saving,       setSaving]       = useState(false);
+  const savedStateRef  = useRef(null); // snapshot of last-saved fields
   const [testing,      setTesting]      = useState(false);
   const [testResult,   setTestResult]   = useState(null);
 
@@ -47,15 +48,22 @@ export default function EmailVerificationSettings() {
   // ── load saved settings ────────────────────────────────────────────────────
   useEffect(() => {
     api.get('/settings/email-verification').then(data => {
+      const p   = data.provider || 'mailtester_ninja';
+      const cu  = data.custom_url || '';
+      const cf  = data.custom_field_path || '';
+      const cvv = (data.custom_valid_values || []).join(', ');
+      const civ = (data.custom_invalid_values || []).join(', ');
+      const cm  = data.custom_method || 'GET';
       setEnabled(data.enabled || false);
-      setProvider(data.provider || 'mailtester_ninja');
+      setProvider(p);
       setApiKeyMasked(data.api_key_masked || '');
       setProviders(data.providers || []);
-      setCustomUrl(data.custom_url || '');
-      setCustomField(data.custom_field_path || '');
-      setCustomValidValues((data.custom_valid_values || []).join(', '));
-      setCustomInvalidValues((data.custom_invalid_values || []).join(', '));
-      setCustomMethod(data.custom_method || 'GET');
+      setCustomUrl(cu);
+      setCustomField(cf);
+      setCustomValidValues(cvv);
+      setCustomInvalidValues(civ);
+      setCustomMethod(cm);
+      savedStateRef.current = { provider: p, customUrl: cu, customField: cf, customValidValues: cvv, customInvalidValues: civ, customMethod: cm };
     }).catch(() => {});
   }, []);
 
@@ -78,6 +86,7 @@ export default function EmailVerificationSettings() {
       const res = await api.post('/settings/email-verification', payload);
       setApiKey('');
       setApiKeyMasked(res.api_key_masked || '');
+      savedStateRef.current = { provider, customUrl, customField, customValidValues, customInvalidValues, customMethod };
       setCustomTestResults(null);
       notify({ type: 'success', message: 'Email verification settings saved' });
     } catch (e) {
@@ -91,7 +100,9 @@ export default function EmailVerificationSettings() {
     setTesting(true);
     setTestResult(null);
     try {
-      const res = await api.post('/settings/email-verification/test');
+      const body = {};
+      if (apiKey) body.api_key = apiKey;
+      const res = await api.post('/settings/email-verification/test', body);
       setTestResult(res);
     } catch (e) {
       setTestResult({ ok: false, error: e.message });
@@ -176,7 +187,21 @@ export default function EmailVerificationSettings() {
             type="checkbox"
             checked={enabled}
             className="rounded"
-            onChange={e => setEnabled(e.target.checked)}
+            onChange={async e => {
+              const next = e.target.checked;
+              setEnabled(next);
+              try {
+                await api.post('/settings/email-verification', {
+                  enabled: next, provider,
+                  custom_url: customUrl, custom_field_path: customField,
+                  custom_valid_values: parseValues(customValidValues),
+                  custom_invalid_values: parseValues(customInvalidValues),
+                  custom_method: customMethod,
+                  ...(apiKey ? { api_key: apiKey } : {}),
+                });
+                notify({ type: 'success', message: `Email verification ${next ? 'enabled' : 'disabled'}` });
+              } catch (err) { notify({ type: 'error', message: err.message }); }
+            }}
           />
           <span className="text-xs font-medium text-gray-600 whitespace-nowrap">
             Enable
@@ -227,7 +252,7 @@ export default function EmailVerificationSettings() {
                   className="border rounded-lg px-3 py-2 text-sm w-full max-w-md dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-300"
                   placeholder={apiKeyMasked || 'Enter API key'}
                   value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
+                  onChange={e => { setApiKey(e.target.value); }}
                 />
                 {apiKeyMasked && !apiKey && (
                   <p className="text-xs text-gray-400 mt-1">Current key: {apiKeyMasked}</p>
@@ -433,15 +458,28 @@ export default function EmailVerificationSettings() {
             {/* ── end custom provider wizard ── */}
 
             {/* ── Save / Test connection ── */}
-            <div className="flex items-center gap-3 flex-wrap">
-              <Button size="sm" onClick={save} disabled={saving}>
-                {saving ? 'Saving…' : 'Save'}
-              </Button>
-              {provider !== 'custom' && (
-                <Button size="sm" variant="outline" onClick={testApiKey} disabled={testing}>
-                  {testing ? 'Testing…' : 'Test connection'}
-                </Button>
+            <div className="space-y-2">
+              {savedStateRef.current != null && (
+                provider !== savedStateRef.current.provider ||
+                customUrl !== savedStateRef.current.customUrl ||
+                customField !== savedStateRef.current.customField ||
+                customValidValues !== savedStateRef.current.customValidValues ||
+                customInvalidValues !== savedStateRef.current.customInvalidValues ||
+                customMethod !== savedStateRef.current.customMethod ||
+                !!apiKey
+              ) && (
+                <p className="text-xs text-amber-600 font-medium">⚠ Unsaved changes — click Save to apply</p>
               )}
+              <div className="flex items-center gap-3 flex-wrap">
+                <Button size="sm" onClick={save} disabled={saving}>
+                  {saving ? 'Saving…' : 'Save'}
+                </Button>
+                {provider !== 'custom' && (
+                  <Button size="sm" variant="outline" onClick={testApiKey} disabled={testing}>
+                    {testing ? 'Testing…' : 'Test connection'}
+                  </Button>
+                )}
+              </div>
             </div>
 
             {testResult && (

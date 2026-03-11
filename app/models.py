@@ -40,15 +40,26 @@ def _make_open_token() -> str:
 class User(Base):
     """Application user for authentication."""
     __tablename__ = "app_user"
+    __table_args__ = (
+        UniqueConstraint("oauth_provider", "oauth_sub", name="uq_user_oauth"),
+    )
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(150), unique=True, nullable=False, index=True)
     email = Column(String(255), unique=True, nullable=False, index=True)
-    password_hash = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=True)  # nullable for OAuth-only users
+    # OAuth identity (app login)
+    oauth_provider = Column(String(32), nullable=True)   # "google" or "microsoft"
+    oauth_sub = Column(String(255), nullable=True)        # provider's unique subject ID
+    # Notification email sending credentials (from OAuth login, separate from campaign inboxes)
+    notif_access_token = Column(Text, nullable=True)
+    notif_refresh_token = Column(Text, nullable=True)
+    notif_token_expiry = Column(DateTime, nullable=True)
     role = Column(String(32), default="user", nullable=False)  # admin or user (first user set explicitly to admin in router)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
+    notification_config = relationship("EmailNotificationConfig", back_populates="user", uselist=False, cascade="all, delete-orphan")
 
 
 class APIKey(Base):
@@ -654,6 +665,41 @@ class KnownIP(Base):
     last_seen_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     expires_at = Column(DateTime, nullable=True)  # NULL for permanent entries
     created_at = Column(DateTime, default=_utcnow)
+
+
+class OAuthState(Base):
+    """CSRF nonce for OAuth flows (app login + inbox connections).
+
+    Each record is single-use: validated once then deleted.  Records
+    expire after 10 minutes to prevent stale state replay.
+    """
+    __tablename__ = "oauth_state"
+    id = Column(Integer, primary_key=True, index=True)
+    state_token = Column(String(64), unique=True, nullable=False, index=True)
+    purpose = Column(String(32), nullable=False)  # app_login | inbox_google | inbox_microsoft
+    metadata_json = Column(Text, default="{}")
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class EmailNotificationConfig(Base):
+    """Per-user email notification preferences (alternative to webhooks).
+
+    When enabled, event notifications are sent as human-readable emails
+    from the user's own OAuth-connected account.
+    """
+    __tablename__ = "email_notification_config"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False, unique=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+    notification_email = Column(String(255), default="")  # override recipient; empty = user.email
+    events = Column(JSON, default=list)  # empty list = all events
+    rate_limit_per_hour = Column(Integer, default=10, nullable=False)
+    notifications_sent_this_hour = Column(Integer, default=0, nullable=False)
+    rate_window_start = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    user = relationship("User", back_populates="notification_config")
 
 
 # All supported webhook event types

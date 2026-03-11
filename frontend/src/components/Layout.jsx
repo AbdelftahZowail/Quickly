@@ -4,7 +4,6 @@ import TestModeBanner from './TestModeBanner';
 import Onboarding from './Onboarding';
 import { NotificationProvider } from '../context/NotificationContext';
 import { LoadingProvider } from '../context/LoadingContext';
-import { DarkModeProvider } from '../context/DarkModeContext';
 import { ConfirmProvider } from '../context/ConfirmContext';
 import { UniboxNotificationsProvider } from '../context/UniboxNotificationsContext';
 import { AppModeProvider, useAppMode } from '../context/AppModeContext';
@@ -51,23 +50,21 @@ export default function Layout({ children }) {
   return (
     <NotificationProvider>
       <LoadingProvider>
-        <DarkModeProvider>
-          <ConfirmProvider>
-            <UniboxNotificationsProvider>
-              <AppModeProvider>
-                <OnboardingProvider>
-                  <Onboarding />
-                  <LayoutInner
-                    sidebarCollapsed={sidebarCollapsed}
-                    setSidebarCollapsed={setSidebarCollapsed}
-                  >
-                    {children}
-                  </LayoutInner>
-                </OnboardingProvider>
-              </AppModeProvider>
-            </UniboxNotificationsProvider>
-          </ConfirmProvider>
-        </DarkModeProvider>
+        <ConfirmProvider>
+          <UniboxNotificationsProvider>
+            <AppModeProvider>
+              <OnboardingProvider>
+                <Onboarding />
+                <LayoutInner
+                  sidebarCollapsed={sidebarCollapsed}
+                  setSidebarCollapsed={setSidebarCollapsed}
+                >
+                  {children}
+                </LayoutInner>
+              </OnboardingProvider>
+            </AppModeProvider>
+          </UniboxNotificationsProvider>
+        </ConfirmProvider>
       </LoadingProvider>
     </NotificationProvider>
   );

@@ -76,10 +76,6 @@ export default function AddCampaign() {
 
   async function handleSubmit(e) {
     e.preventDefault();
-    if (form.inbox_ids.length === 0) {
-      setMessage({ type: 'error', text: 'Select at least one inbox.' });
-      return;
-    }
     try {
       const data = await api.post('/campaigns', form);
       setMessage({ type: 'success', text: `Campaign created. ` });
@@ -109,7 +105,7 @@ export default function AddCampaign() {
         </div>
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Sending inboxes * (select at least one)
+            Sending inboxes (optional)
           </label>
           <div className="mt-1 space-y-1 max-h-52 overflow-y-auto p-2 border border-gray-300 rounded">
             {inboxes.map(i => (

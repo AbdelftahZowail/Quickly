@@ -133,7 +133,6 @@ export default function Inboxes() {
   const [showAdd, setShowAdd] = useState(false); // controls add modal
   const confirm = useConfirm();
   const addBackdropDown = useRef(false);
-  const editBackdropDown = useRef(false);
   const notify = useNotify();
 
   // ---- Pause modal state ----
@@ -388,7 +387,7 @@ export default function Inboxes() {
         </div>
       )}
       {inboxes.length > 0 && (
-        <div className="flex gap-5 items-start">
+        <div className="flex gap-5 items-start" style={{ alignItems: 'flex-start' }}>
           {/* ── Inbox card list ── */}
           <div className="flex-1 min-w-0 space-y-2">
             {inboxes.map(inbox => {
@@ -449,134 +448,219 @@ export default function Inboxes() {
 
           {/* ── Detail panel ── */}
           {selectedInbox && (
-            <div className="w-72 shrink-0 bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col overflow-hidden">
-              {/* Panel header */}
-              <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-sm font-semibold shrink-0">
-                    {(selectedInbox.email || selectedInbox.display_name || 'I')[0].toUpperCase()}
+            <div className="w-72 shrink-0 bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col overflow-hidden sticky top-4" style={{ maxHeight: 'calc(100vh - 8rem)' }}>
+              {editing && editing.id === selectedInbox.id ? (
+                <>
+                  {/* Edit panel header */}
+                  <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+                    <h3 className="font-semibold text-gray-900 text-sm">Edit Inbox</h3>
+                    <button
+                      onClick={tryCloseEdit}
+                      className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                      aria-label="Cancel edit"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
                   </div>
-                  <div className="min-w-0">
-                    <p className="font-semibold text-gray-900 text-sm leading-tight truncate">{selectedInbox.email || '(Connected account)'}</p>
-                    {selectedInbox.display_name && (
-                      <p className="text-xs text-gray-500 truncate leading-tight mt-0.5">{selectedInbox.display_name}</p>
-                    )}
-                  </div>
-                </div>
-                <button
-                  onClick={() => setSelectedInbox(null)}
-                  className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
-                  aria-label="Close panel"
-                >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
 
-              {/* Scrollable content */}
-              <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
-                {/* Status + Provider row */}
-                <div className="flex items-center justify-between">
-                  {selectedInbox.paused
-                    ? <span className="text-xs bg-orange-100 text-orange-700 px-2.5 py-1 rounded-full font-medium">Paused</span>
-                    : <span className="text-xs bg-green-100 text-green-700 px-2.5 py-1 rounded-full font-medium">Active</span>
-                  }
-                  <span className="text-xs bg-sky-100 text-sky-700 px-2.5 py-1 rounded-full font-medium capitalize">{selectedInbox.provider || 'gmail'}</span>
-                </div>
-
-                {/* Sent today */}
-                <div>
-                  <div className="flex justify-between items-center mb-1.5">
-                    <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Today</span>
-                    <span className="text-sm font-semibold text-gray-900">
-                      {selectedInbox.sent_today || 0}
-                      <span className="text-gray-400 font-normal"> / {selectedInbox.effective_max_per_day || selectedInbox.max_emails_per_day}</span>
-                    </span>
-                  </div>
-                  <div className="w-full bg-gray-100 rounded-full h-1.5">
-                    <div
-                      className="bg-blue-500 h-1.5 rounded-full transition-all"
-                      style={{ width: `${Math.min(100, ((selectedInbox.sent_today || 0) / (selectedInbox.effective_max_per_day || selectedInbox.max_emails_per_day || 1)) * 100)}%` }}
-                    />
-                  </div>
-                </div>
-
-                <hr className="border-gray-100" />
-
-                {/* Settings */}
-                <div className="space-y-2.5">
-                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Settings</p>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-600">Max per day</span>
-                    <span className="font-medium text-gray-900">{selectedInbox.max_emails_per_day}</span>
-                  </div>
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-600">Wait between sends</span>
-                    <span className="font-medium text-gray-900">{selectedInbox.wait_minutes_between || 5} min</span>
-                  </div>
-                </div>
-
-                {/* Warm-up */}
-                {selectedInbox.ramp_up_enabled && (
-                  <>
-                    <hr className="border-gray-100" />
-                    <div className="space-y-2.5">
-                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Warm-up</p>
-                      {selectedInbox.effective_max_per_day < selectedInbox.max_emails_per_day ? (
-                        <>
-                          <div className="flex justify-between text-sm">
-                            <span className="text-gray-600">Today's stage</span>
-                            <span className="font-medium text-amber-700">{selectedInbox.effective_max_per_day} / {selectedInbox.max_emails_per_day}</span>
-                          </div>
-                          <div className="w-full bg-amber-100 rounded-full h-1.5">
-                            <div
-                              className="bg-amber-500 h-1.5 rounded-full"
-                              style={{ width: `${Math.min(100, (selectedInbox.effective_max_per_day / (selectedInbox.max_emails_per_day || 1)) * 100)}%` }}
-                            />
-                          </div>
-                        </>
-                      ) : (
-                        <p className="text-sm text-green-700 font-medium">Complete ✓</p>
+                  {/* Edit form */}
+                  <div className="px-5 py-4 overflow-y-auto flex-1">
+                    {editMsg && <div className={`mb-3 text-sm ${editMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{editMsg.text}</div>}
+                    <form onSubmit={saveEdit} className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Email (read-only)</label>
+                        <input type="email" value={editing.email} disabled className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100 text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Display name</label>
+                        <input type="text" name="display_name" value={editing.display_name || ''} onChange={e => { setEditing(prev => ({ ...prev, display_name: e.target.value })); setEditDirty(true); }} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Provider</label>
+                        <select name="provider" value={editing.provider || 'gmail'} className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100 text-sm" disabled>
+                          <option value="gmail">Gmail / Google Workspace</option>
+                          <option value="office365">Office 365 / Outlook</option>
+                        </select>
+                      </div>
+                      {editing.provider === 'gmail' && redirectUri && (
+                        <div className="text-gray-500 text-xs">
+                          Redirect URI: <code className="font-mono">{redirectUri}</code>
+                        </div>
                       )}
-                      <div className="flex justify-between text-sm">
-                        <span className="text-gray-600">Ramp period</span>
-                        <span className="font-medium text-gray-900">{selectedInbox.ramp_up_period_days || 42} days</span>
+                      {editing.provider === 'office365' && o365RedirectUri && (
+                        <div className="text-gray-500 text-xs">
+                          Redirect URI: <code className="font-mono">{o365RedirectUri}</code>
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Max emails per day</label>
+                        <input type="number" name="max_emails_per_day" value={editing.max_emails_per_day} onChange={e => { setEditing(prev => ({ ...prev, max_emails_per_day: +e.target.value })); setEditDirty(true); }} min={1} max={1000} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Wait between emails (minutes)</label>
+                        <input type="number" name="wait_minutes_between" value={editing.wait_minutes_between || 5} onChange={e => { setEditing(prev => ({ ...prev, wait_minutes_between: +e.target.value })); setEditDirty(true); }} min={1} max={120} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      </div>
+                      <TrackingDomainField
+                        value={editing.tracking_domain || ''}
+                        onChange={val => { setEditing(prev => ({ ...prev, tracking_domain: val })); setEditDirty(true); }}
+                        cnameTarget={cnameTarget}
+                      />
+                      <div className="border rounded p-3 space-y-2 bg-gray-50">
+                        <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-gray-700">
+                          <input
+                            type="checkbox"
+                            checked={!!editing.ramp_up_enabled}
+                            onChange={e => { setEditing(prev => ({ ...prev, ramp_up_enabled: e.target.checked })); setEditDirty(true); }}
+                          />
+                          Enable inbox warm-up (ramp-up)
+                        </label>
+                        {editing.ramp_up_enabled && (
+                          <p className="text-xs text-gray-500">
+                            Sends 1 email on day one, 2 on day two, and so on until it reaches {editing.max_emails_per_day}, then turns off automatically.
+                            Today's limit: <strong>{editing.effective_max_per_day ?? 1}</strong> / {editing.max_emails_per_day}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex gap-2 pt-1">
+                        <Button type="submit" size="sm" variant="default">Save</Button>
+                        <Button type="button" size="sm" variant="outline" onClick={tryCloseEdit}>Cancel</Button>
+                      </div>
+                    </form>
+                  </div>
+                </>
+              ) : (
+                <>
+                  {/* Panel header */}
+                  <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white text-sm font-semibold shrink-0">
+                        {(selectedInbox.email || selectedInbox.display_name || 'I')[0].toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-semibold text-gray-900 text-sm leading-tight truncate">{selectedInbox.email || '(Connected account)'}</p>
+                        {selectedInbox.display_name && (
+                          <p className="text-xs text-gray-500 truncate leading-tight mt-0.5">{selectedInbox.display_name}</p>
+                        )}
                       </div>
                     </div>
-                  </>
-                )}
+                    <button
+                      onClick={() => setSelectedInbox(null)}
+                      className="shrink-0 w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition-colors"
+                      aria-label="Close panel"
+                    >
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  </div>
 
-                <hr className="border-gray-100" />
+                  {/* Scrollable content */}
+                  <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
+                    {/* Status + Provider row */}
+                    <div className="flex items-center justify-between">
+                      {selectedInbox.paused
+                        ? <span className="text-xs bg-orange-100 text-orange-700 px-2.5 py-1 rounded-full font-medium">Paused</span>
+                        : <span className="text-xs bg-green-100 text-green-700 px-2.5 py-1 rounded-full font-medium">Active</span>
+                      }
+                      <span className="text-xs bg-sky-100 text-sky-700 px-2.5 py-1 rounded-full font-medium capitalize">{selectedInbox.provider || 'gmail'}</span>
+                    </div>
 
-                {/* Tracking domain */}
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-gray-600">Tracking domain</span>
-                  <span className="font-mono text-xs text-right max-w-[140px] truncate">
-                    {selectedInbox.tracking_domain
-                      ? <span className="text-teal-700">{selectedInbox.tracking_domain}</span>
-                      : <span className="text-gray-400">app default</span>}
-                  </span>
-                </div>
+                    {/* Sent today */}
+                    <div>
+                      <div className="flex justify-between items-center mb-1.5">
+                        <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Today</span>
+                        <span className="text-sm font-semibold text-gray-900">
+                          {selectedInbox.sent_today || 0}
+                          <span className="text-gray-400 font-normal"> / {selectedInbox.effective_max_per_day || selectedInbox.max_emails_per_day}</span>
+                        </span>
+                      </div>
+                      <div className="w-full bg-gray-100 rounded-full h-1.5">
+                        <div
+                          className="bg-blue-500 h-1.5 rounded-full transition-all"
+                          style={{ width: `${Math.min(100, ((selectedInbox.sent_today || 0) / (selectedInbox.effective_max_per_day || selectedInbox.max_emails_per_day || 1)) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
 
-                {/* Created */}
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-gray-600">Added</span>
-                  <span className="text-gray-900">{new Date(selectedInbox.created_at).toLocaleDateString()}</span>
-                </div>
-              </div>
+                    <hr className="border-gray-100" />
 
-              {/* Action buttons */}
-              <div className="px-5 py-4 border-t border-gray-100 space-y-2">
-                <div className="flex gap-2">
-                  <Button variant="outline" size="sm" className="flex-1" onClick={() => openEdit(selectedInbox)}>Edit</Button>
-                  {selectedInbox.paused
-                    ? <Button variant="outline" size="sm" className="flex-1 bg-green-50 text-green-700 border-green-300 hover:bg-green-100" onClick={() => resumeInbox(selectedInbox.id, selectedInbox.email)}>Resume</Button>
-                    : <Button variant="outline" size="sm" className="flex-1 bg-orange-50 text-orange-700 border-orange-300 hover:bg-orange-100" onClick={() => openPauseModal(selectedInbox)}>Pause</Button>
-                  }
-                </div>
-                <Button variant="danger" size="sm" className="w-full" onClick={() => deleteInbox(selectedInbox.id, selectedInbox.email)}>Delete inbox</Button>
-              </div>
+                    {/* Settings */}
+                    <div className="space-y-2.5">
+                      <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Settings</p>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Max per day</span>
+                        <span className="font-medium text-gray-900">{selectedInbox.max_emails_per_day}</span>
+                      </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Wait between sends</span>
+                        <span className="font-medium text-gray-900">{selectedInbox.wait_minutes_between || 5} min</span>
+                      </div>
+                    </div>
+
+                    {/* Warm-up */}
+                    {selectedInbox.ramp_up_enabled && (
+                      <>
+                        <hr className="border-gray-100" />
+                        <div className="space-y-2.5">
+                          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Warm-up</p>
+                          {selectedInbox.effective_max_per_day < selectedInbox.max_emails_per_day ? (
+                            <>
+                              <div className="flex justify-between text-sm">
+                                <span className="text-gray-600">Today's stage</span>
+                                <span className="font-medium text-amber-700">{selectedInbox.effective_max_per_day} / {selectedInbox.max_emails_per_day}</span>
+                              </div>
+                              <div className="w-full bg-amber-100 rounded-full h-1.5">
+                                <div
+                                  className="bg-amber-500 h-1.5 rounded-full"
+                                  style={{ width: `${Math.min(100, (selectedInbox.effective_max_per_day / (selectedInbox.max_emails_per_day || 1)) * 100)}%` }}
+                                />
+                              </div>
+                            </>
+                          ) : (
+                            <p className="text-sm text-green-700 font-medium">Complete ✓</p>
+                          )}
+                          <div className="flex justify-between text-sm">
+                            <span className="text-gray-600">Ramp period</span>
+                            <span className="font-medium text-gray-900">{selectedInbox.ramp_up_period_days || 42} days</span>
+                          </div>
+                        </div>
+                      </>
+                    )}
+
+                    <hr className="border-gray-100" />
+
+                    {/* Tracking domain */}
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="text-gray-600">Tracking domain</span>
+                      <span className="font-mono text-xs text-right max-w-[140px] truncate">
+                        {selectedInbox.tracking_domain
+                          ? <span className="text-teal-700">{selectedInbox.tracking_domain}</span>
+                          : <span className="text-gray-400">app default</span>}
+                      </span>
+                    </div>
+
+                    {/* Created */}
+                    <div className="flex justify-between items-center text-sm">
+                      <span className="text-gray-600">Added</span>
+                      <span className="text-gray-900">{new Date(selectedInbox.created_at).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+
+                  {/* Action buttons */}
+                  <div className="px-5 py-4 border-t border-gray-100 space-y-2">
+                    <div className="flex gap-2">
+                      <Button variant="outline" size="sm" className="flex-1" onClick={() => openEdit(selectedInbox)}>Edit</Button>
+                      {selectedInbox.paused
+                        ? <Button variant="outline" size="sm" className="flex-1 bg-green-50 text-green-700 border-green-300 hover:bg-green-100" onClick={() => resumeInbox(selectedInbox.id, selectedInbox.email)}>Resume</Button>
+                        : <Button variant="outline" size="sm" className="flex-1 bg-orange-50 text-orange-700 border-orange-300 hover:bg-orange-100" onClick={() => openPauseModal(selectedInbox)}>Pause</Button>
+                      }
+                    </div>
+                    <Button variant="danger" size="sm" className="w-full" onClick={() => deleteInbox(selectedInbox.id, selectedInbox.email)}>Delete inbox</Button>
+                  </div>
+                </>
+              )}
             </div>
           )}
         </div>
@@ -676,81 +760,7 @@ export default function Inboxes() {
         </div>
       )}
 
-      {/* edit modal */}
-      {editing && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-          onMouseDown={e => { editBackdropDown.current = e.target === e.currentTarget; }}
-          onClick={() => { if (editBackdropDown.current) tryCloseEdit(); }}
-        >
-          <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
-            <h2 className="text-xl font-semibold mb-2">Edit Inbox</h2>
-            {editMsg && <div className={editMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}>{editMsg.text}</div>}
-            <form onSubmit={saveEdit} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Email (read-only)</label>
-                <input type="email" value={editing.email} disabled className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Display name</label>
-                <input type="text" name="display_name" value={editing.display_name || ''} onChange={e => { setEditing(prev => ({ ...prev, display_name: e.target.value })); setEditDirty(true); }} className="mt-1 block w-full border-gray-300 rounded-md" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Provider</label>
-                <select name="provider" value={editing.provider || 'gmail'} className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100" disabled>
-                  <option value="gmail">Gmail / Google Workspace</option>
-                  <option value="office365">Office 365 / Outlook</option>
-                </select>
-              </div>
-              {editing.provider === 'gmail' && redirectUri && (
-                <div className="text-gray-500 text-sm">
-                  Redirect URI: <code className="font-mono">{redirectUri}</code>
-                </div>
-              )}
-              {editing.provider === 'office365' && o365RedirectUri && (
-                <div className="text-gray-500 text-sm">
-                  Redirect URI: <code className="font-mono">{o365RedirectUri}</code>
-                </div>
-              )}
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Max emails per day</label>
-                <input type="number" name="max_emails_per_day" value={editing.max_emails_per_day} onChange={e => { setEditing(prev => ({ ...prev, max_emails_per_day: +e.target.value })); setEditDirty(true); }} min={1} max={1000} className="mt-1 block w-full border-gray-300 rounded-md" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">Wait between emails (minutes)</label>
-                <input type="number" name="wait_minutes_between" value={editing.wait_minutes_between || 5} onChange={e => { setEditing(prev => ({ ...prev, wait_minutes_between: +e.target.value })); setEditDirty(true); }} min={1} max={120} className="mt-1 block w-full border-gray-300 rounded-md" />
-              </div>
-              {/* Tracking domain */}
-              <TrackingDomainField
-                value={editing.tracking_domain || ''}
-                onChange={val => { setEditing(prev => ({ ...prev, tracking_domain: val })); setEditDirty(true); }}
-                cnameTarget={cnameTarget}
-              />
-              {/* Warm-up / ramp-up */}
-              <div className="border rounded p-3 space-y-2 bg-gray-50">
-                <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-700">
-                  <input
-                    type="checkbox"
-                    checked={!!editing.ramp_up_enabled}
-                    onChange={e => { setEditing(prev => ({ ...prev, ramp_up_enabled: e.target.checked })); setEditDirty(true); }}
-                  />
-                  Enable inbox warm-up (ramp-up)
-                </label>
-                {editing.ramp_up_enabled && (
-                  <p className="text-xs text-gray-500">
-                    Sends 1 email on day one, 2 on day two, and so on until it reaches {editing.max_emails_per_day}, then turns off automatically.
-                    Today's limit: <strong>{editing.effective_max_per_day ?? 1}</strong> / {editing.max_emails_per_day}
-                  </p>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <Button type="submit" size="sm" variant="default">Save</Button>
-                <Button type="button" size="sm" variant="outline" onClick={tryCloseEdit}>Cancel</Button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+
 
       {/* Unsaved changes warning for inbox edit */}
       {showEditWarning && (

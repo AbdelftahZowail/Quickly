@@ -19,6 +19,7 @@ const SECTIONS = [
   { id: 'account',           label: 'Account & Security' },
   { id: 'api-keys',          label: 'API Keys' },
   { id: 'webhooks',          label: 'Webhooks' },
+  { id: 'notifications',     label: 'Notifications' },
   { id: 'ai',                label: 'AI Features' },
   { id: 'optional-features', label: 'Optional Features' },
   { id: 'scheduling',        label: 'Scheduling' },
@@ -41,16 +42,17 @@ export default function Settings() {
   const [testMode, setTestMode] = useState(false);
 
   // Account & Security
-  const [currentPassword, setCurrentPassword] = useState('');
-  const [newPassword, setNewPassword] = useState('');
-  const [changePwError, setChangePwError] = useState('');
-  const [changePwSuccess, setChangePwSuccess] = useState('');
-
   // API Keys
   const [apiKeys, setApiKeys] = useState([]);
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyExpiry, setNewKeyExpiry] = useState('');
   const [createdKey, setCreatedKey] = useState(null); // shown once after creation
+
+  // Notifications
+  const [notifConfig, setNotifConfig] = useState({ enabled: false, notification_email: '', events: [], rate_limit_per_hour: 10 });
+  const [notifSaving, setNotifSaving] = useState(false);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const savedNotifRef = useRef(null); // snapshot of last-saved config
 
   // Webhooks (new CRUD system)
   const [webhooks, setWebhooks] = useState(() => apiCache.get('/settings/webhooks') || []);
@@ -62,6 +64,7 @@ export default function Settings() {
   // AI settings — keyed by feature id
   const [aiFeatures, setAiFeatures] = useState({});
   const [aiExpanded, setAiExpanded] = useState({});           // { featureId: bool } — collapsed by default
+  const savedAiFeaturesRef = useRef({});                      // snapshot of last-saved AI features
   const [aiProviders, setAiProviders] = useState(() => apiCache.get('/settings/ai/providers')?.providers || []);
   const [aiModels, setAiModels] = useState({});
   const [aiProviderSearch, setAiProviderSearch] = useState({});
@@ -87,7 +90,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -96,6 +99,7 @@ export default function Settings() {
         api.get('/settings/ai/providers'),
         api.get('/settings/known-ips'),
         api.get('/auth/api-keys'),
+        api.get('/notifications/config').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
@@ -109,10 +113,15 @@ export default function Settings() {
         featMap[f.id] = { ...f, api_key: '' };
       }
       setAiFeatures(featMap);
+      savedAiFeaturesRef.current = featMap;
       setAiProviders(provData.providers || []);
       setKnownIps(ipData.known_ips || []);
       setCurrentIp(ipData.current_ip || '');
       setApiKeys(keysData || []);
+      if (notifData) {
+        setNotifConfig(notifData);
+        savedNotifRef.current = notifData;
+      }
     } catch {}
   }, []);
 
@@ -249,16 +258,6 @@ export default function Settings() {
     } catch (e) { notify({ type: 'error', message: e.message }); }
   };
 
-  /* ── Account & Security ── */
-  const changePassword = async () => {
-    setChangePwError(''); setChangePwSuccess('');
-    try {
-      await api.put('/auth/change-password', { current_password: currentPassword, new_password: newPassword });
-      setChangePwSuccess('Password changed successfully.');
-      setCurrentPassword(''); setNewPassword('');
-    } catch (e) { setChangePwError(e.message || 'Failed to change password'); }
-  };
-
   /* ── API Keys ── */
   const createApiKey = async () => {
     try {
@@ -281,6 +280,18 @@ export default function Settings() {
       setApiKeys(prev => prev.filter(k => k.id !== id));
       notify({ type: 'success', message: 'API key revoked.' });
     } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  /* ── Notification settings ── */
+  const saveNotifConfig = async () => {
+    setNotifSaving(true);
+    try {
+      const res = await api.put('/notifications/config', notifConfig);
+      setNotifConfig(res);
+      savedNotifRef.current = res;
+      notify({ type: 'success', message: 'Notification settings saved.' });
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+    finally { setNotifSaving(false); }
   };
 
   /* ── AI settings — per-feature helpers ── */
@@ -515,32 +526,6 @@ export default function Settings() {
                 <span className="ml-2 text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 uppercase">{user.role}</span>
               </div>
 
-              <Card>
-                <h3 className="text-sm font-semibold mb-3">Change Password</h3>
-                <div className="space-y-2 max-w-sm">
-                  <input
-                    type="password"
-                    placeholder="Current password"
-                    className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                    value={currentPassword}
-                    onChange={e => setCurrentPassword(e.target.value)}
-                  />
-                  <input
-                    type="password"
-                    placeholder="New password"
-                    className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                    value={newPassword}
-                    onChange={e => setNewPassword(e.target.value)}
-                  />
-                  <p className="text-xs text-gray-400">Min 8 chars, with upper, lower, and a digit.</p>
-                  {changePwError && <p className="text-xs text-red-500">{changePwError}</p>}
-                  {changePwSuccess && <p className="text-xs text-green-600">{changePwSuccess}</p>}
-                  <Button size="sm" onClick={changePassword} disabled={!currentPassword || !newPassword}>
-                    Update Password
-                  </Button>
-                </div>
-              </Card>
-
               <Button size="sm" variant="outline" onClick={logout}>Log Out</Button>
             </div>
           )}
@@ -771,6 +756,106 @@ export default function Settings() {
           ))}
         </section>
 
+        {/* ──────────────── Notifications ──────────────── */}
+        <section id="notifications" className="mb-10">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Email Notifications</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Receive email notifications for campaign events instead of (or in addition to) webhooks.
+            Notifications are sent from your own OAuth login account.
+          </p>
+          <Card>
+            {/* ── Collapsed header ── */}
+            <div
+              className="flex items-center justify-between cursor-pointer select-none"
+              onClick={() => setNotifOpen(v => !v)}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <span className={`text-gray-400 transition-transform text-xs ${notifOpen ? 'rotate-90' : ''}`}>▶</span>
+                <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">Notification settings</h3>
+                {notifConfig.enabled
+                  ? <span className="text-[10px] bg-green-100 text-green-700 border border-green-200 rounded-full px-2 py-0.5 font-medium shrink-0">Enabled</span>
+                  : <span className="text-[10px] bg-gray-100 text-gray-500 border rounded-full px-2 py-0.5 font-medium shrink-0">Disabled</span>
+                }
+              </div>
+              <label
+                className="flex items-center gap-1.5 cursor-pointer shrink-0 ml-4"
+                onClick={e => e.stopPropagation()}
+              >
+                <input
+                  type="checkbox"
+                  checked={notifConfig.enabled}
+                  className="rounded"
+                  onChange={async e => {
+                    const next = { ...notifConfig, enabled: e.target.checked };
+                    setNotifConfig(next);
+                    try {
+                      await api.put('/notifications/config', next);
+                      notify({ type: 'success', message: `Notifications ${next.enabled ? 'enabled' : 'disabled'}` });
+                    } catch (err) { notify({ type: 'error', message: err.message }); }
+                  }}
+                />
+                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">Enable</span>
+              </label>
+            </div>
+
+            {/* ── Expanded body ── */}
+            <div className={`grid transition-[grid-template-rows] duration-200 ease-in-out ${notifOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+              <div className="min-h-0 overflow-hidden">
+                <div className="mt-4 space-y-4 border-t pt-4">
+                  {/* Notification email */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Notification email address</label>
+                    <input
+                      type="email"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="you@example.com"
+                      value={notifConfig.notification_email}
+                      onChange={e => { setNotifConfig(prev => ({ ...prev, notification_email: e.target.value })); }}
+                    />
+                    <p className="text-[11px] text-gray-400 mt-1">Where notification emails will be sent to.</p>
+                  </div>
+
+                  {/* Rate limit */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Rate limit (emails per hour)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      className="w-24 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={notifConfig.rate_limit_per_hour}
+                      onChange={e => { setNotifConfig(prev => ({ ...prev, rate_limit_per_hour: Math.max(1, Math.min(100, parseInt(e.target.value) || 1)) })); }}
+                    />
+                  </div>
+
+                  {/* Event selector — reuse same pattern */}
+                  <div>
+                    <label className="block text-xs font-medium text-gray-600 mb-1">Events</label>
+                    <EventSelector
+                      events={notifConfig.events}
+                      onChange={evts => { setNotifConfig(prev => ({ ...prev, events: evts })); }}
+                    />
+                  </div>
+
+                  {/* Save */}
+                  <div className="pt-2 space-y-2">
+                    {savedNotifRef.current != null && (
+                      notifConfig.notification_email !== savedNotifRef.current.notification_email ||
+                      notifConfig.rate_limit_per_hour !== savedNotifRef.current.rate_limit_per_hour ||
+                      [...notifConfig.events].sort().join(',') !== [...(savedNotifRef.current.events || [])].sort().join(',')
+                    ) && (
+                      <p className="text-xs text-amber-600 font-medium">⚠ Unsaved changes — click Save to apply</p>
+                    )}
+                    <Button onClick={saveNotifConfig} disabled={notifSaving} size="sm">
+                      {notifSaving ? 'Saving…' : 'Save Notification Settings'}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </Card>
+        </section>
+
         {/* ──────────────── AI Features ──────────────── */}
         <section id="ai" className="mb-10">
           <h2 className="text-lg font-semibold mb-1 border-b pb-2">AI Features</h2>
@@ -788,8 +873,9 @@ export default function Settings() {
             const verifying = aiVerifying[fid] || false;
             const verifyResult = aiVerifyResult[fid] || null;
 
-            const setFeature = (updater) =>
+            const setFeature = (updater) => {
               setAiFeatures(prev => ({ ...prev, [fid]: typeof updater === 'function' ? updater(prev[fid]) : { ...prev[fid], ...updater } }));
+            };
             const setProvSearch = (v) => setAiProviderSearch(prev => ({ ...prev, [fid]: v }));
             const setModSearch = (v) => setAiModelSearch(prev => ({ ...prev, [fid]: v }));
 
@@ -830,7 +916,8 @@ export default function Settings() {
                       className="rounded"
                       onChange={e => {
                         const next = e.target.checked;
-                        setFeature({ enabled: next });
+                        // update state without marking dirty — enabled auto-saves immediately
+                        setAiFeatures(prev => ({ ...prev, [fid]: { ...prev[fid], enabled: next } }));
                         saveAiFeature(fid, { enabled: next });
                       }}
                     />
@@ -954,6 +1041,17 @@ export default function Settings() {
                     </div>
 
                     {/* Actions */}
+                    {(() => {
+                      const saved = savedAiFeaturesRef.current[fid];
+                      const aiFeatDirty = saved != null && (
+                        feature.provider !== saved.provider ||
+                        feature.model !== saved.model ||
+                        !!feature.api_key
+                      );
+                      return aiFeatDirty ? (
+                        <p className="text-xs text-amber-600 font-medium">⚠ Unsaved changes — click Save to apply</p>
+                      ) : null;
+                    })()}
                     <div className="flex items-center gap-3 flex-wrap">
                       <Button size="sm" variant="outline" onClick={() => verifyAiFeature(fid)} disabled={verifying}>
                         {verifying ? 'Verifying…' : 'Verify'}

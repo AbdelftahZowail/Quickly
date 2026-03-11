@@ -240,8 +240,8 @@ async def campaigns_have_leads(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=CampaignResponse)
 async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_db)):
-    if not data.inbox_ids:
-        raise HTTPException(400, "At least one inbox required")
+    # if not data.inbox_ids:
+    #     raise HTTPException(400, "At least one inbox required")
     campaign = Campaign(
         name=data.name,
         sending_days=data.sending_days,
@@ -425,8 +425,8 @@ async def update_campaign(
     if data.name is not None:
         campaign.name = data.name
     if data.inbox_ids is not None:
-        if not data.inbox_ids:
-            raise HTTPException(400, "At least one inbox required")
+        # if not data.inbox_ids:
+        #     raise HTTPException(400, "At least one inbox required")
         await db.execute(delete(CampaignInbox).where(CampaignInbox.campaign_id == campaign_id))
         await db.flush()
         for pos, inbox_id in enumerate(data.inbox_ids):

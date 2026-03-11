@@ -76,6 +76,14 @@ class Settings:
     @property
     def office365_redirect_uri(self) -> str:
         return f"{self.base_url.rstrip('/')}/oauth/office365/callback"
+
+    @property
+    def app_google_redirect_uri(self) -> str:
+        return f"{self.base_url.rstrip('/')}/oauth/app/google/callback"
+
+    @property
+    def app_microsoft_redirect_uri(self) -> str:
+        return f"{self.base_url.rstrip('/')}/oauth/app/microsoft/callback"
     
     def reload_from_dict(self, data: dict):
         """Update settings from a dictionary (typically loaded from DB)."""
