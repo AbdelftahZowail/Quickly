@@ -74,36 +74,6 @@ export function AuthProvider({ children }) {
     }
   }, [refreshToken]);
 
-  const login = useCallback(async (username, password) => {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({ username, password }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Login failed' }));
-      throw new Error(err.detail || 'Login failed');
-    }
-    const data = await res.json();
-    _accessToken = data.access_token;
-    await fetchUser();
-    return data;
-  }, [fetchUser]);
-
-  const register = useCallback(async (username, email, password) => {
-    const res = await fetch('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, email, password }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Registration failed' }));
-      throw new Error(err.detail || 'Registration failed');
-    }
-    return await res.json();
-  }, []);
-
   const logout = useCallback(async () => {
     await fetch('/api/auth/logout', {
       method: 'POST',
@@ -147,8 +117,6 @@ export function AuthProvider({ children }) {
       user,
       loading,
       setupComplete,
-      login,
-      register,
       logout,
       refreshToken,
       checkSetup,

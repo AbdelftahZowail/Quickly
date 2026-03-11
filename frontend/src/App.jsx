@@ -14,6 +14,7 @@ import Login from './pages/Login';
 import { api } from './api';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import SplashScreen from './components/SplashScreen';
+import { DarkModeProvider } from './context/DarkModeContext';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -70,8 +71,10 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <AuthProvider>
-      <AppRoutes />
-    </AuthProvider>
+    <DarkModeProvider>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </DarkModeProvider>
   );
 }

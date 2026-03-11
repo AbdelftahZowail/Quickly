@@ -93,25 +93,32 @@ async def fire_webhook_event(
     Each webhook that has *event_type* in its ``events`` list (or has an
     empty events list, meaning "all events") will receive a POST request.
     Failures are logged but never raised.
+
+    Also sends email notifications to users who have opted in.
     """
     result = await db.execute(
         select(Webhook).where(Webhook.active == True)  # noqa: E712
     )
     webhooks = result.scalars().all()
 
-    if not webhooks:
-        return
+    if webhooks:
+        timestamp = time_provider.utcnow().isoformat() + "Z"
+        payload = {"event": event_type, "data": data, "timestamp": timestamp}
 
-    timestamp = time_provider.utcnow().isoformat() + "Z"
-    payload = {"event": event_type, "data": data, "timestamp": timestamp}
+        for wh in webhooks:
+            # If the webhook has specific events configured, check if this event
+            # is in the list.  An empty list means "subscribe to everything".
+            if wh.events and event_type not in wh.events:
+                continue
 
-    for wh in webhooks:
-        # If the webhook has specific events configured, check if this event
-        # is in the list.  An empty list means "subscribe to everything".
-        if wh.events and event_type not in wh.events:
-            continue
+            await _post_webhook(wh, event_type, data)
 
-        await _post_webhook(wh, event_type, data)
+    # Email notifications (separate system, failures never propagate)
+    try:
+        from app.notifications import fire_email_notification
+        await fire_email_notification(db, event_type, data)
+    except Exception:
+        log.debug("Email notification dispatch failed for event=%s", event_type, exc_info=True)
 
 
 # ── Convenience aliases kept for backward compatibility with callers ──────

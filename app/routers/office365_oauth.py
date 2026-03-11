@@ -1,6 +1,8 @@
 """Office 365 / Microsoft OAuth 2.0 routes for connecting accounts."""
+import hmac
 import json
 import logging
+import secrets
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -13,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.settings_manager import settings
 from app.database import get_db
-from app.models import Inbox, Office365Account
+from app.models import Inbox, Office365Account, OAuthState
 
 log = logging.getLogger("quickly.office365_oauth")
 
@@ -89,10 +91,23 @@ async def office365_authorize(
     if not client_id or not client_secret:
         raise HTTPException(400, "Office 365 OAuth not configured. Set OFFICE365_CLIENT_ID and OFFICE365_CLIENT_SECRET environment variables.")
 
+    # CSRF nonce
+    from app.time import utcnow
+    csrf_token = secrets.token_urlsafe(32)
+    csrf_state = OAuthState(
+        state_token=csrf_token,
+        purpose="inbox_microsoft",
+        metadata_json=json.dumps({"display_name": display_name, "max_per_day": max_per_day, "ramp_up_enabled": ramp_up_enabled}),
+        expires_at=utcnow() + timedelta(minutes=10),
+    )
+    db.add(csrf_state)
+    await db.flush()
+
     state_data = json.dumps({
         "display_name": display_name,
         "max_per_day": max_per_day,
         "ramp_up_enabled": ramp_up_enabled,
+        "_csrf": csrf_token,
     })
 
     authority = _get_authority(tenant_id)
@@ -132,6 +147,28 @@ async def office365_callback(
     display_name = state_data.get("display_name", "")
     max_per_day = state_data.get("max_per_day", 50)
     ramp_up_enabled = bool(state_data.get("ramp_up_enabled", False))
+
+    # Validate CSRF nonce (single-use)
+    csrf_token = state_data.get("_csrf", "")
+    if not csrf_token:
+        raise HTTPException(403, "Missing CSRF token in OAuth state")
+    csrf_result = await db.execute(
+        select(OAuthState).where(OAuthState.state_token == csrf_token)
+    )
+    csrf_record = csrf_result.scalar_one_or_none()
+    if csrf_record is None:
+        raise HTTPException(403, "Invalid or expired OAuth state")
+    from app.time import utcnow as _utcnow_fn
+    if not hmac.compare_digest(csrf_record.purpose, "inbox_microsoft"):
+        await db.delete(csrf_record)
+        await db.flush()
+        raise HTTPException(403, "Invalid OAuth state purpose")
+    if csrf_record.expires_at < _utcnow_fn():
+        await db.delete(csrf_record)
+        await db.flush()
+        raise HTTPException(403, "OAuth state expired")
+    await db.delete(csrf_record)
+    await db.flush()
 
     from app.app_settings import get_office365_oauth_credentials
     client_id, client_secret, tenant_id = await get_office365_oauth_credentials(db)

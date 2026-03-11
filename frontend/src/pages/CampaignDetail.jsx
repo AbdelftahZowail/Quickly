@@ -385,6 +385,9 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const [msg, setMsg]     = useState(null);
   const [skipDuplicates, setSkipDuplicates] = useState(true);
   const [verifyEmails, setVerifyEmails] = useState(false);
+  const [emailVerifEnabled, setEmailVerifEnabled] = useState(() => {
+    try { return localStorage.getItem('emailVerifEnabled') === 'true'; } catch { return false; }
+  });
   const [lastDuplicates, setLastDuplicates] = useState([]);
   const [editCell, setEditCell] = useState(null); // { leadId, field }
   const [editValue, setEditValue] = useState('');
@@ -437,6 +440,14 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   }, [campaignId]);
 
   useEffect(() => { loadVerificationSummary(); }, [loadVerificationSummary]);
+
+  useEffect(() => {
+    api.get('/settings/email-verification').then(d => {
+      const enabled = !!d.enabled;
+      setEmailVerifEnabled(enabled);
+      try { localStorage.setItem('emailVerifEnabled', enabled ? 'true' : 'false'); } catch {}
+    }).catch(() => {});
+  }, []);
 
   // Verify all unverified leads
   const verifyAllLeads = async () => {
@@ -621,9 +632,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 8l-4-4m0 0L8 8m4-4v12" /></svg>
           {importing ? 'Importing…' : 'Import CSV'}
         </Button>
-        <Button size="sm" variant="outline" onClick={verifyAllLeads} disabled={verifying}>
-          {verifying ? 'Verifying…' : 'Verify All Emails'}
-        </Button>
+        {emailVerifEnabled && (
+          <Button size="sm" variant="outline" onClick={verifyAllLeads} disabled={verifying}>
+            {verifying ? 'Verifying…' : 'Verify All Emails'}
+          </Button>
+        )}
         <span className="text-xs text-gray-400 ml-1">
           {filteredLeads.length}{hasActiveFilter ? `/${leads.length}` : ''} lead{filteredLeads.length !== 1 ? 's' : ''}
         </span>
@@ -916,15 +929,17 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           />
           Skip duplicates (checks all campaigns)
         </label>
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-4">
-          <input
-            type="checkbox"
-            checked={verifyEmails}
-            onChange={e => setVerifyEmails(e.target.checked)}
-            className="rounded"
-          />
-          Verify emails after adding (requires API key in Settings)
-        </label>
+        {emailVerifEnabled && (
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-4">
+            <input
+              type="checkbox"
+              checked={verifyEmails}
+              onChange={e => setVerifyEmails(e.target.checked)}
+              className="rounded"
+            />
+            Verify emails after adding
+          </label>
+        )}
         {msg && <div className={`mb-2 text-sm ${msg.type==='error'?'text-red-600':'text-green-600'}`}>{msg.text}</div>}
         {mode === 'single' && (
           <form onSubmit={addSingle} className="space-y-3">

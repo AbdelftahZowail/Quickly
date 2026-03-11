@@ -29,6 +29,8 @@ from app.routers import settings as settings_router
 from app.routers import unibox as unibox_router
 from app.routers import tracking as tracking_router
 from app.routers import email_provider as email_provider_router
+from app.routers import app_oauth as app_oauth_router
+from app.routers import notifications as notifications_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
@@ -181,6 +183,11 @@ from app.routers import auth as auth_router
 app.include_router(auth_router.router)
 
 # ---------------------------------------------------------------------------
+# App OAuth routes (public — login/signup via Google & Microsoft)
+# ---------------------------------------------------------------------------
+app.include_router(app_oauth_router.router)
+
+# ---------------------------------------------------------------------------
 # Protected routers – all require authentication
 # ---------------------------------------------------------------------------
 from app.auth import get_current_user as _auth_dep
@@ -201,6 +208,7 @@ settings_router.router.dependencies = _auth_deps
 unibox_router.router.dependencies = _auth_deps
 # tracking_router has public endpoints (open pixel, click redirect, unsubscribe)
 # so it does NOT get global auth — individual endpoints handle auth internally.
+notifications_router.router.dependencies = _auth_deps
 
 app.include_router(inbox.router)
 app.include_router(leads.router)
@@ -215,6 +223,7 @@ app.include_router(schedule_router.router)
 app.include_router(settings_router.router)
 app.include_router(unibox_router.router)
 app.include_router(tracking_router.router)
+app.include_router(notifications_router.router)
 
 # lightweight public utility for MX-based provider detection
 app.include_router(email_provider_router.router)
