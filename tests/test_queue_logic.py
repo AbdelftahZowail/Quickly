@@ -48,6 +48,21 @@ from tests.conftest import (
 )
 
 
+# ============================================================================
+# MODULE-LEVEL FIXTURE: freeze "now" so hardcoded 2026-03 dates stay valid.
+# Frozen to 2026-03-01 (Sunday) — all test start dates (2026-03-02 onward)
+# are therefore in the future and the scheduler won't bump them to today.
+# ============================================================================
+
+@pytest.fixture(autouse=True)
+def freeze_queue_now(monkeypatch):
+    """Freeze app.time.now() to 2026-03-01 00:00 (Sunday midnight UTC)."""
+    import app.time as _app_time
+    _frozen = datetime(2026, 3, 1, 0, 0, 0)
+    monkeypatch.setattr(_app_time, "now", lambda: _frozen)
+    monkeypatch.setattr(_app_time, "utcnow", lambda: _frozen)
+
+
 # helper to run global recalculation algorithms in tests
 async def global_recalculate(session, campaign_id=None, cl_ids=None):
     """Invoke both supported global recalculation routines.
@@ -2048,8 +2063,10 @@ class TestRecalculationElapsedWait:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        # Sent 2 weeks ago
-        old_date = date.today() - timedelta(days=14)
+        # Sent 2 weeks ago (relative to the frozen scheduler 'now')
+        import app.time as _app_time
+        frozen_today = _app_time.now().date()
+        old_date = frozen_today - timedelta(days=14)
         while old_date.weekday() > 4:
             old_date -= timedelta(days=1)
         await make_email_log(
@@ -2065,9 +2082,8 @@ class TestRecalculationElapsedWait:
         slots = result.scalars().all()
         assert len(slots) == 1
 
-        # Should be today or the next business day — never in the past
-        today = date.today()
-        assert slots[0].scheduled_date.date() >= today
+        # Should be frozen today or the next business day — never in the past
+        assert slots[0].scheduled_date.date() >= frozen_today
 
     async def test_never_schedules_in_the_past(self, session):
         """
@@ -2085,7 +2101,9 @@ class TestRecalculationElapsedWait:
         lead = await make_lead(session)
         cl = await make_campaign_lead(session, campaign.id, lead.id)
 
-        old_date = date.today() - timedelta(days=30)
+        import app.time as _app_time
+        frozen_today = _app_time.now().date()
+        old_date = frozen_today - timedelta(days=30)
         while old_date.weekday() > 4:
             old_date -= timedelta(days=1)
         await make_email_log(
@@ -2100,9 +2118,8 @@ class TestRecalculationElapsedWait:
         )
         slots = result.scalars().all()
         assert len(slots) == 2
-        today = date.today()
         for s in slots:
-            assert s.scheduled_date.date() >= today, f"Slot seq {s.sequence_index} scheduled in the past: {s.scheduled_date.date()}"
+            assert s.scheduled_date.date() >= frozen_today, f"Slot seq {s.sequence_index} scheduled in the past: {s.scheduled_date.date()}"
 
 
 class TestRecalculationNoResend:

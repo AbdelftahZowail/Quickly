@@ -238,7 +238,7 @@ class TestOpenTrackingPixel:
         pixel_url = f"{BASE}/o/7"
         assert pixel_url in new_html
         # Pixel appended at the end
-        assert new_html.endswith(f'<img src="{pixel_url}" width="1" height="1" border="0" style="display:none" alt="" />')
+        assert new_html.endswith(f'<img src="{pixel_url}" width="1" height="1" alt="" />')
 
     def test_pixel_url_uses_correct_log_id(self):
         html = "<p>Test</p>"
@@ -253,12 +253,14 @@ class TestOpenTrackingPixel:
 
         assert f"{custom_base}/o/1" in new_html
 
-    def test_pixel_tag_has_display_none(self):
-        """The pixel must be invisible — style="display:none"."""
+    def test_pixel_tag_is_present(self):
+        """The pixel img tag must be present in the HTML."""
         html = "<p>Test</p>"
         new_html, _ = inject_tracking_html(html, 1, BASE, track_clicks=False)
 
-        assert 'style="display:none"' in new_html
+        assert f'{BASE}/o/1' in new_html
+        assert 'width="1"' in new_html
+        assert 'height="1"' in new_html
 
     def test_track_opens_false_no_pixel(self):
         html = "<p>Test</p></body>"

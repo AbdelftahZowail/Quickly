@@ -4,10 +4,11 @@ from sqlalchemy import select
 
 from app.models import Office365Account, Office365GraphSubscription
 from app.routers.office365_webhook import ensure_subscription
+from tests.conftest import make_inbox
 
 
 @pytest.mark.asyncio
-async def test_ensure_subscription_creates_new(session, monkeypatch, make_inbox):
+async def test_ensure_subscription_creates_new(session, monkeypatch):
     inbox = await make_inbox(session, provider="office365")
     acct = Office365Account(
         inbox_id=inbox.id,
@@ -45,7 +46,7 @@ async def test_ensure_subscription_creates_new(session, monkeypatch, make_inbox)
 
 
 @pytest.mark.asyncio
-async def test_ensure_subscription_renews_existing(session, monkeypatch, make_inbox):
+async def test_ensure_subscription_renews_existing(session, monkeypatch):
     inbox = await make_inbox(session, provider="office365")
     acct = Office365Account(
         inbox_id=inbox.id,
