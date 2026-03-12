@@ -170,31 +170,41 @@ async def test_pause_inbox_invalid_action_raises(session):
 
 @pytest.mark.asyncio
 async def test_pause_inbox_reassign_moves_slots(session):
-    """action='reassign' should move future queue slots to the target inbox."""
+    """action='reassign' triggers a full recalculation; slots on the paused inbox
+    are replaced with slots on the remaining active inbox."""
     inbox_a = await make_inbox(session, email="inbox-a@test.com")
     inbox_b = await make_inbox(session, email="inbox-b@test.com")
-    campaign = await make_campaign(session)
+    campaign = await make_campaign(session, sending_days=[0, 1, 2, 3, 4])
+    # Both inboxes registered with the campaign so recalc can use inbox_b
+    await make_campaign_inbox(session, campaign.id, inbox_a.id, position=0)
+    await make_campaign_inbox(session, campaign.id, inbox_b.id, position=1)
+    await make_sequence(session, campaign.id, position=0)
     lead = await make_lead(session, email="reassign-lead@test.com")
     cl = await make_campaign_lead(session, campaign.id, lead.id)
-    slot = await make_queue_slot(
+    await make_queue_slot(
         session,
         campaign_lead_id=cl.id,
         inbox_id=inbox_a.id,
         scheduled_date=_future_slot_date(),
     )
 
-    body = PauseInboxRequest(action="reassign", target_inbox_id=inbox_b.id)
+    body = PauseInboxRequest(action="reassign")
     await inbox_router.pause_inbox(inbox_a.id, body, db=session)
 
-    await session.refresh(slot)
-    assert slot.inbox_id == inbox_b.id
+    # After recalculation, new slots must not use the paused inbox_a
+    from sqlalchemy import select as sa_select
+    new_slots_res = await session.execute(
+        sa_select(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
+    )
+    new_slots = new_slots_res.scalars().all()
+    assert len(new_slots) >= 1
+    assert all(s.inbox_id != inbox_a.id for s in new_slots)
 
 
 @pytest.mark.asyncio
 async def test_pause_inbox_reassign_does_not_pause_leads(session):
     """With action='reassign', CampaignLeads should NOT have sending_paused set."""
     inbox_a = await make_inbox(session, email="ra-a@test.com")
-    inbox_b = await make_inbox(session, email="ra-b@test.com")
     campaign = await make_campaign(session)
     lead = await make_lead(session, email="ra-lead@test.com")
     cl = await make_campaign_lead(session, campaign.id, lead.id)
@@ -205,7 +215,7 @@ async def test_pause_inbox_reassign_does_not_pause_leads(session):
         scheduled_date=_future_slot_date(),
     )
 
-    body = PauseInboxRequest(action="reassign", target_inbox_id=inbox_b.id)
+    body = PauseInboxRequest(action="reassign")
     await inbox_router.pause_inbox(inbox_a.id, body, db=session)
 
     await session.refresh(cl)
@@ -213,47 +223,45 @@ async def test_pause_inbox_reassign_does_not_pause_leads(session):
 
 
 @pytest.mark.asyncio
-async def test_pause_inbox_reassign_missing_target_raises(session):
-    """action='reassign' without target_inbox_id should raise 400."""
+async def test_pause_inbox_reassign_no_target_succeeds(session):
+    """action='reassign' without target_inbox_id now triggers global recalc
+    (no target required); the inbox should end up paused."""
     inbox = await make_inbox(session, email="no-target@test.com")
     body = PauseInboxRequest(action="reassign", target_inbox_id=None)
-    with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(inbox.id, body, db=session)
-    assert exc_info.value.status_code == 400
+    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    assert result.paused is True
 
 
 @pytest.mark.asyncio
-async def test_pause_inbox_reassign_nonexistent_target_raises(session):
-    """action='reassign' to a non-existent inbox should raise 404."""
+async def test_pause_inbox_reassign_with_nonexistent_target_succeeds(session):
+    """action='reassign' ignores target_inbox_id; global recalc runs regardless."""
     inbox = await make_inbox(session, email="bad-target@test.com")
     body = PauseInboxRequest(action="reassign", target_inbox_id=9999)
-    with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(inbox.id, body, db=session)
-    assert exc_info.value.status_code == 404
+    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    assert result.paused is True
 
 
 @pytest.mark.asyncio
-async def test_pause_inbox_reassign_to_paused_target_raises(session):
-    """Reassigning to a paused inbox should raise 400."""
+async def test_pause_inbox_reassign_target_validation_removed(session):
+    """Reassign no longer validates the target inbox; the global recalc
+    is run without caring about target_inbox_id."""
     inbox_a = await make_inbox(session, email="src-paused@test.com")
     inbox_b = await make_inbox(session, email="dst-paused@test.com")
     inbox_b.paused = True
     await session.flush()
 
     body = PauseInboxRequest(action="reassign", target_inbox_id=inbox_b.id)
-    with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(inbox_a.id, body, db=session)
-    assert exc_info.value.status_code == 400
+    result = await inbox_router.pause_inbox(inbox_a.id, body, db=session)
+    assert result.paused is True
 
 
 @pytest.mark.asyncio
-async def test_pause_inbox_reassign_same_inbox_raises(session):
-    """Reassigning to the same inbox should raise 400."""
+async def test_pause_inbox_reassign_sets_paused_flag(session):
+    """Reassign (regardless of target_inbox_id) should mark the inbox as paused."""
     inbox = await make_inbox(session, email="self-reassign@test.com")
     body = PauseInboxRequest(action="reassign", target_inbox_id=inbox.id)
-    with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(inbox.id, body, db=session)
-    assert exc_info.value.status_code == 400
+    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    assert result.paused is True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -296,36 +304,16 @@ async def test_delete_inbox_simple(session):
 
 
 @pytest.mark.asyncio
-async def test_delete_inbox_in_use_requires_reassign(session):
-    """Inbox linked to a campaign or carrying slots should only be deleted
-    when reassign=True is provided; otherwise the endpoint raises 400."""
+async def test_delete_inbox_in_use_raises_400(session):
+    """Inbox linked to a campaign or carrying slots cannot be deleted;
+    caller must manually remove it from campaigns first."""
     inbox_a = await make_inbox(session, email="del-a@test.com")
-    inbox_b = await make_inbox(session, email="del-b@test.com")
     campaign = await make_campaign(session)
-    lead = await make_lead(session, email="del-lead@test.com")
-    cl = await make_campaign_lead(session, campaign.id, lead.id)
     await make_campaign_inbox(session, campaign.id, inbox_a.id)
-    await make_campaign_inbox(session, campaign.id, inbox_b.id)
-    slot = await make_queue_slot(
-        session,
-        campaign_lead_id=cl.id,
-        inbox_id=inbox_a.id,
-        scheduled_date=_future_slot_date(),
-    )
 
     with pytest.raises(HTTPException) as exc_info:
         await inbox_router.delete_inbox(inbox_a.id, db=session)
     assert exc_info.value.status_code == 400
-
-    res2 = await inbox_router.delete_inbox(inbox_a.id, reassign=True, db=session)
-    assert res2 == {"ok": True}
-    # inbox a should be removed, its CampaignInbox links cleared, and slot moved
-    q = await session.execute(select(Inbox).where(Inbox.id == inbox_a.id))
-    assert q.scalar_one_or_none() is None
-    ci_q = await session.execute(select(CampaignInbox).where(CampaignInbox.inbox_id == inbox_a.id))
-    assert ci_q.scalars().all() == []
-    await session.refresh(slot)
-    assert slot.inbox_id == inbox_b.id
 
 
 
@@ -413,17 +401,18 @@ async def test_bulk_add_mixed_new_and_duplicate(session):
 # ══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_bulk_add_reenroll_when_skip_duplicates_false(session):
-    """With skip_duplicates=False, an already-enrolled lead is re-enrolled
-    (old CampaignLead removed and a fresh one created)."""
+async def test_bulk_add_skip_duplicates_false_skips_same_campaign(session):
+    """With skip_duplicates=False, a lead already enrolled in THIS campaign is
+    still skipped (avoiding a DB constraint violation).  The duplicate_leads
+    list is NOT populated (that's only for cross-campaign checks when
+    skip_duplicates=True), but already_enrolled is incremented."""
     campaign = await make_campaign(session)
     inbox = await make_inbox(session, email="reenroll@test.com")
     await make_campaign_inbox(session, campaign.id, inbox.id)
     await make_sequence(session, campaign.id, position=0)
 
     lead = await make_lead(session, email="reenroll@example.com")
-    old_cl = await make_campaign_lead(session, campaign.id, lead.id)
-    old_cl_id = old_cl.id
+    await make_campaign_lead(session, campaign.id, lead.id)
 
     payload = [CampaignLeadAdd(email="reenroll@example.com")]
     result = await bulk_add_leads_to_campaign(
@@ -433,12 +422,12 @@ async def test_bulk_add_reenroll_when_skip_duplicates_false(session):
         db=session,
     )
 
-    assert result["added"] == 1
+    # Lead already in this campaign → skipped, not re-enrolled
+    assert result["added"] == 0
+    assert result["already_enrolled"] == 1
     assert result["duplicate_leads"] == []
 
-    # The externally-observable effect of re-enrollment is that the lead was
-    # reported as "added" (not "already_enrolled"), confirming the old record
-    # was replaced.  We also verify exactly one enrollment entry exists.
+    # Exactly one enrollment entry should still exist
     from sqlalchemy import func as _func
     count_res = await session.execute(
         select(_func.count(CampaignLead.id)).where(
@@ -522,16 +511,17 @@ async def test_csv_import_skip_duplicates_reports_them(session):
 
 
 @pytest.mark.asyncio
-async def test_csv_import_reenroll_when_skip_duplicates_false(session):
-    """CSV import with skip_duplicates=False should re-enroll existing leads."""
+async def test_csv_import_skip_duplicates_false_skips_same_campaign(session):
+    """CSV import with skip_duplicates=False skips leads already enrolled in
+    THIS campaign (to avoid DB constraint violations) rather than re-enrolling
+    them.  The already_enrolled counter is incremented."""
     campaign = await make_campaign(session)
     inbox = await make_inbox(session, email="csv-reenroll@test.com")
     await make_campaign_inbox(session, campaign.id, inbox.id)
     await make_sequence(session, campaign.id, position=0)
 
     existing = await make_lead(session, email="reenroll-csv@example.com")
-    old_cl = await make_campaign_lead(session, campaign.id, existing.id)
-    old_cl_id = old_cl.id
+    await make_campaign_lead(session, campaign.id, existing.id)
 
     csv_content = "email,name\nreenroll-csv@example.com,Reenroll\n"
     fake_file = _make_csv_upload(csv_content)
@@ -543,10 +533,12 @@ async def test_csv_import_reenroll_when_skip_duplicates_false(session):
         db=session,
     )
 
-    assert result["added"] == 1
+    # Lead already in this campaign → skipped, not re-enrolled
+    assert result["added"] == 0
+    assert result["already_enrolled"] == 1
     assert result["duplicate_leads"] == []
 
-    # Verify exactly one enrollment entry exists after re-enrollment
+    # Verify exactly one enrollment entry exists
     from sqlalchemy import func as _func
     count_res = await session.execute(
         select(_func.count(CampaignLead.id)).where(

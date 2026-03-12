@@ -1,17 +1,28 @@
 from fastapi.testclient import TestClient
 import json
+from datetime import datetime, timedelta
 
-
-
+import pytest
 
 from app.main import app
 
-def test_google_callback_creates_inbox(monkeypatch):
-    """A callback request without an explicit background_tasks query should
-    succeed and redirect to the inboxes page.  Previously FastAPI treated the
-    missing ``background_tasks`` argument as a required query parameter when
-    the handler lacked the proper import.
+@pytest.mark.asyncio
+async def test_google_callback_creates_inbox(monkeypatch, session):
+    """A callback request should succeed and redirect to the inboxes page.
+    The callback now validates a one-time CSRF state token; we pre-create
+    an OAuthState record and include the token in the state parameter.
     """
+    from app.models import OAuthState
+
+    csrf_token = "test-csrf-token-abc123"
+    state_record = OAuthState(
+        state_token=csrf_token,
+        purpose="inbox_google",
+        expires_at=datetime.utcnow() + timedelta(hours=1),
+    )
+    session.add(state_record)
+    await session.commit()
+
     with TestClient(app) as client:
         # patch out any real network/DB interactions
         # stub out the helpers used by the callback so nothing hits Google
@@ -43,7 +54,7 @@ def test_google_callback_creates_inbox(monkeypatch):
         assert resp_status.status_code == 200
         assert resp_status.json()["configured"] is True
 
-        state = json.dumps({"display_name": "Foo", "max_per_day": 10})
+        state = json.dumps({"display_name": "Foo", "max_per_day": 10, "_csrf": csrf_token})
         # use `params` to ensure proper URL encoding of the JSON string
         resp = client.get(
             "/oauth/google/callback",

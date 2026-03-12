@@ -57,7 +57,7 @@ async def test_get_unibox_merges_and_sorts(session):
     items = payload["items"]
     assert payload["total"] == 2
     assert items[0]["thread_id"] == "t-b"
-    assert items[0]["gmail_account"] == "b@example.com"
+    assert items[0]["inbox_account"] == "b@example.com"
     assert items[1]["thread_id"] == "t-a"
 
 
