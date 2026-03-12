@@ -860,3 +860,629 @@ async def run_send_job():
     last_send_job_run = time_provider.now()
     last_send_job_sent_count = total_sent
     log.info("Send job finished: %d email(s) sent (next run in %d min)", total_sent, settings.queue_check_interval_minutes)
+
+
+# ---------------------------------------------------------------------------
+# Per-slot job: fired by APScheduler at the slot's exact scheduled_date
+# ---------------------------------------------------------------------------
+
+async def send_slot_job(slot_id: int) -> None:
+    """Send a single queue slot identified by *slot_id*.
+
+    Called by APScheduler as a DateTrigger job at the slot's ``scheduled_date``.
+    All business-rule checks (quota, rate limit, sending window, etc.) are
+    applied here; a slot that cannot be sent at fire time is simply skipped –
+    the slot row remains in the database so the next recalculation can
+    reschedule it.
+    """
+    global last_send_job_run, last_send_job_sent_count
+
+    now = time_provider.now()
+    log.info("send_slot_job: slot_id=%d firing at %s", slot_id, now.isoformat())
+
+    async with AsyncSessionLocal() as session:
+        # ── Load slot + all related entities in one query ────────────────
+        slot_res = await session.execute(
+            select(QueueSlot, CampaignLead, Campaign, Lead, Sequence, Inbox)
+            .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+            .join(Campaign, CampaignLead.campaign_id == Campaign.id)
+            .join(Lead, CampaignLead.lead_id == Lead.id)
+            .join(
+                Sequence,
+                (Sequence.campaign_id == Campaign.id)
+                & (Sequence.position == QueueSlot.sequence_index),
+            )
+            .join(Inbox, QueueSlot.inbox_id == Inbox.id)
+            .options(selectinload(Sequence.variants))
+            .where(QueueSlot.id == slot_id)
+        )
+        row = slot_res.first()
+        if not row:
+            log.info("send_slot_job: slot %d not found – already sent or cancelled", slot_id)
+            return
+
+        slot, cl, campaign, lead, sequence, inbox = row
+
+        # ── Pre-flight checks ────────────────────────────────────────────
+        if inbox.paused:
+            log.info("send_slot_job: inbox %s paused, skipping slot %d", inbox.email, slot_id)
+            return
+        if getattr(campaign, "paused", False):
+            log.info("send_slot_job: campaign %d paused, skipping slot %d", campaign.id, slot_id)
+            return
+        if lead.status != "active":
+            log.info("send_slot_job: lead %d status=%s, skipping slot %d", lead.id, lead.status, slot_id)
+            return
+        if getattr(lead, "email_verification_status", None) in ("invalid", "risky"):
+            log.info("send_slot_job: lead %d verification=%s, skipping slot %d",
+                     lead.id, lead.email_verification_status, slot_id)
+            return
+        if getattr(cl, "sending_paused", False):
+            log.info("send_slot_job: sending paused for cl %d, skipping slot %d", cl.id, slot_id)
+            return
+        if not _in_sending_window(now, campaign):
+            log.info("send_slot_job: outside sending window for campaign %d, skipping slot %d",
+                     campaign.id, slot_id)
+            return
+
+        # ── Daily quota check ────────────────────────────────────────────
+        today = now.date()
+        max_per_day = compute_effective_daily_limit(inbox)
+        sent_count_res = await session.execute(
+            select(func.count(EmailLog.id))
+            .where(EmailLog.inbox_id == inbox.id, func.date(EmailLog.sent_at) == today)
+        )
+        already_sent = sent_count_res.scalar() or 0
+        if already_sent >= max_per_day:
+            log.warning(
+                "send_slot_job: daily limit hit for inbox %s (sent=%d cap=%d), skipping slot %d",
+                inbox.email, already_sent, max_per_day, slot_id,
+            )
+            await fire_webhook_event(
+                session, "daily_limit",
+                {"inbox_id": inbox.id, "inbox_email": inbox.email, "date": str(today)},
+            )
+            await session.commit()
+            return
+
+        # ── Rate-limit check ─────────────────────────────────────────────
+        last_sent_res = await session.execute(
+            select(EmailLog.sent_at)
+            .where(EmailLog.inbox_id == inbox.id)
+            .order_by(EmailLog.sent_at.desc())
+            .limit(1)
+        )
+        last_sent_time = last_sent_res.scalar_one_or_none()
+        if last_sent_time is not None:
+            delta = now - last_sent_time
+            required = timedelta(minutes=inbox.wait_minutes_between)
+            if delta + timedelta(seconds=20) < required:
+                log.info(
+                    "send_slot_job: rate limit for inbox %s – "
+                    "last sent %s ago (need %s), skipping slot %d",
+                    inbox.email, delta, required, slot_id,
+                )
+                await fire_webhook_event(
+                    session, "rate_limit",
+                    {
+                        "inbox_id": inbox.id, "inbox_email": inbox.email,
+                        "last_sent": last_sent_time.isoformat(),
+                        "now": now.isoformat(),
+                        "wait_minutes": inbox.wait_minutes_between,
+                    },
+                )
+                await session.commit()
+                return
+
+        # ── stop_on_reply check ──────────────────────────────────────────
+        if campaign.stop_on_reply:
+            reply_check = await session.execute(
+                select(LeadReply).where(
+                    LeadReply.lead_id == lead.id, LeadReply.campaign_id == campaign.id
+                )
+            )
+            if reply_check.scalar_one_or_none():
+                log.info(
+                    "send_slot_job: lead %d already replied to campaign %d, skipping slot %d",
+                    lead.id, campaign.id, slot_id,
+                )
+                return
+
+        # ── OAuth credentials ────────────────────────────────────────────
+        g_client_id, g_client_secret = await get_google_oauth_credentials(session)
+        o365_client_id, o365_client_secret, o365_tenant_id = await get_office365_oauth_credentials(session)
+
+        gmail_token = ""
+        ga = None
+        o365_account = None
+
+        from app.settings_manager import settings as _settings
+        from app.app_settings import get_inbox_tracking_base
+        _fallback_tracking_base = _settings.base_url.rstrip("/")
+        inbox_tracking_base = get_inbox_tracking_base(inbox, _fallback_tracking_base)
+
+        if inbox.provider == "office365":
+            o365_res = await session.execute(
+                select(Office365Account).where(Office365Account.inbox_id == inbox.id)
+            )
+            o365_account = o365_res.scalar_one_or_none()
+            if o365_account:
+                if o365_account.token_expiry and o365_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
+                    refreshed = refresh_office365_token(
+                        o365_account, o365_client_id, o365_client_secret, o365_tenant_id
+                    )
+                    if refreshed:
+                        await session.flush()
+                    else:
+                        log.error(
+                            "send_slot_job: O365 token refresh failed for inbox %s (%s)",
+                            inbox.id, inbox.email,
+                        )
+                        await fire_webhook_event(
+                            session, "token_expired",
+                            {"inbox_id": inbox.id, "inbox_email": inbox.email},
+                        )
+                        await session.commit()
+                        return
+            else:
+                log.warning(
+                    "send_slot_job: O365 inbox %s has no Office365Account – skipping slot %d",
+                    inbox.email, slot_id,
+                )
+                return
+        else:
+            ga_result = await session.execute(
+                select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
+            )
+            ga = ga_result.scalar_one_or_none()
+            if ga:
+                if ga.token_expiry and ga.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
+                    refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
+                    if refreshed:
+                        await session.flush()
+                    else:
+                        log.error(
+                            "send_slot_job: Gmail token refresh failed for inbox %s (%s)",
+                            inbox.id, inbox.email,
+                        )
+                        await fire_webhook_event(
+                            session, "token_expired",
+                            {"inbox_id": inbox.id, "inbox_email": inbox.email},
+                        )
+                        await session.commit()
+                        return
+                gmail_token = ga.access_token
+            else:
+                log.warning(
+                    "send_slot_job: Gmail inbox %s has no GmailAccount – skipping slot %d",
+                    inbox.email, slot_id,
+                )
+                return
+
+        # ── A/B variant selection ────────────────────────────────────────
+        chosen_variant_id = None
+        seq_subject      = sequence.subject
+        seq_body         = sequence.body
+        seq_is_html      = sequence.is_html
+        seq_preview_text = getattr(sequence, "preview_text", None)
+
+        enabled_variants = [v for v in getattr(sequence, "variants", []) if v.enabled]
+        if enabled_variants:
+            options = [None] + enabled_variants
+            chosen = random.choice(options)
+            if chosen is not None:
+                chosen_variant_id = chosen.id
+                if chosen.subject is not None:
+                    seq_subject = chosen.subject
+                if chosen.body:
+                    seq_body = chosen.body
+                if chosen.is_html is not None:
+                    seq_is_html = chosen.is_html
+                if chosen.preview_text is not None:
+                    seq_preview_text = chosen.preview_text
+                log.info(
+                    "send_slot_job: A/B: slot=%s seq=%s chose variant_id=%s label=%r",
+                    slot.id, sequence.id, chosen_variant_id, chosen.label,
+                )
+
+        # ── Thread / reply chain for follow-up sequences ─────────────────
+        reply_to_msg_id = None
+        prev_thread_id = None
+        references_chain = None
+        reply_graph_message_id = None
+        prev_email_body_plain: str = ""
+        prev_email_body_html: str = ""
+        prev_sent_at = None
+
+        if (seq_subject or "").strip() == "":
+            all_logs_result = await session.execute(
+                select(EmailLog).where(
+                    EmailLog.lead_id == lead.id,
+                    EmailLog.campaign_id == campaign.id,
+                    EmailLog.message_id.isnot(None),
+                    EmailLog.message_id != "",
+                ).order_by(EmailLog.sent_at.asc())
+            )
+            all_logs = all_logs_result.scalars().all()
+
+            if all_logs:
+                reply_to_msg_id = all_logs[-1].message_id
+                references_chain = " ".join(
+                    (mid if mid.startswith("<") else f"<{mid}>")
+                    for log_entry in all_logs
+                    if (mid := log_entry.message_id)
+                )
+                prev_thread_id = all_logs[-1].thread_id
+                if prev_thread_id:
+                    _cross_camp_row = await session.execute(
+                        select(EmailLog.id).where(
+                            EmailLog.lead_id == lead.id,
+                            EmailLog.thread_id == prev_thread_id,
+                            EmailLog.campaign_id != campaign.id,
+                        ).limit(1)
+                    )
+                    if _cross_camp_row.scalar_one_or_none():
+                        log.warning(
+                            "send_slot_job: thread %s for lead_id=%s shared with another "
+                            "campaign – clearing thread_id",
+                            prev_thread_id, lead.id,
+                        )
+                        prev_thread_id = None
+
+                first_with_subject = next(
+                    (e for e in all_logs if e.subject and e.subject.strip()
+                     and e.subject != "(no subject)"),
+                    None,
+                )
+                if first_with_subject:
+                    orig_subj = first_with_subject.subject
+                    subject = orig_subj if orig_subj.lower().startswith("re: ") else f"Re: {orig_subj}"
+                else:
+                    subject = "(no subject)"
+
+                prev_sent_at = all_logs[-1].sent_at
+                _prev_log = all_logs[-1]
+                _prev_seq_row = await session.execute(
+                    select(Sequence).where(
+                        Sequence.campaign_id == campaign.id,
+                        Sequence.position == _prev_log.sequence_index,
+                    )
+                )
+                _prev_seq = _prev_seq_row.scalar_one_or_none()
+                if _prev_seq:
+                    _prev_body_raw = _prev_seq.body or ""
+                    _prev_is_html_raw = _prev_seq.is_html
+                    if _prev_log.variant_id:
+                        _prev_var_row = await session.execute(
+                            select(SequenceVariant).where(SequenceVariant.id == _prev_log.variant_id)
+                        )
+                        _prev_var = _prev_var_row.scalar_one_or_none()
+                        if _prev_var and _prev_var.body:
+                            _prev_body_raw = _prev_var.body
+                            if _prev_var.is_html is not None:
+                                _prev_is_html_raw = _prev_var.is_html
+                    _rendered_prev = render_body(_prev_body_raw, get_lead_data(lead))
+                    if _prev_is_html_raw:
+                        prev_email_body_html = _rendered_prev
+                    else:
+                        prev_email_body_plain = _rendered_prev
+
+                if inbox.provider == "office365" and reply_to_msg_id:
+                    _needle_msgid = (
+                        reply_to_msg_id
+                        if reply_to_msg_id.startswith("<")
+                        else f"<{reply_to_msg_id}>"
+                    )
+                    o365_real_row = await session.execute(
+                        select(Office365Message)
+                        .where(
+                            Office365Message.inbox_id == inbox.id,
+                            Office365Message.internet_message_id == _needle_msgid,
+                            ~Office365Message.message_id.startswith("local-"),
+                        )
+                        .limit(1)
+                    )
+                    o365_real_msg = o365_real_row.scalar_one_or_none()
+                    if not o365_real_msg and prev_thread_id:
+                        o365_real_row = await session.execute(
+                            select(Office365Message)
+                            .where(
+                                Office365Message.inbox_id == inbox.id,
+                                Office365Message.conversation_id == prev_thread_id,
+                                ~Office365Message.message_id.startswith("local-"),
+                            )
+                            .order_by(Office365Message.received_at.desc())
+                            .limit(1)
+                        )
+                        o365_real_msg = o365_real_row.scalar_one_or_none()
+                    if o365_real_msg:
+                        reply_graph_message_id = o365_real_msg.message_id
+            else:
+                subject = "(no subject)"
+        else:
+            subject = seq_subject.strip()
+
+        subject = render_body(subject, get_lead_data(lead))
+
+        # ── HTML / plain-text decision ────────────────────────────────────
+        format_override = None
+        if getattr(campaign, "send_all_as_text", False):
+            is_html = False
+            if getattr(campaign, "track_opens", False) or getattr(campaign, "track_clicks", False):
+                format_override = "text_forced_tracking_disabled"
+        elif getattr(campaign, "send_first_as_text", False) and slot.sequence_index == 0:
+            is_html = False
+            if getattr(campaign, "track_opens", False) or getattr(campaign, "track_clicks", False):
+                format_override = "first_text_tracking_disabled"
+        else:
+            if seq_is_html is not None:
+                is_html = bool(seq_is_html)
+            else:
+                is_html = bool(re.search(r"<[a-zA-Z][^>]*>", seq_body or ""))
+            if not is_html and (
+                getattr(campaign, "track_opens", False) or getattr(campaign, "track_clicks", False)
+            ):
+                is_html = True
+                format_override = "tracking_upgraded_to_html"
+
+        # ── Unsubscribe token ─────────────────────────────────────────────
+        unsub_token_res = await session.execute(
+            select(LeadUnsubscribeToken).where(
+                LeadUnsubscribeToken.lead_id == lead.id,
+                LeadUnsubscribeToken.campaign_id == campaign.id,
+            )
+        )
+        unsub_row = unsub_token_res.scalar_one_or_none()
+        if unsub_row is None:
+            unsub_row = LeadUnsubscribeToken(
+                lead_id=lead.id,
+                campaign_id=campaign.id,
+                token=secrets.token_urlsafe(32),
+            )
+            session.add(unsub_row)
+            await session.flush()
+
+        unsub_url = f"{inbox_tracking_base}/u/{unsub_row.token}"
+        lead_data = get_lead_data(lead)
+        lead_data["unsubscribe_link"] = unsub_url
+
+        body = render_body(seq_body, lead_data)
+        if is_html and seq_preview_text:
+            rendered_preview = render_body(seq_preview_text, lead_data)
+            preheader = (
+                '<div style="display:none !important; visibility:hidden; '
+                'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
+                f"{rendered_preview}</div>"
+            )
+            body = preheader + body
+
+        from_addr = inbox.email
+        from_name = inbox.display_name or ""
+
+        # ── Pre-create EmailLog to get an ID for tracking ─────────────────
+        email_log_entry = EmailLog(
+            lead_id=lead.id,
+            campaign_id=campaign.id,
+            inbox_id=inbox.id,
+            sequence_index=slot.sequence_index,
+            variant_id=chosen_variant_id,
+            subject=subject,
+            format_override=format_override,
+            message_id="",
+            thread_id=prev_thread_id,
+        )
+        session.add(email_log_entry)
+        await session.flush()
+
+        # ── Inject open/click tracking ────────────────────────────────────
+        send_body = body
+        do_track = is_html and (
+            getattr(campaign, "track_opens", False) or getattr(campaign, "track_clicks", False)
+        )
+        if do_track:
+            from app.tracking import inject_tracking_html
+            from app.models import TrackedLink as _TrackedLink
+            send_body, link_pairs = inject_tracking_html(
+                body,
+                email_log_entry.id,
+                inbox_tracking_base,
+                track_opens=getattr(campaign, "track_opens", False),
+                track_clicks=getattr(campaign, "track_clicks", False),
+                open_token=email_log_entry.open_token,
+            )
+            for _token, _url in link_pairs:
+                session.add(_TrackedLink(email_log_id=email_log_entry.id, token=_token, original_url=_url))
+
+        # ── Append quoted previous email ──────────────────────────────────
+        if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
+            _from_name = inbox.display_name or inbox.email
+            _from_email = inbox.email
+            if is_html:
+                _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
+                send_body = send_body + build_quote_html(_prev_html, _from_name, _from_email, prev_sent_at)
+            else:
+                _prev_plain = prev_email_body_plain or _strip_html_tags(prev_email_body_html)
+                if _prev_plain:
+                    send_body = send_body + build_quote_plain(_prev_plain, _from_name, _from_email, prev_sent_at)
+
+        list_unsub_url = unsub_url if getattr(campaign, "add_unsubscribe_header", True) else None
+
+        # ── Send ──────────────────────────────────────────────────────────
+        result = send_email(
+            to_email=lead.email,
+            subject=subject,
+            body=send_body,
+            from_email=from_addr,
+            from_name=from_name,
+            reply_to_msg_id=reply_to_msg_id,
+            references=references_chain,
+            is_html=is_html,
+            provider=inbox.provider or "gmail",
+            gmail_access_token=gmail_token,
+            gmail_account=ga,
+            thread_id=prev_thread_id,
+            list_unsubscribe_url=list_unsub_url,
+            google_client_id=g_client_id,
+            google_client_secret=g_client_secret,
+            office365_account=o365_account,
+            office365_client_id=o365_client_id,
+            office365_client_secret=o365_client_secret,
+            office365_tenant_id=o365_tenant_id,
+            conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+            reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+        )
+
+        # ── Permanent failure ─────────────────────────────────────────────
+        if isinstance(result, SendFailure):
+            log.warning(
+                "send_slot_job: permanent failure for lead_id=%s inbox=%s: [%s] %s",
+                lead.id, inbox.email, result.error_type, result.message,
+            )
+            await session.delete(email_log_entry)
+            if result.error_type in ("bounce", "invalid_recipient"):
+                lead.status = "bounced"
+                from sqlalchemy import delete as _sql_delete
+                # Fetch remaining slot IDs before deleting so we can cancel their jobs
+                remaining_ids_res = await session.execute(
+                    select(QueueSlot.id).where(QueueSlot.campaign_lead_id == cl.id)
+                )
+                remaining_slot_ids = [r[0] for r in remaining_ids_res.all()]
+                await session.execute(
+                    _sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
+                )
+                # Cancel APScheduler jobs for the deleted slots
+                from app.scheduler import get_scheduler, make_job_id
+                _sched = get_scheduler()
+                if _sched:
+                    for _sid in remaining_slot_ids:
+                        try:
+                            _sched.remove_job(make_job_id(_sid))
+                        except Exception:
+                            pass  # job may have already fired or not existed
+                await fire_webhook_event(session, "email.bounced", {
+                    "lead_id": lead.id, "lead_email": lead.email,
+                    "campaign_id": campaign.id, "inbox_id": inbox.id,
+                    "error_type": result.error_type, "error_message": result.message,
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+                await fire_webhook_event(session, "lead.status_changed", {
+                    "lead_id": lead.id, "lead_email": lead.email,
+                    "old_status": "active", "new_status": "bounced",
+                    "reason": result.message,
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+            elif result.error_type in ("auth_failed", "permission_denied"):
+                await fire_webhook_event(session, "token_expired", {
+                    "inbox_id": inbox.id, "inbox_email": inbox.email, "error": result.message,
+                })
+            await session.commit()
+            return
+
+        if not result:
+            # Transient failure – roll back the pre-created log; slot stays for retry
+            await session.delete(email_log_entry)
+            await session.commit()
+            log.warning("send_slot_job: transient failure for slot %d, slot retained for retry", slot_id)
+            return
+
+        # ── Success ───────────────────────────────────────────────────────
+        email_log_entry.message_id = result.message_id
+        email_log_entry.thread_id = result.thread_id or prev_thread_id
+        await session.delete(slot)
+
+        if inbox.provider != "office365" and email_log_entry.thread_id:
+            try:
+                from app.unibox import upsert_sent_message as _upsert_sent_gmail
+                await _upsert_sent_gmail(
+                    session,
+                    inbox_id=inbox.id,
+                    thread_id=email_log_entry.thread_id,
+                    gmail_message_id=result.gmail_message_id,
+                    rfc_message_id=result.message_id,
+                    subject=subject,
+                    to_email=lead.email,
+                    from_email=inbox.email,
+                    body=send_body,
+                    is_html=is_html,
+                )
+            except Exception:
+                log.exception(
+                    "send_slot_job: failed to upsert sent Gmail message "
+                    "inbox_id=%s lead=%s", inbox.id, lead.email,
+                )
+
+        if inbox.provider == "office365" and email_log_entry.thread_id:
+            try:
+                from app.unibox import upsert_sent_o365_message
+                await upsert_sent_o365_message(
+                    session,
+                    inbox_id=inbox.id,
+                    conversation_id=email_log_entry.thread_id,
+                    internet_message_id=result.message_id,
+                    subject=subject,
+                    to_email=lead.email,
+                    from_email=inbox.email,
+                    body=send_body,
+                    is_html=is_html,
+                )
+            except Exception:
+                log.exception(
+                    "send_slot_job: failed to upsert sent O365 message "
+                    "inbox_id=%s lead=%s", inbox.id, lead.email,
+                )
+
+        await fire_webhook_event(session, "email.sent", {
+            "email_log_id": email_log_entry.id,
+            "lead_id": lead.id, "lead_email": lead.email,
+            "campaign_id": campaign.id, "inbox_id": inbox.id, "inbox_email": inbox.email,
+            "subject": subject, "sequence_index": slot.sequence_index,
+            "message_id": result.message_id, "thread_id": result.thread_id,
+            "timestamp": time_provider.utcnow().isoformat() + "Z",
+        })
+
+        # ── Test mode: simulate engagement events ─────────────────────────
+        if settings.test_mode:
+            from app.models import EmailOpen, EmailClick, TrackedLink as _TL
+            fake_ip = f"10.0.{random.randint(0, 255)}.{random.randint(1, 254)}"
+            if random.random() < 0.4:
+                email_log_entry.opened = True
+                session.add(EmailOpen(email_log_id=email_log_entry.id, ip_address=fake_ip))
+                await fire_webhook_event(session, "email.opened", {
+                    "email_log_id": email_log_entry.id,
+                    "lead_id": lead.id, "campaign_id": campaign.id,
+                    "ip_address": fake_ip, "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+                if random.random() < 0.5:
+                    email_log_entry.clicked = True
+                    session.add(EmailClick(
+                        email_log_id=email_log_entry.id, ip_address=fake_ip,
+                        clicked_at=time_provider.utcnow(),
+                    ))
+                    await fire_webhook_event(session, "email.clicked", {
+                        "email_log_id": email_log_entry.id,
+                        "lead_id": lead.id, "campaign_id": campaign.id,
+                        "original_url": "https://example.com/test-link",
+                        "ip_address": fake_ip, "timestamp": time_provider.utcnow().isoformat() + "Z",
+                    })
+            if random.random() < 0.15:
+                fake_reply = LeadReply(
+                    lead_id=lead.id, campaign_id=campaign.id,
+                    inbox_id=inbox.id,
+                    thread_id=email_log_entry.thread_id or "fake-thread",
+                    message_id=f"<fake-reply-{email_log_entry.id}@test>",
+                    snippet="This is a simulated test reply.",
+                    received_at=time_provider.utcnow(),
+                )
+                session.add(fake_reply)
+                await fire_webhook_event(session, "lead.replied", {
+                    "lead_id": lead.id, "lead_email": lead.email, "lead_name": lead.name or "",
+                    "thread_id": email_log_entry.thread_id, "inbox_id": inbox.id,
+                    "inbox_email": inbox.email, "message_id": fake_reply.message_id,
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+
+        await session.commit()
+
+    last_send_job_run = time_provider.now()
+    last_send_job_sent_count += 1
+    log.info("send_slot_job: slot %d sent successfully", slot_id)
