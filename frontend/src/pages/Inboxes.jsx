@@ -130,6 +130,7 @@ export default function Inboxes() {
   const [editing, setEditing] = useState(null); // inbox being edited
   const [editDirty, setEditDirty] = useState(false);
   const [showEditWarning, setShowEditWarning] = useState(false);
+  const [editWarningCloseSidebar, setEditWarningCloseSidebar] = useState(false);
   const [editMsg, setEditMsg] = useState(null);
   const [showAdd, setShowAdd] = useState(false); // controls add modal
   const confirm = useConfirm();
@@ -249,13 +250,22 @@ export default function Inboxes() {
   };
   const tryCloseEdit = () => {
     if (editDirty) {
+      setEditWarningCloseSidebar(false);
       setShowEditWarning(true);
     } else {
       closeEdit();
     }
   };
-  const saveEdit = async (e) => {
-    e.preventDefault();
+  const tryCloseSidebar = () => {
+    if (editing && editDirty) {
+      setEditWarningCloseSidebar(true);
+      setShowEditWarning(true);
+    } else {
+      closeEdit();
+      setSelectedInbox(null);
+    }
+  };
+  const doSave = async () => {
     if (!editing) return;
     setEditDirty(false); // save in progress — don't treat as unsaved
     try {
@@ -272,9 +282,13 @@ export default function Inboxes() {
       await api.patch(`/inboxes/${editing.id}`, body);
       setEditMsg({ type: 'success', text: 'Inbox updated' });
       setTimeout(() => { closeEdit(); load(); }, 1000);
-    } catch (e) {
-      setEditMsg({ type: 'error', text: e.message });
+    } catch (err) {
+      setEditMsg({ type: 'error', text: err.message });
     }
+  };
+  const saveEdit = async (e) => {
+    e.preventDefault();
+    await doSave();
   };
 
   // Escape to close modals
@@ -401,7 +415,7 @@ export default function Inboxes() {
               return (
                 <button
                   key={inbox.id}
-                  onClick={() => setSelectedInbox(isSelected ? null : inbox)}
+                  onClick={() => { if (isSelected) { tryCloseSidebar(); } else { setSelectedInbox(inbox); } }}
                   className={`w-full text-left rounded-xl border px-5 py-4 transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-blue-400 ${
                     isSelected
                       ? 'border-blue-400 bg-blue-50 shadow-sm'
@@ -786,11 +800,12 @@ export default function Inboxes() {
       {showEditWarning && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[60] p-4">
           <div data-darkreader-ignore className="rounded-xl shadow-lg p-6 w-full max-w-sm mx-auto" style={{ backgroundColor: 'white' }}>
-            <h3 className="font-semibold text-gray-800 mb-1">Discard changes?</h3>
-            <p className="text-sm text-gray-500 mb-4">You have unsaved changes. Closing will discard them.</p>
+            <h3 className="font-semibold text-gray-800 mb-1">Save changes?</h3>
+            <p className="text-sm text-gray-500 mb-4">You have unsaved changes to this inbox.</p>
             <div className="flex gap-2 justify-end">
-              <Button size="sm" variant="outline" onClick={() => setShowEditWarning(false)}>Keep editing</Button>
-              <Button size="sm" variant="destructive" onClick={() => { setShowEditWarning(false); closeEdit(); }}>Discard</Button>
+              <Button size="sm" variant="outline" onClick={() => { setShowEditWarning(false); setEditWarningCloseSidebar(false); }}>Keep editing</Button>
+              <Button size="sm" variant="destructive" onClick={() => { setShowEditWarning(false); closeEdit(); if (editWarningCloseSidebar) { setSelectedInbox(null); setEditWarningCloseSidebar(false); } }}>Discard</Button>
+              <Button size="sm" variant="default" onClick={async () => { setShowEditWarning(false); setEditWarningCloseSidebar(false); await doSave(); }}>Save</Button>
             </div>
           </div>
         </div>
