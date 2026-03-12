@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from app.database import init_db
+from app.database import init_db, db_url
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
 from app.routers import gmail_oauth
@@ -34,14 +34,13 @@ from app.routers import notifications as notifications_router
 from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
+import app.scheduler as scheduler_mod
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    # APScheduler renamed class; keep variable named `schedule` for legacy compatibility
-    schedule = AsyncIOScheduler()
-    interval_minutes = max(1, settings.queue_check_interval_minutes)
+
     unibox_interval_minutes = 5
 
     from app.database import AsyncSessionLocal
@@ -55,38 +54,60 @@ async def lifespan(app: FastAPI):
             logging.getLogger("quickly").exception("Failed loading unibox sync config; using default interval")
             unibox_interval_minutes = 5
 
-    schedule.add_job(
-        run_send_job,
-        "cron",
-        minute=f"*/{interval_minutes}",
-        second=0,
-        id="send_queue",
-    )
+    # Build the job store (Postgres when available, memory for SQLite/tests)
+    jobstores = scheduler_mod.build_jobstores(db_url)
+    schedule = AsyncIOScheduler(jobstores=jobstores)
+
+    # Register the scheduler singleton so routers can reach it.
+    scheduler_mod.set_scheduler(schedule)
+    app.state.schedule = schedule
+
+    # Maintenance jobs (not changed: these are not per-slot)
     schedule.add_job(
         run_unibox_sync_job,
         "cron",
         minute=f"*/{unibox_interval_minutes}",
         second=10,
         id="unibox_sync",
+        replace_existing=True,
     )
     schedule.add_job(
         office365_webhook_router.renew_expiring_subscriptions,
         "interval",
         hours=6,
         id="office365_graph_subscription_renewal",
+        replace_existing=True,
     )
     schedule.start()
-    app.state.schedule = schedule
 
-    # perform a global recalculation on startup to ensure the queue reflects
+    # On startup, schedule APScheduler jobs for all future queue slots so that
+    # emails fire at their exact scheduled_date even before the first
+    # recalculate.  The recalculate below will rebuild the slot list and
+    # re-add the jobs anyway, but this covers the window between start and
+    # the recalculate completing.
+    async with AsyncSessionLocal() as db:
+        try:
+            from sqlalchemy import select as _select
+            from app.models import QueueSlot as _QS
+            from app import time as _tp
+            future_slots_res = await db.execute(
+                _select(_QS).where(_QS.scheduled_date >= _tp.now())
+            )
+            future_slots = future_slots_res.scalars().all()
+            if future_slots:
+                added = scheduler_mod.schedule_slots(schedule, future_slots)
+                logging.getLogger("quickly").info(
+                    "startup: scheduled %d existing slot jobs", added
+                )
+        except Exception:
+            logging.getLogger("quickly").exception("startup: failed to schedule existing slots")
+
+    # Perform a global recalculation on startup to ensure the queue reflects
     # any configuration changes that may have occurred while the server was down.
-    # this addresses the "server starts/restarts" trigger from the docs.
-    # we don't want to block startup so launch a background task with a brief
-    # delay; failures are logged but ignored.
+    # This also re-creates all slot jobs in APScheduler.
     from httpx import AsyncClient, ASGITransport
 
     async def kickoff():
-        # give the server a moment to finish starting
         await asyncio.sleep(1)
         try:
             transport = ASGITransport(app=app)

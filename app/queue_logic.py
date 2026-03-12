@@ -655,16 +655,38 @@ async def reserve_slots_for_lead(
                             cache, campaign=campaign,
                         )
                         if next_dt is not None:
-                            # Apply jitter to the grid-aligned next_dt; guard against window overflow.
-                            jittered_local_dt = _apply_jitter(next_dt, inbox_obj)
+                            # Chain from the last jittered send time to guarantee
+                            # the minimum wait gap.  _next_available_send_time_today
+                            # advances by one grid step per call, but if the previous
+                            # slot was jittered forward the gap between them would
+                            # shrink below wait_min.  Taking max(grid, last+wait_min)
+                            # mirrors the "future day" chaining logic that works correctly.
+                            if last_actual_dt is not None:
+                                chained_dt = last_actual_dt + timedelta(minutes=wait_min)
+                                base_local_dt = max(next_dt, chained_dt)
+                            else:
+                                base_local_dt = next_dt
+                            # If chaining pushed us past the sending window, move to
+                            # the next business day just like the overflow cases below.
+                            if base_local_dt > end_boundary:
+                                log.info(
+                                    "  -> seq=%d: chained base %s past window end %s; moving to next day",
+                                    idx, base_local_dt.strftime("%H:%M:%S"), end_time.strftime("%H:%M"),
+                                )
+                                current_date += timedelta(days=1)
+                                while current_date.weekday() not in sending_days:
+                                    current_date += timedelta(days=1)
+                                continue
+                            # Apply jitter to the (possibly chained) base; guard against window overflow.
+                            jittered_local_dt = _apply_jitter(base_local_dt, inbox_obj)
                             if jittered_local_dt > end_boundary:
-                                jittered_local_dt = next_dt
+                                jittered_local_dt = base_local_dt
                             scheduled_dt = _to_utc_naive(jittered_local_dt, campaign)
-                            # Conflict detection uses the grid minute, not the jittered minute.
+                            # Conflict detection uses the grid minute, not the chained/jittered minute.
                             local_send_minutes = next_dt.hour * 60 + next_dt.minute
                             log.info(
-                                "  -> using next slot today for seq=%d: %s campaign-local (was past, now %s)",
-                                idx, next_dt.strftime("%H:%M"), now.strftime("%H:%M"),
+                                "  -> using next slot today for seq=%d: grid=%s base=%s campaign-local (now %s)",
+                                idx, next_dt.strftime("%H:%M"), base_local_dt.strftime("%H:%M:%S"), now.strftime("%H:%M"),
                             )
                         else:
                             # No slot left today (window ended or every grid point is taken).

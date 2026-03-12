@@ -13,6 +13,7 @@ google-api-python-client>=2.0
 google-auth>=2.0
 google-auth-oauthlib>=0.8
 asyncpg>=0.27  # PostgreSQL async driver
+psycopg2-binary>=2.9  # sync PostgreSQL driver required by APScheduler SQLAlchemyJobStore
 aiosqlite>=0.19  # required for test fallback to SQLite
 # Microsoft Office 365 / Outlook OAuth2 via MSAL
 msal>=1.24

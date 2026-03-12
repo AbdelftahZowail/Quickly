@@ -14,6 +14,7 @@ from app.models import (
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app.app_settings import get_scheduling_strategy
 from smoke_test.validate_scheduled_emails import EmailScheduleValidator
+import app.scheduler as scheduler_mod
 
 log = logging.getLogger("quickly.schedule")
 
@@ -324,6 +325,13 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
     """
     strategy = await get_scheduling_strategy(db)
     log.info("recalculate_all_campaigns: starting global recalculation (strategy=%s)", strategy)
+
+    # ── Remove all per-slot APScheduler jobs before wiping the DB rows ──
+    _scheduler = scheduler_mod.get_scheduler()
+    if _scheduler:
+        removed = scheduler_mod.remove_slot_jobs(_scheduler)
+        log.info("recalculate_all_campaigns: removed %d slot jobs from scheduler", removed)
+
     await clear_queue(db)
 
     # Count existing slots *after* the clear (should be 0, logged for diagnostics)
@@ -342,13 +350,18 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
 
     campaign_ids = [c.id for c in campaigns]
     # only include leads that are still active; inactive leads will be
-    # cleared when we wiped the queue at the top of this routine
+    # cleared when we wiped the queue at the top of this routine.
+    # Also exclude leads belonging to paused campaigns — the priority strategy
+    # handles this inside _recalculate_queue_for_campaign_leads, but the
+    # round-robin path (recalculate_queue_round_robin) has no per-campaign
+    # paused check and would otherwise re-create slots for paused campaigns.
+    active_campaign_ids = [c.id for c in campaigns if not getattr(c, "paused", False)]
     from app.models import Lead
     cl_result = await db.execute(
         select(CampaignLead)
         .join(Lead, CampaignLead.lead_id == Lead.id)
         .where(
-            CampaignLead.campaign_id.in_(campaign_ids),
+            CampaignLead.campaign_id.in_(active_campaign_ids),
             Lead.status == "active",
             CampaignLead.sending_paused == False,  # noqa: E712
         )
@@ -400,6 +413,18 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
 
     slot_count = await db.execute(select(func.count(QueueSlot.id)))
     total_slots = slot_count.scalar() or 0
+
+    # ── Add APScheduler jobs for all newly created future slots ─────────
+    if _scheduler:
+        from app import time as _tp
+        future_slots_res = await db.execute(
+            select(QueueSlot).where(QueueSlot.scheduled_date >= _tp.now())
+        )
+        future_slots = future_slots_res.scalars().all()
+        added = scheduler_mod.schedule_slots(_scheduler, future_slots)
+        log.info(
+            "recalculate_all_campaigns: scheduled %d slot jobs in APScheduler", added
+        )
 
     log.info(
         "recalculate_all_campaigns: completed — strategy=%s, processed %d campaigns, %d -> %d slots",
