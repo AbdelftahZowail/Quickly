@@ -783,6 +783,13 @@ async def reserve_slots_for_lead(
             while current_date.weekday() not in sending_days:
                 current_date += timedelta(days=1)
 
+        if safety >= 365:
+            log.warning(
+                "reserve_slots_for_lead: safety limit exhausted for cl=%s seq=%d date=%s; "
+                "slot skipped — verify campaign sending_days configuration",
+                campaign_lead_id, idx, current_date,
+            )
+
     log.info("reserve_slots_for_lead: done, created %d slots", len(scheduled_dates))
 
 
@@ -927,6 +934,22 @@ async def reserve_slots_for_new_leads_bulk(
             if time_key not in slot_cache:
                 slot_cache[time_key] = set()
             slot_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
+
+        # Also count today's emails already sent (QueueSlots are deleted post-send).
+        # Without this the bulk new-lead scheduler treats those slots as free and
+        # schedules past the daily limit.
+        _today = _campaign_now(campaign).date()
+        today_sent_result = await session.execute(
+            select(EmailLog.inbox_id, func.count(EmailLog.id).label("sent_count"))
+            .where(
+                EmailLog.inbox_id.in_(inbox_ids),
+                EmailLog.sent_at >= datetime.combine(_today, time(0, 0)),
+            )
+            .group_by(EmailLog.inbox_id)
+        )
+        for row in today_sent_result.all():
+            count_key = (row.inbox_id, _today)
+            slot_cache[count_key] = slot_cache.get(count_key, 0) + row.sent_count
 
     # Seed last_dt from existing slots: find the latest grid minute per inbox/day
     # so new slots can chain off pre-existing ones instead of restarting at the grid.
@@ -1405,6 +1428,7 @@ async def recalculate_queue_round_robin(
     last_sent_by_cl: dict = {}       # cl.id -> last_sent_sequence_index (int)
     last_sent_date_by_cl: dict = {}  # cl.id -> date of last sent email
     preferred_inbox_by_cl: dict = {} # cl.id -> preferred inbox_id
+    lead_provider_by_lead_id: dict = {}  # lead_id -> provider string (for provider-matched filtering)
 
     for cid in active_campaign_ids:
         _, inboxes, _ = campaign_data[cid]
@@ -1472,6 +1496,15 @@ async def recalculate_queue_round_robin(
             if pref is not None:
                 preferred_inbox_by_cl[cl.id] = pref
 
+        # Collect lead providers so phase 4 can apply provider-matched inbox filtering.
+        campaign_c_obj, _, _ = campaign_data[cid]
+        if getattr(campaign_c_obj, "match_lead_provider", False) and lead_ids_c:
+            prov_rows = await session.execute(
+                select(Lead.id, Lead.provider).where(Lead.id.in_(lead_ids_c))
+            )
+            for r in prov_rows.all():
+                lead_provider_by_lead_id[r.id] = r.provider
+
     # ===========================================================================
     # PHASE 2: Bulk delete old queue slots for ALL campaigns
     # ===========================================================================
@@ -1511,6 +1544,18 @@ async def recalculate_queue_round_robin(
     # ===========================================================================
     shared_cache: dict = {}
 
+    # Build inbox → campaign timezone mapping so stored UTC slot times are converted
+    # to campaign-local minutes — consistent with what reserve_slots_for_lead writes.
+    # Without this, timezone-aware campaigns compare local minutes against UTC minutes,
+    # causing false "no conflict" results and potential inbox double-booking.
+    inbox_to_tz: dict = {}
+    for cid in active_campaign_ids:
+        campaign_c, inboxes_c, _ = campaign_data[cid]
+        _tz = _get_tz(getattr(campaign_c, "timezone", None))
+        for inbox_id_c, _, _ in inboxes_c:
+            if inbox_id_c not in inbox_to_tz:
+                inbox_to_tz[inbox_id_c] = _tz
+
     if all_inbox_ids:
         preseed_result = await session.execute(
             select(QueueSlot.inbox_id, QueueSlot.scheduled_date)
@@ -1521,13 +1566,18 @@ async def recalculate_queue_round_robin(
         )
         for row in preseed_result.all():
             dt = row.scheduled_date
-            day = dt.date() if isinstance(dt, datetime) else dt
+            _tz = inbox_to_tz.get(row.inbox_id)
+            if _tz and ZoneInfo:
+                dt_local = dt.replace(tzinfo=ZoneInfo("UTC")).astimezone(_tz).replace(tzinfo=None)
+            else:
+                dt_local = dt
+            day = dt_local.date() if isinstance(dt_local, datetime) else dt_local
             count_key = (row.inbox_id, day)
             shared_cache[count_key] = shared_cache.get(count_key, 0) + 1
             time_key = ("times", row.inbox_id, day)
             if time_key not in shared_cache:
                 shared_cache[time_key] = set()
-            shared_cache[time_key].add(dt.hour * 60 + dt.minute)
+            shared_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
 
         # Also account for today's already-sent emails (QueueSlots deleted post-send)
         _today = time_provider.today()
@@ -1581,13 +1631,25 @@ async def recalculate_queue_round_robin(
             if campaign_queues[cid]:
                 any_remaining = True
 
+            match_provider = getattr(campaign, "match_lead_provider", False)
             for cl in batch:
                 last_sent = last_sent_by_cl.get(cl.id, -1)
                 forced_inbox = preferred_inbox_by_cl.get(cl.id, None)
-                start_date = last_sent_date_by_cl.get(cl.id, time_provider.today())
+                start_date = last_sent_date_by_cl.get(cl.id, _campaign_now(campaign).date())
+
+                effective_inboxes = _filter_inboxes_for_lead_provider(
+                    inboxes, lead_provider_by_lead_id.get(cl.lead_id), match_provider
+                )
+                # If the preferred inbox was excluded by provider filtering, clear it so
+                # reserve_slots_for_lead picks from the filtered set rather than locking
+                # to an inbox that is no longer a candidate (which silently skips the lead).
+                if forced_inbox is not None and effective_inboxes is not inboxes:
+                    effective_inbox_ids = {i[0] for i in effective_inboxes}
+                    if forced_inbox not in effective_inbox_ids:
+                        forced_inbox = None
 
                 await reserve_slots_for_lead(
-                    session, cl.id, campaign, inboxes, sequences,
+                    session, cl.id, campaign, effective_inboxes, sequences,
                     lead_id=cl.lead_id,
                     start_date=start_date,
                     last_sent_sequence_index=last_sent,
