@@ -284,6 +284,27 @@ async def test_webhook_with_event(
 
 
 
+# Gmail sync config ----------------------------------------------------------
+@router.get('/gmail-sync')
+async def get_gmail_sync(db: AsyncSession = Depends(get_db)):
+    """Return the current Gmail push/poll sync configuration."""
+    cfg = await get_gmail_sync_config(db)
+    return cfg
+
+
+@router.post('/gmail-sync')
+async def save_gmail_sync(payload: GmailSyncConfig, db: AsyncSession = Depends(get_db)):
+    """Persist Gmail push/poll sync settings."""
+    await save_gmail_sync_config(
+        db,
+        push_topic=payload.push_topic,
+        webhook_token=payload.webhook_token,
+        sync_interval_minutes=payload.sync_interval_minutes,
+    )
+    await db.commit()
+    return {"ok": True}
+
+
 # Time offset helpers ---------------------------------------------------------
 @router.get('/time-offset')
 async def get_time_offset():
