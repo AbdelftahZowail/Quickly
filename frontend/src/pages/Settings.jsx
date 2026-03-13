@@ -22,6 +22,7 @@ const SECTIONS = [
   { id: 'notifications',     label: 'Notifications' },
   { id: 'ai',                label: 'AI Features' },
   { id: 'optional-features', label: 'Optional Features' },
+  { id: 'gmail-sync',        label: 'Gmail Sync' },
   { id: 'scheduling',        label: 'Scheduling' },
   { id: 'test-mode',         label: 'Test Mode' },
   { id: 'utilities',         label: 'Utilities' },
@@ -77,6 +78,11 @@ export default function Settings() {
   const [testEventType, setTestEventType] = useState('');
   const [testEventResult, setTestEventResult] = useState(null);
 
+  // Gmail Sync
+  const [gmailSync, setGmailSync] = useState({ push_topic: '', webhook_token: '', sync_interval_minutes: 5 });
+  const [gmailSyncSaving, setGmailSyncSaving] = useState(false);
+  const savedGmailSyncRef = useRef(null);
+
   // Known IPs
   const [knownIps, setKnownIps] = useState(() => apiCache.get('/settings/known-ips')?.known_ips || []);
   const [knownIpsOpen, setKnownIpsOpen] = useState(false);
@@ -90,7 +96,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -100,6 +106,7 @@ export default function Settings() {
         api.get('/settings/known-ips'),
         api.get('/auth/api-keys'),
         api.get('/notifications/config').catch(() => null),
+        api.get('/settings/gmail-sync').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
@@ -121,6 +128,15 @@ export default function Settings() {
       if (notifData) {
         setNotifConfig(notifData);
         savedNotifRef.current = notifData;
+      }
+      if (gmailSyncData) {
+        const snap = {
+          push_topic: gmailSyncData.push_topic || '',
+          webhook_token: gmailSyncData.webhook_token || '',
+          sync_interval_minutes: gmailSyncData.sync_interval_minutes ?? 5,
+        };
+        setGmailSync(snap);
+        savedGmailSyncRef.current = snap;
       }
     } catch {}
   }, []);
@@ -1087,6 +1103,96 @@ export default function Settings() {
           <EmailVerificationSettings />
 
 
+        </section>
+
+        {/* ──────────────── Gmail Sync ──────────────── */}
+        <section id="gmail-sync" className="mb-10">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Gmail Sync</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Configure how Quickly detects replies from Gmail inboxes. Optional — polling works
+            without these settings, but push notifications make reply detection instant.
+          </p>
+          <div className="space-y-4">
+
+            {/* Push Topic */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Google Pub/Sub Topic</label>
+              <input
+                type="text"
+                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                placeholder="projects/your-project/topics/gmail-replies"
+                value={gmailSync.push_topic}
+                onChange={e => setGmailSync(prev => ({ ...prev, push_topic: e.target.value }))}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Create a Pub/Sub topic in Google Cloud Console and enter its full resource name here.
+                Leave blank to use polling only.
+              </p>
+            </div>
+
+            {/* Webhook token */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Push Webhook Token</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  className="flex-1 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  placeholder="auto-generated on first startup"
+                  value={gmailSync.webhook_token}
+                  onChange={e => setGmailSync(prev => ({ ...prev, webhook_token: e.target.value }))}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    navigator.clipboard.writeText(
+                      window.location.origin + '/api/unibox/gmail/push?token=' + gmailSync.webhook_token
+                    );
+                    notify({ type: 'success', message: 'Push URL copied!' });
+                  }}
+                >
+                  Copy URL
+                </Button>
+              </div>
+              <p className="text-xs text-gray-400 mt-1">
+                Append this token to your Pub/Sub push endpoint:
+                {' '}<code className="bg-gray-100 dark:bg-gray-800 rounded px-1">/api/unibox/gmail/push?token=…</code>
+              </p>
+            </div>
+
+            {/* Sync interval */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Polling Interval (minutes)</label>
+              <input
+                type="number"
+                min="1"
+                max="60"
+                className="w-28 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                value={gmailSync.sync_interval_minutes}
+                onChange={e => setGmailSync(prev => ({ ...prev, sync_interval_minutes: Math.max(1, parseInt(e.target.value) || 1) }))}
+              />
+              <p className="text-xs text-gray-400 mt-1">How often to poll Gmail for new replies (fallback when push is not configured).</p>
+            </div>
+
+            <Button
+              size="sm"
+              disabled={gmailSyncSaving}
+              onClick={async () => {
+                setGmailSyncSaving(true);
+                try {
+                  await api.post('/settings/gmail-sync', gmailSync);
+                  savedGmailSyncRef.current = { ...gmailSync };
+                  notify({ type: 'success', message: 'Gmail sync settings saved' });
+                } catch (e) {
+                  notify({ type: 'error', message: e.message });
+                } finally {
+                  setGmailSyncSaving(false);
+                }
+              }}
+            >
+              {gmailSyncSaving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
         </section>
 
         {/* ──────────────── Scheduling ──────────────── */}

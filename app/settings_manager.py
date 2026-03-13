@@ -192,6 +192,106 @@ async def initialize_settings(db: AsyncSession):
         settings.reload_from_dict(data)
         log.info("Settings loaded from database")
 
+    # Ensure all persistent security secrets exist (generates + saves if absent).
+    await _ensure_secrets(db)
+
+
+async def _ensure_secrets(db: AsyncSession) -> None:
+    """Auto-generate and persist security secrets that are missing from both
+    the environment and the database.
+
+    Priority: env var > existing DB value > auto-generated value.
+    This runs every startup so that adding an env var later overrides a
+    previously auto-generated DB value.
+    """
+    import os as _os
+    import secrets as _secrets
+
+    # Fresh snapshot so we see anything written by initialize_settings above.
+    data = await load_settings_from_db(db)
+    changed = False
+
+    # ------------------------------------------------------------------ #
+    # 1.  JWT / API-key signing secret (QUICKLY_SECRET_KEY)               #
+    # ------------------------------------------------------------------ #
+    env_secret = _os.getenv("QUICKLY_SECRET_KEY", "")
+    db_secret = data.get("quickly_secret_key", "")
+
+    if env_secret:
+        final_secret = env_secret
+        if not db_secret:
+            await save_setting_to_db(db, "quickly_secret_key", env_secret)
+            changed = True
+    elif db_secret:
+        final_secret = db_secret
+    else:
+        final_secret = _secrets.token_urlsafe(64)
+        await save_setting_to_db(db, "quickly_secret_key", final_secret)
+        changed = True
+        log.info("Auto-generated QUICKLY_SECRET_KEY and stored in the database.")
+
+    try:
+        from app.auth import _reinit_secret_key
+        _reinit_secret_key(final_secret)
+    except Exception:
+        log.exception("Failed to reinitialise auth secret key.")
+
+    # ------------------------------------------------------------------ #
+    # 2.  Fernet encryption key (QUICKLY_ENCRYPTION_KEY)                  #
+    # ------------------------------------------------------------------ #
+    env_enc = _os.getenv("QUICKLY_ENCRYPTION_KEY", "")
+    db_enc = data.get("quickly_encryption_key", "")
+
+    if env_enc:
+        final_enc = env_enc
+        if not db_enc:
+            await save_setting_to_db(db, "quickly_encryption_key", env_enc)
+            changed = True
+    elif db_enc:
+        final_enc = db_enc
+    else:
+        from cryptography.fernet import Fernet
+        final_enc = Fernet.generate_key().decode()
+        await save_setting_to_db(db, "quickly_encryption_key", final_enc)
+        changed = True
+        log.info("Auto-generated QUICKLY_ENCRYPTION_KEY and stored in the database.")
+
+    try:
+        from app.security import init_encryption
+        init_encryption(final_enc)
+    except Exception:
+        log.exception("Failed to reinitialise Fernet encryption.")
+
+    # ------------------------------------------------------------------ #
+    # 3.  Gmail push webhook token (GMAIL_PUSH_WEBHOOK_TOKEN)             #
+    # ------------------------------------------------------------------ #
+    db_token = data.get("gmail_push_webhook_token", "")
+    if not db_token:
+        env_token = _os.getenv("GMAIL_PUSH_WEBHOOK_TOKEN", "")
+        if env_token:
+            await save_setting_to_db(db, "gmail_push_webhook_token", env_token)
+            changed = True
+            log.info("Seeded gmail_push_webhook_token from environment.")
+        else:
+            new_token = _secrets.token_urlsafe(32)
+            await save_setting_to_db(db, "gmail_push_webhook_token", new_token)
+            changed = True
+            log.info("Auto-generated gmail_push_webhook_token and stored in the database.")
+
+    # ------------------------------------------------------------------ #
+    # 4.  Gmail push topic (GMAIL_PUSH_TOPIC) – seed from env if present  #
+    # ------------------------------------------------------------------ #
+    db_topic = data.get("gmail_push_topic", "")
+    if not db_topic:
+        env_topic = _os.getenv("GMAIL_PUSH_TOPIC", "")
+        if env_topic:
+            await save_setting_to_db(db, "gmail_push_topic", env_topic)
+            changed = True
+            log.info("Seeded gmail_push_topic from environment.")
+
+    if changed:
+        await db.commit()
+
 
 async def update_setting(db: AsyncSession, key: str, value: str):
     """Update a single setting in DB and reload into memory."""

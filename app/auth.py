@@ -74,6 +74,14 @@ def verify_api_key(raw_key: str, hashed: str) -> bool:
     return hmac.compare_digest(hash_api_key(raw_key), hashed)
 
 
+def _reinit_secret_key(key: str) -> None:
+    """Update the in-memory signing key – called by startup when the key is
+    auto-generated and stored in the database rather than supplied via env."""
+    global SECRET_KEY, _API_KEY_HASH_SECRET
+    SECRET_KEY = key
+    _API_KEY_HASH_SECRET = key.encode()
+
+
 # ---------------------------------------------------------------------------
 # JWT helpers
 # ---------------------------------------------------------------------------
