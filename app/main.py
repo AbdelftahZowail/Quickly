@@ -31,7 +31,7 @@ from app.routers import tracking as tracking_router
 from app.routers import email_provider as email_provider_router
 from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
-from app.jobs import run_send_job, last_send_job_run, last_send_job_sent_count
+from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
 import app.scheduler as scheduler_mod
@@ -78,29 +78,20 @@ async def lifespan(app: FastAPI):
         id="office365_graph_subscription_renewal",
         replace_existing=True,
     )
+    # Single periodic worker: every minute it looks ahead 60 seconds and spawns
+    # a lightweight asyncio.Task per slot timed to its exact scheduled_date.
+    # Already-overdue slots are dispatched immediately (delay=0).
+    # This keeps APScheduler cost flat (1 job regardless of queue size) while
+    # preserving second-level precision for each individual slot.
+    schedule.add_job(
+        run_slot_scan_job,
+        "interval",
+        minutes=1,
+        id="slot_scan",
+        replace_existing=True,
+        max_instances=1,
+    )
     schedule.start()
-
-    # On startup, schedule APScheduler jobs for all future queue slots so that
-    # emails fire at their exact scheduled_date even before the first
-    # recalculate.  The recalculate below will rebuild the slot list and
-    # re-add the jobs anyway, but this covers the window between start and
-    # the recalculate completing.
-    async with AsyncSessionLocal() as db:
-        try:
-            from sqlalchemy import select as _select
-            from app.models import QueueSlot as _QS
-            from app import time as _tp
-            future_slots_res = await db.execute(
-                _select(_QS).where(_QS.scheduled_date >= _tp.now())
-            )
-            future_slots = future_slots_res.scalars().all()
-            if future_slots:
-                added = scheduler_mod.schedule_slots(schedule, future_slots)
-                logging.getLogger("quickly").info(
-                    "startup: scheduled %d existing slot jobs", added
-                )
-        except Exception:
-            logging.getLogger("quickly").exception("startup: failed to schedule existing slots")
 
     # Perform a global recalculation on startup to ensure the queue reflects
     # any configuration changes that may have occurred while the server was down.

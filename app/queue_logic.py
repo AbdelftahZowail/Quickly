@@ -934,6 +934,12 @@ async def reserve_slots_for_new_leads_bulk(
             if time_key not in slot_cache:
                 slot_cache[time_key] = set()
             slot_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
+            # Track the latest actual datetime per inbox/day so new slots chain
+            # off the real previous send time (including sub-minute jitter seconds)
+            # rather than a minute-floored grid estimate.
+            last_dt_key = ("last_dt", row.inbox_id, day_local)
+            if last_dt_key not in slot_cache or dt_local > slot_cache[last_dt_key]:
+                slot_cache[last_dt_key] = dt_local
 
         # Also count today's emails already sent (QueueSlots are deleted post-send).
         # Without this the bulk new-lead scheduler treats those slots as free and
@@ -950,17 +956,6 @@ async def reserve_slots_for_new_leads_bulk(
         for row in today_sent_result.all():
             count_key = (row.inbox_id, _today)
             slot_cache[count_key] = slot_cache.get(count_key, 0) + row.sent_count
-
-    # Seed last_dt from existing slots: find the latest grid minute per inbox/day
-    # so new slots can chain off pre-existing ones instead of restarting at the grid.
-    for _k in list(slot_cache):
-        if not (isinstance(_k, tuple) and len(_k) == 2 and isinstance(_k[0], int)):
-            continue
-        _ibx, _day = _k
-        _tk = ("times", _ibx, _day)
-        if _tk in slot_cache and slot_cache[_tk]:
-            _lm = max(slot_cache[_tk])
-            slot_cache[("last_dt", _ibx, _day)] = datetime.combine(_day, time(_lm // 60, _lm % 60))
 
     slot_cache[("_preseeded",)] = True  # signal: missing keys mean 0
     log.info(
@@ -1182,6 +1177,12 @@ async def _recalculate_queue_for_campaign_leads(
             if time_key not in slot_cache:
                 slot_cache[time_key] = set()
             slot_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
+            # Track the latest actual datetime per inbox/day so new slots chain
+            # off the real previous send time (including sub-minute jitter seconds)
+            # rather than a minute-floored grid estimate.
+            last_dt_key = ("last_dt", row.inbox_id, day_local)
+            if last_dt_key not in slot_cache or dt_local > slot_cache[last_dt_key]:
+                slot_cache[last_dt_key] = dt_local
 
         # Also count today's emails already sent (their QueueSlots were deleted after sending).
         # Without this, the capacity check sees only remaining unsent slots and allows
@@ -1199,16 +1200,6 @@ async def _recalculate_queue_for_campaign_leads(
         for row in today_sent_result.all():
             count_key = (row.inbox_id, _today)
             slot_cache[count_key] = slot_cache.get(count_key, 0) + row.sent_count
-
-    # Seed last_dt from existing slots for chaining.
-    for _k in list(slot_cache):
-        if not (isinstance(_k, tuple) and len(_k) == 2 and isinstance(_k[0], int)):
-            continue
-        _ibx, _day = _k
-        _tk = ("times", _ibx, _day)
-        if _tk in slot_cache and slot_cache[_tk]:
-            _lm = max(slot_cache[_tk])
-            slot_cache[("last_dt", _ibx, _day)] = datetime.combine(_day, time(_lm // 60, _lm % 60))
 
     slot_cache[("_preseeded",)] = True  # Signal that cache is complete
     log.info(
@@ -1578,6 +1569,12 @@ async def recalculate_queue_round_robin(
             if time_key not in shared_cache:
                 shared_cache[time_key] = set()
             shared_cache[time_key].add(dt_local.hour * 60 + dt_local.minute)
+            # Track the latest actual datetime per inbox/day so new slots chain
+            # off the real previous send time (including sub-minute jitter seconds)
+            # rather than a minute-floored grid estimate.
+            last_dt_key = ("last_dt", row.inbox_id, day)
+            if last_dt_key not in shared_cache or dt_local > shared_cache[last_dt_key]:
+                shared_cache[last_dt_key] = dt_local
 
         # Also account for today's already-sent emails (QueueSlots deleted post-send)
         _today = time_provider.today()
@@ -1592,16 +1589,6 @@ async def recalculate_queue_round_robin(
         for row in today_sent.all():
             count_key = (row.inbox_id, _today)
             shared_cache[count_key] = shared_cache.get(count_key, 0) + row.sent_count
-
-    # Seed last_dt from existing slots for chaining.
-    for _k in list(shared_cache):
-        if not (isinstance(_k, tuple) and len(_k) == 2 and isinstance(_k[0], int)):
-            continue
-        _ibx, _day = _k
-        _tk = ("times", _ibx, _day)
-        if _tk in shared_cache and shared_cache[_tk]:
-            _lm = max(shared_cache[_tk])
-            shared_cache[("last_dt", _ibx, _day)] = datetime.combine(_day, time(_lm // 60, _lm % 60))
 
     shared_cache[("_preseeded",)] = True  # signal: missing keys → 0 slots
     log.info(

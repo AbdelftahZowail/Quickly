@@ -1,4 +1,5 @@
 """Background job: send due emails from the queue."""
+import asyncio
 import logging
 import random
 import re
@@ -1376,23 +1377,9 @@ async def send_slot_job(slot_id: int) -> None:
             if result.error_type in ("bounce", "invalid_recipient"):
                 lead.status = "bounced"
                 from sqlalchemy import delete as _sql_delete
-                # Fetch remaining slot IDs before deleting so we can cancel their jobs
-                remaining_ids_res = await session.execute(
-                    select(QueueSlot.id).where(QueueSlot.campaign_lead_id == cl.id)
-                )
-                remaining_slot_ids = [r[0] for r in remaining_ids_res.all()]
                 await session.execute(
                     _sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
                 )
-                # Cancel APScheduler jobs for the deleted slots
-                from app.scheduler import get_scheduler, make_job_id
-                _sched = get_scheduler()
-                if _sched:
-                    for _sid in remaining_slot_ids:
-                        try:
-                            _sched.remove_job(make_job_id(_sid))
-                        except Exception:
-                            pass  # job may have already fired or not existed
                 await fire_webhook_event(session, "email.bounced", {
                     "lead_id": lead.id, "lead_email": lead.email,
                     "campaign_id": campaign.id, "inbox_id": inbox.id,
@@ -1520,3 +1507,62 @@ async def send_slot_job(slot_id: int) -> None:
     last_send_job_run = time_provider.now()
     last_send_job_sent_count += 1
     log.info("send_slot_job: slot %d sent successfully", slot_id)
+
+
+# ---------------------------------------------------------------------------
+# Periodic slot-scan worker – 1 APScheduler job, exact-second asyncio Tasks
+# ---------------------------------------------------------------------------
+
+# Tracks slot IDs that already have a live asyncio Task so that two
+# consecutive scans overlapping at the 60-second boundary don't double-send.
+_pending_slot_ids: set[int] = set()
+
+
+async def _dispatch_slot(slot_id: int, delay: float) -> None:
+    """Sleep for *delay* seconds then call send_slot_job.  Removes from pending set."""
+    try:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        await send_slot_job(slot_id)
+    finally:
+        _pending_slot_ids.discard(slot_id)
+
+
+async def run_slot_scan_job() -> None:
+    """1-minute APScheduler job with exact-second per-slot asyncio Tasks.
+
+    Every minute, queries slots due within the next 60 seconds and spawns a
+    lightweight ``asyncio.Task`` per slot.  Each task sleeps until the slot's
+    exact ``scheduled_date`` then calls ``send_slot_job``.
+
+    ``_pending_slot_ids`` prevents double-dispatch when two scan ticks see the
+    same slot inside their overlapping 60-second windows.
+    """
+    now = time_provider.now()
+    window_end = now + timedelta(seconds=60)
+
+    async with AsyncSessionLocal() as session:
+        due_res = await session.execute(
+            select(QueueSlot.id, QueueSlot.scheduled_date)
+            .where(QueueSlot.scheduled_date <= window_end)
+            .order_by(QueueSlot.scheduled_date, QueueSlot.position_in_day)
+        )
+        rows = due_res.all()
+
+    if not rows:
+        return
+
+    dispatched = 0
+    for slot_id, scheduled_date in rows:
+        if slot_id in _pending_slot_ids:
+            continue
+        delay = (scheduled_date - now).total_seconds()
+        _pending_slot_ids.add(slot_id)
+        asyncio.create_task(_dispatch_slot(slot_id, delay))
+        dispatched += 1
+
+    if dispatched:
+        log.info(
+            "run_slot_scan_job: dispatched %d task(s) (window %s → +60 s)",
+            dispatched, now.isoformat(),
+        )

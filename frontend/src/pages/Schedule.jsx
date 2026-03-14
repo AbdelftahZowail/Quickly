@@ -10,7 +10,7 @@ import { Button } from '../components/ui/Button';
 const DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const SCHEDULE_DAYS_BACK = 7;
 const SCHEDULE_DAYS_AHEAD = 3;
-const SCHEDULE_LIMIT = 1000;
+const SCHEDULE_LIMIT = 5000;
 
 function buildQuery(path, params) {
   const query = new URLSearchParams(params).toString();

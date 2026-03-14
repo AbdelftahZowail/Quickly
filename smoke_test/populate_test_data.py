@@ -22,8 +22,8 @@ from app.routers.schedule import recalculate_all_campaigns
 
 # ========== CONFIGURATION ==========
 # Adjust these values to control the test data generation
-NUM_LEADS = 150                  # How many test leads to create
-NUM_CAMPAIGNS = 3               # How many test campaigns to create
+NUM_LEADS = 500                  # How many test leads to create
+NUM_CAMPAIGNS = 5               # How many test campaigns to create
 # NOTE: sequence position 0 is the first email, follow-ups are replies in thread.
 NUM_SEQUENCES_PER_CAMPAIGN = 3  # How many email sequences per campaign
 # WAIT_DAYS_BETWEEN_SEQUENCES = [1]  # Days to wait between follow-up sequences (cycles in order)

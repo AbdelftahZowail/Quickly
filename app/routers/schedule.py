@@ -16,7 +16,6 @@ from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, r
 from app import time as time_provider
 from app.app_settings import get_scheduling_strategy
 from smoke_test.validate_scheduled_emails import EmailScheduleValidator
-import app.scheduler as scheduler_mod
 
 log = logging.getLogger("quickly.schedule")
 
@@ -420,12 +419,6 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
     strategy = await get_scheduling_strategy(db)
     log.info("recalculate_all_campaigns: starting global recalculation (strategy=%s)", strategy)
 
-    # ── Remove all per-slot APScheduler jobs before wiping the DB rows ──
-    _scheduler = scheduler_mod.get_scheduler()
-    if _scheduler:
-        removed = scheduler_mod.remove_slot_jobs(_scheduler)
-        log.info("recalculate_all_campaigns: removed %d slot jobs from scheduler", removed)
-
     await clear_queue(db)
 
     # Count existing slots *after* the clear (should be 0, logged for diagnostics)
@@ -507,18 +500,6 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
 
     slot_count = await db.execute(select(func.count(QueueSlot.id)))
     total_slots = slot_count.scalar() or 0
-
-    # ── Add APScheduler jobs for all newly created future slots ─────────
-    if _scheduler:
-        from app import time as _tp
-        future_slots_res = await db.execute(
-            select(QueueSlot).where(QueueSlot.scheduled_date >= _tp.now())
-        )
-        future_slots = future_slots_res.scalars().all()
-        added = scheduler_mod.schedule_slots(_scheduler, future_slots)
-        log.info(
-            "recalculate_all_campaigns: scheduled %d slot jobs in APScheduler", added
-        )
 
     log.info(
         "recalculate_all_campaigns: completed — strategy=%s, processed %d campaigns, %d -> %d slots",
