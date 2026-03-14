@@ -256,7 +256,11 @@ class CampaignLead(Base):
 
 class QueueSlot(Base):
     __tablename__ = "queue_slot"
-    __table_args__ = (UniqueConstraint("campaign_lead_id", "sequence_index", name="uq_campaign_lead_sequence"),)
+    __table_args__ = (
+        UniqueConstraint("campaign_lead_id", "sequence_index", name="uq_campaign_lead_sequence"),
+        Index("ix_queue_slot_scheduled_date", "scheduled_date"),
+        Index("ix_queue_slot_scheduled_date_pos", "scheduled_date", "position_in_day"),
+    )
     id = Column(Integer, primary_key=True, index=True)
     campaign_lead_id = Column(Integer, ForeignKey("campaign_lead.id"), nullable=False)
     inbox_id = Column(Integer, ForeignKey("inbox.id"), nullable=False)  # which inbox sends this slot
@@ -269,6 +273,9 @@ class QueueSlot(Base):
 
 class EmailLog(Base):
     __tablename__ = "email_log"
+    __table_args__ = (
+        Index("ix_email_log_sent_at", "sent_at"),
+    )
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
