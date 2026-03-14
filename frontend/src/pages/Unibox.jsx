@@ -330,7 +330,7 @@ export default function Unibox() {
         body: JSON.stringify({}),
       });
       if ((res?.queued || 0) <= 0) {
-        notify({ type: 'error', message: 'No inboxes available for sync.' });
+        // notify({ type: 'error', message: 'No inboxes available for sync.' });
       } else {
         // notify({ type: 'success', message: `Sync queued for ${res.queued} inbox(es).` });
         await loadSyncStatus({ silent: true });

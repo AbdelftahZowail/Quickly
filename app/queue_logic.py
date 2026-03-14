@@ -540,18 +540,18 @@ async def reserve_slots_for_lead(
                         locked_inbox_id = candidate[0]
                         inboxes = [candidate]
                         fit_found = True
-                        log.info(
-                            "  -> Lookahead optimization: selected inbox %s for lead %s",
-                            locked_inbox_id, lead_id
-                        )
+                        # log.info(
+                        #     "  -> Lookahead optimization: selected inbox %s for lead %s",
+                        #     locked_inbox_id, lead_id
+                        # )
                         break
 
             if fit_found:
-                if current_date != original_start:
-                    log.info(
-                        "  -> Lookahead optimization: moved start from %s to %s (all sequences will fit)",
-                        original_start, current_date
-                    )
+                # if current_date != original_start:
+                #     log.info(
+                #         "  -> Lookahead optimization: moved start from %s to %s (all sequences will fit)",
+                #         original_start, current_date
+                #     )
                 break
             
             # Try next business day
@@ -559,10 +559,10 @@ async def reserve_slots_for_lead(
             lookahead_attempts += 1
         
         if lookahead_attempts >= max_lookahead_attempts:
-            log.warning(
-                "  -> Lookahead optimization: could not find ideal start date after %d attempts; proceeding anyway",
-                max_lookahead_attempts
-            )
+            # log.warning(
+            #     "  -> Lookahead optimization: could not find ideal start date after %d attempts; proceeding anyway",
+            #     max_lookahead_attempts
+            # )
             current_date = original_start  # Reset to original if we exhausted attempts
 
     for idx, seq in to_schedule:
@@ -766,12 +766,12 @@ async def reserve_slots_for_lead(
                 else:
                     # Without cache, must flush for subsequent queries to see this slot
                     await session.flush()
-                log.info(
-                    "  -> slot created: seq=%d date=%s inbox=%d pos=%d local=%s utc=%s",
-                    idx, current_date, inbox_id, pos,
-                    _estimated_send_time(sending_start, wait_min, pos).strftime("%H:%M"),
-                    scheduled_dt.strftime("%H:%M"),
-                )
+                # log.info(
+                #     "  -> slot created: seq=%d date=%s inbox=%d pos=%d local=%s utc=%s",
+                #     idx, current_date, inbox_id, pos,
+                #     _estimated_send_time(sending_start, wait_min, pos).strftime("%H:%M"),
+                #     scheduled_dt.strftime("%H:%M"),
+                # )
                 scheduled_dates.append(current_date)
                 # Update round-robin index
                 inbox_tuple = next(i for i in inboxes if i[0] == inbox_id)
