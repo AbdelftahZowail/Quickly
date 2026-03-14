@@ -8,6 +8,14 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 
 const DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const SCHEDULE_DAYS_BACK = 7;
+const SCHEDULE_DAYS_AHEAD = 3;
+const SCHEDULE_LIMIT = 1000;
+
+function buildQuery(path, params) {
+  const query = new URLSearchParams(params).toString();
+  return query ? `${path}?${query}` : path;
+}
 
 // ── Email Preview Modal for schedule items ────────────────────────────────────
 function ScheduleEmailPreviewModal({ item, onClose }) {
@@ -129,18 +137,60 @@ export default function Schedule() {
   const [expandedId, setExpandedId] = useState(null);
   const [previewItem, setPreviewItem] = useState(null);
 
+  const [daysBack, setDaysBack] = useState(SCHEDULE_DAYS_BACK);
+  const [daysAhead, setDaysAhead] = useState(SCHEDULE_DAYS_AHEAD);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const [initialLoaded, setInitialLoaded] = useState(false);
+  const sentinelRef = useRef(null);
+  const isLoadingMoreRef = useRef(false);
+
   // button states for recalc/validate so React can re-render correctly
   const [recalcState, setRecalcState] = useState({ busy: false, text: '⚡ Recalculate All Campaigns' });
   const [validateState, setValidateState] = useState({ busy: false, text: '🔍 Validate Queue' });
 
   const filterCampaignOptions = useRef([]);
 
-  const loadData = async () => {
+  const ensureDetail = async (item) => {
+    try {
+      if (item.type === 'scheduled') {
+        if (item.sequence_body) return item;
+        const data = await api.get(`/schedule/scheduled/${item.slot_id}`);
+        const merged = { ...item, ...data };
+        setScheduled(prev => prev.map(s => s.slot_id === item.slot_id ? merged : s));
+        return merged;
+      }
+      if (item.type === 'sent') {
+        if (item.sequence_body || (item.opens && item.clicks)) return item;
+        const data = await api.get(`/schedule/sent/${item.log_id}`);
+        const merged = { ...item, ...data };
+        setSent(prev => prev.map(s => s.log_id === item.log_id ? merged : s));
+        return merged;
+      }
+    } catch (e) {
+      notify({ type: 'error', message: 'Failed to load email details' });
+    }
+    return item;
+  };
+
+  const loadData = async (opts = {}) => {
     // loading.start();
     try {
+      const effectiveBack = opts.daysBack ?? daysBack;
+      const effectiveAhead = opts.daysAhead ?? daysAhead;
       const [s, sch, st, srv, stratData] = await Promise.all([
-        api.get('/schedule/sent').catch(() => []),
-        api.get('/schedule/scheduled').catch(() => []),
+        api.get(buildQuery('/schedule/sent', {
+          days_back: effectiveBack,
+          limit: SCHEDULE_LIMIT,
+          offset: 0,
+          include_body: true,
+          include_events: false,
+        })).catch(() => []),
+        api.get(buildQuery('/schedule/scheduled', {
+          days_ahead: effectiveAhead,
+          limit: SCHEDULE_LIMIT,
+          offset: 0,
+          include_body: false,
+        })).catch(() => []),
         api.get('/schedule/stats').catch(() => ({})),
         api.get('/status').catch(() => ({})),
         api.get('/settings/scheduling-strategy').catch(() => ({})),
@@ -183,11 +233,32 @@ export default function Schedule() {
   };
 
   useEffect(() => {
-    loadData();
+    loadData().then(() => setInitialLoaded(true));
     // auto-refresh every 30s, similar to template UI
     const id = setInterval(loadData, 30000);
     return () => clearInterval(id);
-  }, []);
+  }, [daysBack, daysAhead]);
+
+  useEffect(() => {
+    if (!initialLoaded) return;
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      async ([entry]) => {
+        if (!entry.isIntersecting || isLoadingMoreRef.current) return;
+        isLoadingMoreRef.current = true;
+        setIsLoadingMore(true);
+        const nextAhead = daysAhead + SCHEDULE_DAYS_AHEAD;
+        setDaysAhead(nextAhead);
+        await loadData({ daysAhead: nextAhead });
+        setIsLoadingMore(false);
+        isLoadingMoreRef.current = false;
+      },
+      { threshold: 0.1 }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [daysAhead, initialLoaded]);
 
   const clearFilters = () => {
     setCampaignFilter('');
@@ -304,7 +375,17 @@ export default function Schedule() {
     const isExpanded = expandedId === uid;
     return (
       <div key={uid}>
-        <div className={`email-row${isExpanded?' expanded':''}`} onClick={()=>setExpandedId(isExpanded?null:uid)}>
+        <div
+          className={`email-row${isExpanded?' expanded':''}`}
+          onClick={async () => {
+            if (isExpanded) {
+              setExpandedId(null);
+              return;
+            }
+            setExpandedId(uid);
+            await ensureDetail(item);
+          }}
+        >
           <div className="time-col">{time}</div>
           <div className="status-col"><span className={`badge-status ${statusCls}`}>{statusLabel}</span></div>
           <div className="lead-col" title={item.lead_email}>
@@ -345,7 +426,15 @@ export default function Schedule() {
               {item.sequence_body && (
                 <div className="dp-full"><span className="dp-label">Email body</span>
                   <div className="flex items-center gap-2 mt-1 mb-1">
-                    <Button size="sm" variant="outline" onClick={e => { e.stopPropagation(); setPreviewItem(item); }}>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={async e => {
+                        e.stopPropagation();
+                        const full = await ensureDetail(item);
+                        setPreviewItem(full);
+                      }}
+                    >
                       View full preview
                     </Button>
                   </div>
@@ -374,10 +463,11 @@ export default function Schedule() {
     const today = new Date().toISOString().slice(0,10);
     const parts = [];
     if (filteredSent.length) {
+      const totalSent = stats.total_sent ?? filteredSent.length;
       parts.push(
         <div key="past">
           <div className="section-hdr" onClick={() => setPastExpanded(pe=>!pe)}>
-            <span className={`arrow ${pastExpanded?'open':''}`}>&#9654;</span> Sent ({filteredSent.length} email{filteredSent.length!==1?'s':''})
+            <span className={`arrow ${pastExpanded?'open':''}`}>&#9654;</span> Sent ({totalSent} email{totalSent!==1?'s':''})
           </div>
           {pastExpanded && Object.entries(groupByDate(filteredSent,true)).map(([d,items]) => (
             <div key={d}>
@@ -389,10 +479,11 @@ export default function Schedule() {
       );
     }
     if (filteredScheduled.length) {
+      const totalScheduled = stats.total_scheduled ?? filteredScheduled.length;
       parts.push(
         <div key="upcoming">
           <div className="section-hdr" style={{cursor:'default'}}>
-            <span className="arrow open">&#9654;</span> Scheduled ({filteredScheduled.length} email{filteredScheduled.length!==1?'s':''})
+            <span className="arrow open">&#9654;</span> Scheduled ({totalScheduled} email{totalScheduled!==1?'s':''})
           </div>
           {Object.entries(groupByDate(filteredScheduled,false)).map(([d,items]) => (
             <div key={d}>
@@ -505,6 +596,8 @@ export default function Schedule() {
       </div>
       <Card className="p-4" id="schedule-body">
         {renderSection()}
+        <div ref={sentinelRef} style={{ height: 1 }} />
+        {isLoadingMore && <p style={{ textAlign: 'center', padding: '0.5rem', color: 'var(--muted)' }}>Loading more…</p>}
       </Card>
 
       {/* Email preview modal */}

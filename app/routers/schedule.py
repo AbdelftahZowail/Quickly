@@ -1,6 +1,7 @@
 """Global schedule API — all sent + scheduled emails across all campaigns."""
 import logging
-from fastapi import APIRouter, Depends
+from datetime import timedelta
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
@@ -12,6 +13,7 @@ from app.models import (
     EmailOpen, EmailClick,
 )
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
+from app import time as time_provider
 from app.app_settings import get_scheduling_strategy
 from smoke_test.validate_scheduled_emails import EmailScheduleValidator
 import app.scheduler as scheduler_mod
@@ -30,22 +32,94 @@ def _utc_iso(dt) -> "str | None":
     return dt.isoformat() + "Z"
 
 
+def _serialize_sent(el, lead, campaign, seq, inbox, include_body: bool, include_events: bool) -> dict:
+    return {
+        "type": "sent",
+        "log_id": el.id,
+        "sent_at": _utc_iso(el.sent_at),
+        "sent_date": el.sent_at.date().isoformat() if el.sent_at else None,
+        "subject": el.subject or "",
+        "message_id": el.message_id or "",
+        "sequence_index": el.sequence_index,
+        "sequence_id": seq.id if seq else None,
+        "sequence_body": seq.body if (seq and include_body) else "",
+        "sequence_is_html": bool(seq.is_html) if seq else False,
+        "sequence_wait_days": seq.wait_days_after_previous if seq else 0,
+        "lead_id": lead.id,
+        "lead_email": lead.email,
+        "lead_name": lead.name or "",
+        "lead_status": lead.status,
+        "campaign_id": campaign.id,
+        "campaign_name": campaign.name,
+        "campaign_sending_days": campaign.sending_days or [],
+        "campaign_hours_start": campaign.sending_hours_start or "09:00",
+        "campaign_hours_end": campaign.sending_hours_end or "17:00",
+        "campaign_wait_minutes": campaign.wait_minutes_between or 5,
+        "campaign_stop_on_reply": campaign.stop_on_reply,
+        "inbox_id": el.inbox_id,
+        "inbox_email": inbox.email if inbox else "",
+        "inbox_display_name": inbox.display_name if inbox else "",
+        "inbox_provider": inbox.provider if inbox else "",
+        "opens": [
+            {"ip": o.ip_address, "at": _utc_iso(o.opened_at)}
+            for o in (el.opens if include_events else [])
+        ],
+        "clicks": [
+            {"ip": c.ip_address, "at": _utc_iso(c.clicked_at)}
+            for c in (el.clicks if include_events else [])
+        ],
+        "opened": bool(el.opens) if include_events else bool(el.opened),
+        "clicked": bool(el.clicks) if include_events else bool(el.clicked),
+    }
+
+
+def _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body: bool) -> dict:
+    return {
+        "type": "scheduled",
+        "slot_id": slot.id,
+        "scheduled_at": _utc_iso(slot.scheduled_date),
+        "scheduled_date": slot.scheduled_date.date().isoformat() if slot.scheduled_date else None,
+        "position_in_day": slot.position_in_day,
+        "sequence_index": slot.sequence_index,
+        "subject": (seq.subject or "(reply in thread)") if seq else "",
+        "sequence_id": seq.id if seq else None,
+        "sequence_body": seq.body if (seq and include_body) else "",
+        "sequence_is_html": bool(seq.is_html) if seq else False,
+        "sequence_wait_days": seq.wait_days_after_previous if seq else 0,
+        "inbox_id": inbox.id,
+        "inbox_email": inbox.email,
+        "inbox_display_name": inbox.display_name or "",
+        "inbox_provider": getattr(inbox, "provider", "resend") or "resend",
+        "inbox_max_per_day": inbox.max_emails_per_day,
+        "lead_id": lead.id,
+        "lead_email": lead.email,
+        "lead_name": lead.name or "",
+        "lead_status": lead.status,
+        "campaign_id": campaign.id,
+        "campaign_name": campaign.name,
+        "campaign_sending_days": campaign.sending_days or [],
+        "campaign_hours_start": campaign.sending_hours_start or "09:00",
+        "campaign_hours_end": campaign.sending_hours_end or "17:00",
+        "campaign_wait_minutes": campaign.wait_minutes_between or 5,
+        "campaign_stop_on_reply": campaign.stop_on_reply,
+    }
+
+
 @router.get("/sent")
-async def global_sent(db: AsyncSession = Depends(get_db)):
+async def global_sent(
+    days_back: int = Query(30, ge=0, le=3650),
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    include_body: bool = Query(False),
+    include_events: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
     """All sent emails across every campaign with full details."""
     # We need: EmailLog + Lead + Campaign + Sequence (matched by campaign_id & sequence_index)
     SeqAlias = aliased(Sequence)
     InboxAlias = aliased(Inbox)
-    result = await db.execute(
+    query = (
         select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias)
-        # eager-load opens and clicks so we don't trigger a lazy load
-        # (async sessions don't support lazy-loading outside of a
-        # greenlet context; the MissingGreenlet error was occurring
-        # when the comprehension tried to access ``el.opens``).
-        .options(
-            selectinload(EmailLog.opens),
-            selectinload(EmailLog.clicks),
-        )
         .join(Lead, EmailLog.lead_id == Lead.id)
         .join(Campaign, EmailLog.campaign_id == Campaign.id)
         .outerjoin(
@@ -55,52 +129,38 @@ async def global_sent(db: AsyncSession = Depends(get_db)):
         )
         .outerjoin(InboxAlias, EmailLog.inbox_id == InboxAlias.id)
         .order_by(EmailLog.sent_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
+    if include_events:
+        query = query.options(
+            selectinload(EmailLog.opens),
+            selectinload(EmailLog.clicks),
+        )
+    if days_back > 0:
+        since = time_provider.now() - timedelta(days=days_back)
+        query = query.where(EmailLog.sent_at >= since)
+
+    result = await db.execute(query)
     rows = result.all()
 
     return [
-        {
-            "type": "sent",
-            "log_id": el.id,
-            "sent_at": _utc_iso(el.sent_at),
-            "sent_date": el.sent_at.date().isoformat() if el.sent_at else None,
-            "subject": el.subject or "",
-            "message_id": el.message_id or "",
-            "sequence_index": el.sequence_index,
-            "sequence_id": seq.id if seq else None,
-            "sequence_body": seq.body if seq else "",
-            "sequence_is_html": bool(seq.is_html) if seq else False,
-            "sequence_wait_days": seq.wait_days_after_previous if seq else 0,
-            "lead_id": lead.id,
-            "lead_email": lead.email,
-            "lead_name": lead.name or "",
-            "lead_status": lead.status,
-            "campaign_id": campaign.id,
-            "campaign_name": campaign.name,
-            "campaign_sending_days": campaign.sending_days or [],
-            "campaign_hours_start": campaign.sending_hours_start or "09:00",
-            "campaign_hours_end": campaign.sending_hours_end or "17:00",
-            "campaign_wait_minutes": campaign.wait_minutes_between or 5,
-            "campaign_stop_on_reply": campaign.stop_on_reply,
-            "inbox_id": el.inbox_id,
-            "inbox_email": inbox.email if inbox else "",
-            "inbox_display_name": inbox.display_name if inbox else "",
-            "inbox_provider": inbox.provider if inbox else "",
-            # include open/click events (ip + timestamp)
-            "opens": [ {"ip": o.ip_address, "at": _utc_iso(o.opened_at)} for o in el.opens ],
-            "clicks": [ {"ip": c.ip_address, "at": _utc_iso(c.clicked_at)} for c in el.clicks ],
-            "opened": bool(el.opens),
-            "clicked": bool(el.clicks),
-        }
+        _serialize_sent(el, lead, campaign, seq, inbox, include_body, include_events)
         for el, lead, campaign, seq, inbox in rows
     ]
 
 
 @router.get("/scheduled")
-async def global_scheduled(db: AsyncSession = Depends(get_db)):
+async def global_scheduled(
+    days_ahead: int = Query(30, ge=0, le=3650),
+    limit: int = Query(1000, ge=1, le=5000),
+    offset: int = Query(0, ge=0),
+    include_body: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
     """All upcoming queue slots across every campaign with full details."""
     SeqAlias = aliased(Sequence)
-    result = await db.execute(
+    query = (
         select(QueueSlot, CampaignLead, Campaign, Lead, Inbox, SeqAlias)
         .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
         .join(Campaign, CampaignLead.campaign_id == Campaign.id)
@@ -113,41 +173,75 @@ async def global_scheduled(db: AsyncSession = Depends(get_db)):
         )
         .where(CampaignLead.sending_paused == False)  # noqa: E712
         .order_by(QueueSlot.scheduled_date.asc(), QueueSlot.position_in_day)
+        .limit(limit)
+        .offset(offset)
     )
+    now = time_provider.now()
+    if days_ahead > 0:
+        end = now + timedelta(days=days_ahead)
+        query = query.where(QueueSlot.scheduled_date >= now, QueueSlot.scheduled_date <= end)
+    else:
+        query = query.where(QueueSlot.scheduled_date >= now)
+
+    result = await db.execute(query)
     rows = result.all()
 
     return [
-        {
-            "type": "scheduled",
-            "slot_id": slot.id,
-            "scheduled_at": _utc_iso(slot.scheduled_date),
-            "scheduled_date": slot.scheduled_date.date().isoformat() if slot.scheduled_date else None,
-            "position_in_day": slot.position_in_day,
-            "sequence_index": slot.sequence_index,
-            "subject": (seq.subject or "(reply in thread)") if seq else "",
-            "sequence_id": seq.id if seq else None,
-            "sequence_body": seq.body if seq else "",
-            "sequence_is_html": bool(seq.is_html) if seq else False,
-            "sequence_wait_days": seq.wait_days_after_previous if seq else 0,
-            "inbox_id": inbox.id,
-            "inbox_email": inbox.email,
-            "inbox_display_name": inbox.display_name or "",
-            "inbox_provider": getattr(inbox, "provider", "resend") or "resend",
-            "inbox_max_per_day": inbox.max_emails_per_day,
-            "lead_id": lead.id,
-            "lead_email": lead.email,
-            "lead_name": lead.name or "",
-            "lead_status": lead.status,
-            "campaign_id": campaign.id,
-            "campaign_name": campaign.name,
-            "campaign_sending_days": campaign.sending_days or [],
-            "campaign_hours_start": campaign.sending_hours_start or "09:00",
-            "campaign_hours_end": campaign.sending_hours_end or "17:00",
-            "campaign_wait_minutes": campaign.wait_minutes_between or 5,
-            "campaign_stop_on_reply": campaign.stop_on_reply,
-        }
+        _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body)
         for slot, cl, campaign, lead, inbox, seq in rows
     ]
+
+
+@router.get("/sent/{log_id}")
+async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch a single sent email with full sequence body and events."""
+    SeqAlias = aliased(Sequence)
+    InboxAlias = aliased(Inbox)
+    result = await db.execute(
+        select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias)
+        .options(
+            selectinload(EmailLog.opens),
+            selectinload(EmailLog.clicks),
+        )
+        .join(Lead, EmailLog.lead_id == Lead.id)
+        .join(Campaign, EmailLog.campaign_id == Campaign.id)
+        .outerjoin(
+            SeqAlias,
+            (SeqAlias.campaign_id == Campaign.id)
+            & (SeqAlias.position == EmailLog.sequence_index),
+        )
+        .outerjoin(InboxAlias, EmailLog.inbox_id == InboxAlias.id)
+        .where(EmailLog.id == log_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Sent email not found")
+    el, lead, campaign, seq, inbox = row
+    return _serialize_sent(el, lead, campaign, seq, inbox, include_body=True, include_events=True)
+
+
+@router.get("/scheduled/{slot_id}")
+async def scheduled_detail(slot_id: int, db: AsyncSession = Depends(get_db)):
+    """Fetch a single scheduled slot with full sequence body."""
+    SeqAlias = aliased(Sequence)
+    result = await db.execute(
+        select(QueueSlot, CampaignLead, Campaign, Lead, Inbox, SeqAlias)
+        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+        .join(Campaign, CampaignLead.campaign_id == Campaign.id)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .join(Inbox, QueueSlot.inbox_id == Inbox.id)
+        .outerjoin(
+            SeqAlias,
+            (SeqAlias.campaign_id == Campaign.id)
+            & (SeqAlias.position == QueueSlot.sequence_index),
+        )
+        .where(QueueSlot.id == slot_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Scheduled slot not found")
+    slot, _cl, campaign, lead, inbox, seq = row
+    return _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body=True)
 
 
 
