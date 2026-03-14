@@ -4,6 +4,7 @@ import random
 import re
 import secrets
 from datetime import datetime, date, time, timedelta
+from email.utils import make_msgid
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -184,6 +185,7 @@ async def run_send_job():
             gmail_token = ""
             ga = None
             o365_account = None
+            simulate_send = False
 
             if inbox.provider == "office365":
                 o365_res = await session.execute(
@@ -227,8 +229,16 @@ async def run_send_job():
                             continue
                     gmail_token = ga.access_token
                 else:
-                    log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
-                    continue
+                    if settings.test_mode:
+                        log.info(
+                            "Test mode: Gmail inbox %s (%s) has no GmailAccount -- simulating send",
+                            inbox.id,
+                            inbox.email,
+                        )
+                        simulate_send = True
+                    else:
+                        log.warning("Gmail inbox %s (%s) has no GmailAccount — skipping", inbox.id, inbox.email)
+                        continue
 
             sent_this_inbox = 0
             # Use the warmup-aware effective limit as the per-inbox rate cap.
@@ -645,29 +655,37 @@ async def run_send_job():
                 list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
 
                 # ── phase 3: send ────────────────────────────────────────────
-                result = send_email(
-                    to_email=lead.email,
-                    subject=subject,
-                    body=send_body,
-                    from_email=from_addr,
-                    from_name=from_name,
-                    reply_to_msg_id=reply_to_msg_id,
-                    references=references_chain,
-                    is_html=is_html,
-                    provider=inbox.provider or "gmail",
-                    gmail_access_token=gmail_token,
-                    gmail_account=ga,
-                    thread_id=prev_thread_id,
-                    list_unsubscribe_url=list_unsub_url,
-                    google_client_id=g_client_id,
-                    google_client_secret=g_client_secret,
-                    office365_account=o365_account,
-                    office365_client_id=o365_client_id,
-                    office365_client_secret=o365_client_secret,
-                    office365_tenant_id=o365_tenant_id,
-                    conversation_id=prev_thread_id if inbox.provider == "office365" else None,
-                    reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
-                )
+                if simulate_send:
+                    fake_thread_id = prev_thread_id or f"test-thread-{email_log_entry.id}"
+                    result = SendResult(
+                        message_id=make_msgid(domain="test.local"),
+                        thread_id=fake_thread_id,
+                        gmail_message_id=f"test-gmail-{email_log_entry.id}",
+                    )
+                else:
+                    result = send_email(
+                        to_email=lead.email,
+                        subject=subject,
+                        body=send_body,
+                        from_email=from_addr,
+                        from_name=from_name,
+                        reply_to_msg_id=reply_to_msg_id,
+                        references=references_chain,
+                        is_html=is_html,
+                        provider=inbox.provider or "gmail",
+                        gmail_access_token=gmail_token,
+                        gmail_account=ga,
+                        thread_id=prev_thread_id,
+                        list_unsubscribe_url=list_unsub_url,
+                        google_client_id=g_client_id,
+                        google_client_secret=g_client_secret,
+                        office365_account=o365_account,
+                        office365_client_id=o365_client_id,
+                        office365_client_secret=o365_client_secret,
+                        office365_tenant_id=o365_tenant_id,
+                        conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                        reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                    )
 
                 # ── Handle permanent failure (bounce / auth) ─────────────────
                 if isinstance(result, SendFailure):
@@ -995,6 +1013,7 @@ async def send_slot_job(slot_id: int) -> None:
         gmail_token = ""
         ga = None
         o365_account = None
+        simulate_send = False
 
         from app.settings_manager import settings as _settings
         from app.app_settings import get_inbox_tracking_base
@@ -1053,11 +1072,18 @@ async def send_slot_job(slot_id: int) -> None:
                         return
                 gmail_token = ga.access_token
             else:
-                log.warning(
-                    "send_slot_job: Gmail inbox %s has no GmailAccount – skipping slot %d",
-                    inbox.email, slot_id,
-                )
-                return
+                if settings.test_mode:
+                    log.info(
+                        "send_slot_job: test mode Gmail inbox %s has no GmailAccount -- simulating send",
+                        inbox.email,
+                    )
+                    simulate_send = True
+                else:
+                    log.warning(
+                        "send_slot_job: Gmail inbox %s has no GmailAccount – skipping slot %d",
+                        inbox.email, slot_id,
+                    )
+                    return
 
         # ── A/B variant selection ────────────────────────────────────────
         chosen_variant_id = None
@@ -1308,29 +1334,37 @@ async def send_slot_job(slot_id: int) -> None:
         list_unsub_url = unsub_url if getattr(campaign, "add_unsubscribe_header", True) else None
 
         # ── Send ──────────────────────────────────────────────────────────
-        result = send_email(
-            to_email=lead.email,
-            subject=subject,
-            body=send_body,
-            from_email=from_addr,
-            from_name=from_name,
-            reply_to_msg_id=reply_to_msg_id,
-            references=references_chain,
-            is_html=is_html,
-            provider=inbox.provider or "gmail",
-            gmail_access_token=gmail_token,
-            gmail_account=ga,
-            thread_id=prev_thread_id,
-            list_unsubscribe_url=list_unsub_url,
-            google_client_id=g_client_id,
-            google_client_secret=g_client_secret,
-            office365_account=o365_account,
-            office365_client_id=o365_client_id,
-            office365_client_secret=o365_client_secret,
-            office365_tenant_id=o365_tenant_id,
-            conversation_id=prev_thread_id if inbox.provider == "office365" else None,
-            reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
-        )
+        if simulate_send:
+            fake_thread_id = prev_thread_id or f"test-thread-{email_log_entry.id}"
+            result = SendResult(
+                message_id=make_msgid(domain="test.local"),
+                thread_id=fake_thread_id,
+                gmail_message_id=f"test-gmail-{email_log_entry.id}",
+            )
+        else:
+            result = send_email(
+                to_email=lead.email,
+                subject=subject,
+                body=send_body,
+                from_email=from_addr,
+                from_name=from_name,
+                reply_to_msg_id=reply_to_msg_id,
+                references=references_chain,
+                is_html=is_html,
+                provider=inbox.provider or "gmail",
+                gmail_access_token=gmail_token,
+                gmail_account=ga,
+                thread_id=prev_thread_id,
+                list_unsubscribe_url=list_unsub_url,
+                google_client_id=g_client_id,
+                google_client_secret=g_client_secret,
+                office365_account=o365_account,
+                office365_client_id=o365_client_id,
+                office365_client_secret=o365_client_secret,
+                office365_tenant_id=o365_tenant_id,
+                conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+            )
 
         # ── Permanent failure ─────────────────────────────────────────────
         if isinstance(result, SendFailure):
