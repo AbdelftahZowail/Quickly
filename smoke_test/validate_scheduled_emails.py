@@ -55,6 +55,7 @@ class ValidationResult:
     total_slots_checked: int = 0
     total_leads_checked: int = 0
     issues: List[ValidationIssue] = field(default_factory=list)
+    passes: List[str] = field(default_factory=list)
     # Efficiency tracking
     total_capacity: int = 0  # Sum of max_emails_per_day across all inbox-days
     total_empty_slots: int = 0  # Unused capacity
@@ -67,6 +68,10 @@ class ValidationResult:
     def add_warning(self, check_name: str, lead_email: str, campaign_name: str, details: str):
         """Add a warning to the results."""
         self.issues.append(ValidationIssue(check_name, 'WARNING', lead_email, campaign_name, details))
+
+    def add_pass(self, check_name: str, subject: str, details: str):
+        """Record a check that passed."""
+        self.passes.append(f"[PASS] {check_name} | {subject}: {details}")
     
     def has_errors(self) -> bool:
         """Check if there are any errors."""
@@ -109,6 +114,12 @@ class ValidationResult:
                 print(f"    - Utilization: {inbox_eff:.1f}%")
             print("="*80)
         
+        if self.passes:
+            print("\nPASSED CHECKS:")
+            print("-"*80)
+            for msg in self.passes:
+                print(f"  {msg}")
+
         if self.issues:
             print("\nISSUES FOUND:")
             print("-"*80)
@@ -117,7 +128,7 @@ class ValidationResult:
                 print(f"  Campaign: {issue.campaign_name}")
                 print(f"  Lead: {issue.lead_email}")
                 print(f"  Details: {issue.details}")
-        else:
+        elif not self.passes:
             print("\n✓ All validation checks passed! No issues found.")
         
         print("\n" + "="*80 + "\n")
@@ -182,7 +193,10 @@ class EmailScheduleValidator:
         
         # Check inbox send rate (wait_minutes_between)
         await self._check_inbox_send_rate()
-        
+
+        # Check that per-inbox jitter is uniformly distributed
+        await self._check_jitter_distribution()
+
         # Calculate queue efficiency
         await self._calculate_queue_efficiency()
         
@@ -573,6 +587,92 @@ class EmailScheduleValidator:
                 "Queue efficiency: no capacity (empty inboxes or no scheduled slots)"
             )
     
+    async def _check_jitter_distribution(self):
+        """
+        Check that the random jitter applied to each slot is statistically
+        uniform across an inbox's scheduled queue.
+
+        For each inbox with max_jitter_seconds > 0 the jitter on a slot is
+        recovered by subtracting the minimum inter-send gap
+        (wait_minutes_between * 60 s) from the actual gap between consecutive
+        same-day slots.  Because jitter is drawn from a uniform [0, max_jitter_s]
+        distribution its expected average is max_jitter_seconds / 2.  A WARNING
+        is raised when the observed mean deviates from that expectation by more
+        than 10 seconds.
+
+        At least 10 same-day consecutive pairs are required before the check
+        fires; with fewer samples the variance is too large to be meaningful.
+        """
+        MIN_SAMPLES = 10
+        TOLERANCE_SECONDS = 10.0
+
+        inboxes_query = select(Inbox)
+        inboxes = (await self.session.execute(inboxes_query)).scalars().all()
+
+        for inbox in inboxes:
+            max_jitter = inbox.max_jitter_seconds
+            if not max_jitter or max_jitter <= 0:
+                continue  # Jitter disabled for this inbox
+
+            min_gap_seconds = inbox.wait_minutes_between * 60
+            expected_avg = max_jitter / 2.0
+
+            # Fetch all slots ordered by time so same-day pairs are consecutive
+            slots_query = (
+                select(QueueSlot)
+                .where(QueueSlot.inbox_id == inbox.id)
+                .order_by(QueueSlot.scheduled_date)
+            )
+            slots = (await self.session.execute(slots_query)).scalars().all()
+
+            if len(slots) < 2:
+                continue
+
+            # Group into per-day buckets (already time-sorted)
+            slots_by_date: Dict[date, List] = defaultdict(list)
+            for slot in slots:
+                slots_by_date[slot.scheduled_date.date()].append(slot)
+
+            jitter_samples: List[float] = []
+            for day_slots in slots_by_date.values():
+                if len(day_slots) < 2:
+                    continue
+                for i in range(1, len(day_slots)):
+                    gap_s = (
+                        day_slots[i].scheduled_date - day_slots[i - 1].scheduled_date
+                    ).total_seconds()
+                    extracted = gap_s - min_gap_seconds
+                    # Only keep values that sit within the plausible jitter range;
+                    # gaps that are too large or negative indicate cross-day or
+                    # scheduling anomalies already covered by other checks.
+                    if 0.0 <= extracted <= max_jitter + TOLERANCE_SECONDS:
+                        jitter_samples.append(extracted)
+
+            if len(jitter_samples) < MIN_SAMPLES:
+                continue  # Not enough data to draw a conclusion
+
+            avg_jitter = sum(jitter_samples) / len(jitter_samples)
+            deviation = abs(avg_jitter - expected_avg)
+
+            if deviation > TOLERANCE_SECONDS:
+                self.result.add_warning(
+                    'Jitter Distribution',
+                    inbox.email,
+                    'Multiple campaigns',
+                    f"Average extracted jitter is {avg_jitter:.1f}s but expected "
+                    f"~{expected_avg:.1f}s (half of max_jitter_seconds={max_jitter}s). "
+                    f"Deviation: {deviation:.1f}s (tolerance: ±{TOLERANCE_SECONDS:.0f}s). "
+                    f"Sampled from {len(jitter_samples)} consecutive same-day slot pairs."
+                )
+            else:
+                self.result.add_pass(
+                    'Jitter Distribution',
+                    inbox.email,
+                    f"avg jitter {avg_jitter:.1f}s ≈ expected {expected_avg:.1f}s "
+                    f"(deviation {deviation:.1f}s ≤ ±{TOLERANCE_SECONDS:.0f}s, "
+                    f"{len(jitter_samples)} samples)"
+                )
+
     # ========================================================================
     # ADD NEW VALIDATION CHECKS BELOW
     # ========================================================================
