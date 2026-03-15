@@ -8,6 +8,22 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to simulate (e.g. v1.0.0-test)'
+        required: true
+        default: 'v0.0.0-test'
+      push_image:
+        description: 'Push Docker image to Docker Hub'
+        type: boolean
+        required: false
+        default: false
+      create_release:
+        description: 'Create a GitHub Release (draft)'
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   build-and-push:
@@ -27,14 +43,19 @@ jobs:
 
       - name: Determine tag
         id: tagger
-        run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           dockerfile: Dockerfile
-          push: true
+          push: ${{ github.event_name != 'workflow_dispatch' || inputs.push_image }}
           tags: |
             azowail/quickly:${{ steps.tagger.outputs.TAG }}
             azowail/quickly:latest
@@ -42,13 +63,14 @@ jobs:
           platforms: linux/amd64,linux/arm64
 
       - name: Create GitHub Release with assets
+        if: github.event_name != 'workflow_dispatch' || inputs.create_release
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.tagger.outputs.TAG }}
           name: ${{ steps.tagger.outputs.TAG }}
           artifacts: "docker-compose.yml,.env.example,Caddyfile"
           artifactErrorsFailBuild: true
-          draft: false
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
           prerelease: false
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
