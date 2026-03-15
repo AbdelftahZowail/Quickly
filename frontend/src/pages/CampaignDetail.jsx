@@ -647,6 +647,122 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         )}
       </div>
 
+      {/* Duplicate leads notice */}
+      {lastDuplicates.length > 0 && (
+        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+          <p className="text-sm font-medium text-yellow-800 mb-1">{lastDuplicates.length} duplicate(s) skipped — already enrolled in a campaign:</p>
+          <div className="flex flex-wrap gap-1 mt-1">
+            {lastDuplicates.map(email => (
+              <span key={email} className="font-mono text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">{email}</span>
+            ))}
+          </div>
+          <button className="text-xs text-yellow-600 underline mt-1" onClick={() => setLastDuplicates([])}>Dismiss</button>
+        </div>
+      )}
+
+      {/* Add leads */}
+      <div className="bg-white rounded-lg border border-gray-200 p-5">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="font-semibold text-gray-800">Add leads</h3>
+          <button
+            className="text-gray-400 hover:text-teal-600 transition-colors"
+            onClick={() => setShowFormatInfo(v => !v)}
+            title="Accepted data formats"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+          </button>
+        </div>
+
+        {showFormatInfo && (
+          <div className="mb-4 p-3 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-800 space-y-2">
+            <p className="font-semibold">Accepted formats for bulk paste:</p>
+            <ul className="list-disc pl-5 space-y-1 text-xs">
+              <li><strong>Emails only</strong> — one per line or comma-separated<br/><code className="bg-teal-100 px-1 rounded">john@a.com, jane@b.com</code></li>
+              <li><strong>Tab-separated (Excel / Sheets copy-paste)</strong> — first row = headers<br/><code className="bg-teal-100 px-1 rounded">email&nbsp;&nbsp;&nbsp;name&nbsp;&nbsp;&nbsp;company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com&nbsp;&nbsp;&nbsp;John&nbsp;&nbsp;&nbsp;Acme</code></li>
+              <li><strong>Comma-separated with headers</strong><br/><code className="bg-teal-100 px-1 rounded">email,name,company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com,John,Acme</code></li>
+            </ul>
+            <p className="text-xs text-teal-600 mt-1">Columns beyond <em>email</em> and <em>name</em> are saved as custom fields.</p>
+            <p className="font-semibold mt-2">CSV file import:</p>
+            <p className="text-xs">Upload a <code className="bg-teal-100 px-1 rounded">.csv</code> or <code className="bg-teal-100 px-1 rounded">.tsv</code> file with an <em>email</em> header column. Extra columns become custom fields.</p>
+          </div>
+        )}
+
+        <div className="flex gap-2 mb-3">
+          <Button size="sm" variant={mode==='single'?'default':'outline'} onClick={()=>setMode('single')}>Single</Button>
+          <Button size="sm" variant={mode==='bulk'?'default':'outline'}   onClick={()=>setMode('bulk')}>Bulk paste</Button>
+        </div>
+        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-2">
+          <input
+            type="checkbox"
+            checked={skipDuplicates}
+            onChange={e => { setSkipDuplicates(e.target.checked); setLastDuplicates([]); }}
+            className="rounded"
+          />
+          Skip duplicates (checks all campaigns)
+        </label>
+        {emailVerifEnabled && (
+          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-4">
+            <input
+              type="checkbox"
+              checked={verifyEmails}
+              onChange={e => setVerifyEmails(e.target.checked)}
+              className="rounded"
+            />
+            Verify emails after adding
+          </label>
+        )}
+        {msg && <div className={`mb-2 text-sm ${msg.type==='error'?'text-red-600':'text-green-600'}`}>{msg.text}</div>}
+        {mode === 'single' && (
+          <form onSubmit={addSingle} className="space-y-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Email *</label>
+                <input
+                  type="email" required
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={single.email}
+                  onChange={e => setSingle(s=>({...s, email: e.target.value}))}
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-600 mb-1">Name</label>
+                <input
+                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={single.name}
+                  onChange={e => setSingle(s=>({...s, name: e.target.value}))}
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">Custom data (JSON)</label>
+              <textarea
+                rows={2}
+                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                placeholder='{"company": "Acme", "title": "CEO"}'
+                value={single.custom}
+                onChange={e => setSingle(s=>({...s, custom: e.target.value}))}
+              />
+            </div>
+            <Button size="sm" variant="default">Add lead</Button>
+          </form>
+        )}
+        {mode === 'bulk' && (
+          <form onSubmit={addBulk} className="space-y-3">
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">Paste leads — emails, CSV rows, or Excel copy-paste (see ⓘ above)</label>
+              <textarea
+                rows={6}
+                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                placeholder={"email,name,company\njohn@acme.com,John Doe,Acme Inc\njane@co.io,Jane Smith,Co"}
+                value={bulk}
+                onChange={e => setBulk(e.target.value)}
+              />
+            </div>
+            <Button size="sm" variant="default">Add leads</Button>
+          </form>
+        )}
+      </div>
+
       {/* Filter bar */}
       <div className="flex flex-wrap gap-x-6 gap-y-2 p-3 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
         {/* Status */}
@@ -714,18 +830,6 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         )}
       </div>
 
-      {/* Duplicate leads notice */}
-      {lastDuplicates.length > 0 && (
-        <div className="p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
-          <p className="text-sm font-medium text-yellow-800 mb-1">{lastDuplicates.length} duplicate(s) skipped — already enrolled in a campaign:</p>
-          <div className="flex flex-wrap gap-1 mt-1">
-            {lastDuplicates.map(email => (
-              <span key={email} className="font-mono text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">{email}</span>
-            ))}
-          </div>
-          <button className="text-xs text-yellow-600 underline mt-1" onClick={() => setLastDuplicates([])}>Dismiss</button>
-        </div>
-      )}
 
       {/* Leads table */}
       {filteredLeads.length === 0 ? (
@@ -888,108 +992,6 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         </div>
       )}
 
-      {/* Add leads */}
-      <div className="bg-white rounded-lg border border-gray-200 p-5">
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="font-semibold text-gray-800">Add leads</h3>
-          <button
-            className="text-gray-400 hover:text-teal-600 transition-colors"
-            onClick={() => setShowFormatInfo(v => !v)}
-            title="Accepted data formats"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-          </button>
-        </div>
-
-        {showFormatInfo && (
-          <div className="mb-4 p-3 bg-teal-50 border border-teal-200 rounded-lg text-sm text-teal-800 space-y-2">
-            <p className="font-semibold">Accepted formats for bulk paste:</p>
-            <ul className="list-disc pl-5 space-y-1 text-xs">
-              <li><strong>Emails only</strong> — one per line or comma-separated<br/><code className="bg-teal-100 px-1 rounded">john@a.com, jane@b.com</code></li>
-              <li><strong>Tab-separated (Excel / Sheets copy-paste)</strong> — first row = headers<br/><code className="bg-teal-100 px-1 rounded">email&nbsp;&nbsp;&nbsp;name&nbsp;&nbsp;&nbsp;company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com&nbsp;&nbsp;&nbsp;John&nbsp;&nbsp;&nbsp;Acme</code></li>
-              <li><strong>Comma-separated with headers</strong><br/><code className="bg-teal-100 px-1 rounded">email,name,company</code><br/><code className="bg-teal-100 px-1 rounded">john@a.com,John,Acme</code></li>
-            </ul>
-            <p className="text-xs text-teal-600 mt-1">Columns beyond <em>email</em> and <em>name</em> are saved as custom fields.</p>
-            <p className="font-semibold mt-2">CSV file import:</p>
-            <p className="text-xs">Upload a <code className="bg-teal-100 px-1 rounded">.csv</code> or <code className="bg-teal-100 px-1 rounded">.tsv</code> file with an <em>email</em> header column. Extra columns become custom fields.</p>
-          </div>
-        )}
-
-        <div className="flex gap-2 mb-3">
-          <Button size="sm" variant={mode==='single'?'default':'outline'} onClick={()=>setMode('single')}>Single</Button>
-          <Button size="sm" variant={mode==='bulk'?'default':'outline'}   onClick={()=>setMode('bulk')}>Bulk paste</Button>
-        </div>
-        <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-2">
-          <input
-            type="checkbox"
-            checked={skipDuplicates}
-            onChange={e => { setSkipDuplicates(e.target.checked); setLastDuplicates([]); }}
-            className="rounded"
-          />
-          Skip duplicates (checks all campaigns)
-        </label>
-        {emailVerifEnabled && (
-          <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none mb-4">
-            <input
-              type="checkbox"
-              checked={verifyEmails}
-              onChange={e => setVerifyEmails(e.target.checked)}
-              className="rounded"
-            />
-            Verify emails after adding
-          </label>
-        )}
-        {msg && <div className={`mb-2 text-sm ${msg.type==='error'?'text-red-600':'text-green-600'}`}>{msg.text}</div>}
-        {mode === 'single' && (
-          <form onSubmit={addSingle} className="space-y-3">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">Email *</label>
-                <input
-                  type="email" required
-                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={single.email}
-                  onChange={e => setSingle(s=>({...s, email: e.target.value}))}
-                />
-              </div>
-              <div>
-                <label className="block text-sm text-gray-600 mb-1">Name</label>
-                <input
-                  className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={single.name}
-                  onChange={e => setSingle(s=>({...s, name: e.target.value}))}
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Custom data (JSON)</label>
-              <textarea
-                rows={2}
-                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
-                placeholder='{"company": "Acme", "title": "CEO"}'
-                value={single.custom}
-                onChange={e => setSingle(s=>({...s, custom: e.target.value}))}
-              />
-            </div>
-            <Button size="sm" variant="default">Add lead</Button>
-          </form>
-        )}
-        {mode === 'bulk' && (
-          <form onSubmit={addBulk} className="space-y-3">
-            <div>
-              <label className="block text-sm text-gray-600 mb-1">Paste leads — emails, CSV rows, or Excel copy-paste (see ⓘ above)</label>
-              <textarea
-                rows={6}
-                className="w-full border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
-                placeholder={"email,name,company\njohn@acme.com,John Doe,Acme Inc\njane@co.io,Jane Smith,Co"}
-                value={bulk}
-                onChange={e => setBulk(e.target.value)}
-              />
-            </div>
-            <Button size="sm" variant="default">Add leads</Button>
-          </form>
-        )}
-      </div>
     </div>
   );
 }

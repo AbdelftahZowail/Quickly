@@ -19,8 +19,7 @@
 
 ---
 
-<!-- SCREENSHOT / DEMO GIF — replace with your own -->
-<!-- ![Quickly dashboard showing campaign analytics and inbox rotation](docs/assets/demo.gif) -->
+![Quickly dashboard showing campaign analytics and inbox rotation](docs/assets/app_screen_recording.gif)
 
 ---
 

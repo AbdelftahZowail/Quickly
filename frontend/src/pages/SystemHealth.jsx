@@ -1,6 +1,7 @@
 import { useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { useSystemHealth } from '../context/SystemHealthContext';
+import { useAppMode } from '../context/AppModeContext';
 import {
   RiRefreshLine,
   RiCheckboxCircleLine,
@@ -231,6 +232,7 @@ function TokenStatusBadge({ status }) {
 }
 
 function CheckMeta({ check }) {
+  const { isProduction } = useAppMode();
   if (check.id === 'google_oauth' && check.meta.accounts?.length > 0) {
     return (
       <div className="mt-1 space-y-1.5 border-t border-gray-100 pt-2">
@@ -359,6 +361,7 @@ function CheckMeta({ check }) {
   }
 
   if (check.id === 'active_settings') {
+    if (isProduction) return null;
     return (
       <div className="mt-1 border-t border-gray-100 pt-2">
         <div className="flex items-center justify-between text-sm">
