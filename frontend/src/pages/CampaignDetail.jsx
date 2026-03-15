@@ -40,7 +40,6 @@ export default function CampaignDetail() {
   const [leads, setLeads] = useState(() => apiCache.get(`/campaigns/${id}/leads`) || []);
   const [queueData, setQueueData] = useState(() => apiCache.get(`/campaigns/${id}/queue`) || []);
   const [sentData, setSentData] = useState(() => apiCache.get(`/campaigns/${id}/sent`) || []);
-  const [allSentGlobal, setAllSentGlobal] = useState(() => apiCache.get('/schedule/sent') || []);
   const [queueFilter, setQueueFilter] = useState(null);
   const queueRef = useRef(null);
   const [pastExpanded, setPastExpanded] = useState(false);
@@ -73,14 +72,13 @@ export default function CampaignDetail() {
   const loadAll = useCallback(async () => {
     loadingCtrl.start();
     try {
-      const [camp, ibxs, seqs, lds, q, s, globalSent] = await Promise.all([
+      const [camp, ibxs, seqs, lds, q, s] = await Promise.all([
         api.get(`/campaigns/${id}`),
         api.get('/inboxes'),
         api.get(`/campaigns/${id}/sequences`),
         api.get(`/campaigns/${id}/leads`),
         api.get(`/campaigns/${id}/queue`),
         api.get(`/campaigns/${id}/sent`),
-        api.get('/schedule/sent').catch(() => []),
       ]);
       setCampaign(camp);
       setInboxes(ibxs);
@@ -88,7 +86,6 @@ export default function CampaignDetail() {
       setLeads(lds);
       setQueueData(q);
       setSentData(s);
-      setAllSentGlobal(globalSent);
     } catch (e) {
       setError(e.message);
       notify({ type: 'error', message: 'Failed to load campaign data' });
@@ -290,7 +287,6 @@ export default function CampaignDetail() {
         <CampaignAnalyticsTab
           campaignId={Number(id)}
           campaign={campaign}
-          allSent={allSentGlobal}
           sentData={sentData}
           sequences={sequences}
           onRefresh={loadAll}
@@ -1008,7 +1004,7 @@ const SERIES_LIST = [
   { key: 'uniqueClicks', name: 'Unique Clicks', stroke: 'rgba(236,72,153,0.8)',  fill: 'rgba(236,72,153,0.15)' },
 ];
 
-function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], sequences = [], onRefresh }) {
+function CampaignAnalyticsTab({ campaignId, campaign, sentData = [], sequences = [], onRefresh }) {
   const notify = useNotify();
   const today = new Date();
   const localIso = (dt) => `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
@@ -1035,6 +1031,7 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], se
   const defaultRange = presets.find(p => p.label === 'Last 7 Days') || presets[0];
   const [startDate, setStartDate] = useState(defaultRange.start);
   const [endDate,   setEndDate]   = useState(defaultRange.end);
+  const [analyticsData, setAnalyticsData] = useState([]);
   const [hide, setHide] = useState({
     sent: false, totalOpens: false, uniqueOpens: false,
     totalReplies: false, totalClicks: false, uniqueClicks: false,
@@ -1064,6 +1061,14 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], se
 
   useEffect(() => { loadStepStats(); }, [loadStepStats]);
 
+  // Re-fetch aggregated daily analytics whenever the date range changes
+  useEffect(() => {
+    if (!startDate || !endDate) return;
+    api.get(`/analytics/daily?start_date=${startDate}&end_date=${endDate}&campaign_id=${campaignId}`)
+      .then(data => setAnalyticsData(data))
+      .catch(() => setAnalyticsData([]));
+  }, [startDate, endDate, campaignId]);
+
   const toggleVariant = async (seqId, variantId, enabled) => {
     try {
       await api.patch(`/campaigns/${campaignId}/sequences/${seqId}/variants/${variantId}`, { enabled });
@@ -1081,34 +1086,19 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], se
     setEndDate(preset.end);
   };
 
-  const filteredSent = useMemo(() =>
-    allSent.filter(e => {
-      if (String(e.campaign_id) !== String(campaignId)) return false;
-      if (startDate && (e.sent_date||'') < startDate) return false;
-      if (endDate   && (e.sent_date||'') > endDate)   return false;
-      return true;
-    }),
-    [allSent, campaignId, startDate, endDate]
-  );
-
   const chartData = useMemo(() => {
     const map = {};
-    const seenOpen = {}, seenClick = {};
-    filteredSent.forEach(e => {
-      const d = e.sent_date || (e.sent_at?.slice(0,10) || '');
-      if (!d) return;
+    analyticsData.forEach(row => {
+      const d = row.date;
       if (!map[d]) {
         map[d] = { date: d, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 };
-        seenOpen[d] = new Set(); seenClick[d] = new Set();
       }
-      map[d].sent += 1;
-      if (e.lead_status === 'replied') map[d].totalReplies += 1;
-      (e.opens||[]).forEach(o => { map[d].totalOpens += 1; if (o?.ip) seenOpen[d].add(o.ip); });
-      (e.clicks||[]).forEach(c => { map[d].totalClicks += 1; if (c?.ip) seenClick[d].add(c.ip); });
-    });
-    Object.keys(map).forEach(d => {
-      map[d].uniqueOpens  = seenOpen[d].size;
-      map[d].uniqueClicks = seenClick[d].size;
+      map[d].sent         += row.sent;
+      map[d].totalOpens   += row.total_opens;
+      map[d].uniqueOpens  += row.unique_opens;
+      map[d].totalReplies += row.total_replies;
+      map[d].totalClicks  += row.total_clicks;
+      map[d].uniqueClicks += row.unique_clicks;
     });
     const result = [];
     if (startDate && endDate) {
@@ -1121,7 +1111,7 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], se
       }
     }
     return result;
-  }, [filteredSent, startDate, endDate]);
+  }, [analyticsData, startDate, endDate]);
 
   useEffect(() => {
     if (!initializedRef.current && chartData.length > 0 && chartData.some(d => SERIES_LIST.some(s => d[s.key] > 0))) {
@@ -1166,7 +1156,16 @@ function CampaignAnalyticsTab({ campaignId, campaign, allSent, sentData = [], se
       activeChartIdxRef.current = zoomRange.start + state.activeTooltipIndex;
   };
 
-  const rangeLeads   = new Set(filteredSent.map(e => e.lead_id).filter(Boolean)).size;
+  const rangeLeads   = useMemo(() => {
+    const seen = new Set();
+    sentData.forEach(e => {
+      const d = e.sent_date || (e.sent_at ? e.sent_at.slice(0,10) : '');
+      if (startDate && d < startDate) return;
+      if (endDate   && d > endDate)   return;
+      if (e.lead_id) seen.add(String(e.lead_id));
+    });
+    return seen.size;
+  }, [sentData, startDate, endDate]);
   const rangeSent    = chartData.reduce((a,d)=>a+d.sent, 0);
   const rangeOpens   = chartData.reduce((a,d)=>a+d.totalOpens, 0);
   const rangeReplies = chartData.reduce((a,d)=>a+d.totalReplies, 0);

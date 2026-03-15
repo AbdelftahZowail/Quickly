@@ -143,13 +143,17 @@ export default function Settings() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  const visibleSections = isProduction
+    ? SECTIONS.filter(s => s.id !== 'test-mode' && s.id !== 'utilities')
+    : SECTIONS;
+
   /* ── scroll-spy ── */
   useEffect(() => {
     const container = contentRef.current;
     if (!container) return;
     const handleScroll = () => {
       const THRESHOLD = 120;
-      const offsets = SECTIONS.map(s => {
+      const offsets = visibleSections.map(s => {
         const el = document.getElementById(s.id);
         return el ? { id: s.id, top: el.getBoundingClientRect().top } : null;
       }).filter(Boolean);
@@ -161,7 +165,7 @@ export default function Settings() {
         setActiveSection(active.id);
       } else {
         // Nothing past threshold yet — highlight the first section
-        setActiveSection(offsets[0]?.id ?? SECTIONS[0].id);
+        setActiveSection(offsets[0]?.id ?? visibleSections[0].id);
       }
     };
     container.addEventListener('scroll', handleScroll, { passive: true });
@@ -170,7 +174,7 @@ export default function Settings() {
       container.removeEventListener('scroll', handleScroll);
       window.removeEventListener('scroll', handleScroll);
     };
-  }, []);
+  }, [isProduction]);
 
   const scrollTo = id => {
     setActiveSection(id);
@@ -507,7 +511,7 @@ export default function Settings() {
       {/* ── sidebar TOC ── */}
       <nav className="hidden md:flex flex-col w-48 shrink-0 border-r border-gray-200 dark:border-gray-700 py-8 px-4 sticky top-0 h-screen overflow-y-auto">
         <h2 className="text-xs uppercase tracking-wider text-gray-400 mb-4 font-semibold">Contents</h2>
-        {SECTIONS.map(s => (
+        {visibleSections.map(s => (
           <button
             key={s.id}
             onClick={() => scrollTo(s.id)}
