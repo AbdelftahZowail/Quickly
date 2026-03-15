@@ -12,8 +12,6 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,7 +20,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -32,7 +30,7 @@ jobs:
         run: echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
 
       - name: Build and push image
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v6
         with:
           context: .
           dockerfile: Dockerfile
@@ -43,14 +41,16 @@ jobs:
           cache-from: type=registry,ref=azowail/quickly:latest
           platforms: linux/amd64,linux/arm64
 
-      - name: Create GitHub Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create GitHub Release with assets
+        uses: ncipollo/release-action@v1
         with:
-          tag_name: ${{ steps.tagger.outputs.TAG }}
-          release_name: ${{ steps.tagger.outputs.TAG }}
+          tag: ${{ steps.tagger.outputs.TAG }}
+          name: ${{ steps.tagger.outputs.TAG }}
+          artifacts: "docker-compose.yml,.env.example,Caddyfile"
+          artifactErrorsFailBuild: true
+          draft: false
+          prerelease: false
+          token: ${{ secrets.GITHUB_TOKEN }}
           body: |
             ## What's in this release
 
@@ -123,35 +123,3 @@ jobs:
             4. Monitor sends in **Schedule** or via `GET /api/status`
 
             > **Docs:** [INSTALL.md](https://github.com/azowail/quickly/blob/main/docs/INSTALL.md) · [API.md](https://github.com/azowail/quickly/blob/main/docs/API.md) · [WEBHOOKS.md](https://github.com/azowail/quickly/blob/main/docs/WEBHOOKS.md)
-          draft: false
-          prerelease: false
-
-      - name: Upload docker-compose.yml asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: docker-compose.yml
-          asset_name: docker-compose.yml
-          asset_content_type: application/x-yaml
-
-      - name: Upload .env.example asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: .env.example
-          asset_name: .env.example
-          asset_content_type: text/plain
-
-      - name: Upload Caddyfile asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: Caddyfile
-          asset_name: Caddyfile
-          asset_content_type: text/plain
