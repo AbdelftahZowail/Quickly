@@ -18,16 +18,7 @@
 </p>
 
 ---
-<video autoplay loop muted playsinline width="100%"
-       poster="docs/assets/app_demo_poster.jpg"
-       aria-label="Quickly dashboard showing campaign analytics and inbox rotation">
-  <source src="https://github.com/AbdelftahZowail/Quickly/releases/download/v1.0.0/app_demo.webm" type="video/webm">
-  <source src="https://github.com/AbdelftahZowail/Quickly/releases/download/v1.0.0/app_demo.mp4"  type="video/mp4">
-  <img src="docs/assets/app_demo_poster.jpg"
-       alt="Quickly dashboard showing campaign analytics and inbox rotation"
-       width="100%">
-</video>
-
+![Quickly dashboard showing campaign analytics and inbox rotation](docs/assets/app_demo.gif)
 ---
 
 ## What is Quickly?
