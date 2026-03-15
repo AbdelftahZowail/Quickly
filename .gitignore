@@ -3,6 +3,10 @@
 
 # Database
 *.db
+*.db-journal
+
+# Node
+node_modules/
 
 # Logs
 logs/
