@@ -313,6 +313,22 @@ async def classify_reply(
             "AI reply classification failed (provider=%s model=%s): %s: %s",
             provider, model, type(exc).__name__, exc,
         )
+        # Record failure for health monitoring and fire alert event
+        try:
+            from app.settings_manager import save_setting_to_db
+            from app import time as _time
+            err_msg = f"{type(exc).__name__}: {exc}"[:500]
+            await save_setting_to_db(db, "ai_reply_classifier_last_error", err_msg)
+            await save_setting_to_db(db, "ai_reply_classifier_last_error_at", _time.utcnow().isoformat() + "Z")
+            await db.commit()
+            from app.webhooks import fire_webhook_event
+            await fire_webhook_event(db, "feature.error", {
+                "feature": "ai_reply_classifier",
+                "label": "Reply Interest Classifier",
+                "error": err_msg,
+            })
+        except Exception:
+            pass
         return None
 
 

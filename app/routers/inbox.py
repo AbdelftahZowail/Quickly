@@ -158,15 +158,16 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
         inbox.max_jitter_seconds = data.max_jitter_seconds
         capacity_changed = True
     if data.provider is not None:
-        if data.provider != inbox.provider:
-            # provider switch may indicate credentials revoked / toggle-off
-            capacity_changed = True
         inbox.provider = data.provider
     if data.tracking_domain is not None:
         inbox.tracking_domain = _normalise_tracking_domain(data.tracking_domain) or None
     if data.ramp_up_enabled is not None:
+        if data.ramp_up_enabled != inbox.ramp_up_enabled:
+            capacity_changed = True
         inbox.ramp_up_enabled = data.ramp_up_enabled
     if data.ramp_up_period_days is not None:
+        if data.ramp_up_period_days != inbox.ramp_up_period_days:
+            capacity_changed = True
         inbox.ramp_up_period_days = data.ramp_up_period_days
     if data.paused is not None:
         inbox.paused = data.paused

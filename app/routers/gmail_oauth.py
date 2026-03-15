@@ -2,6 +2,7 @@
 import hmac
 import json
 import logging
+import re
 import secrets
 import urllib.parse
 import urllib.request
@@ -121,11 +122,32 @@ async def check_gmail_permissions(db: AsyncSession = Depends(get_db)):
             "category": "Profile"
         }
     }
+
+    def _parse_scopes(scopes_str: str | None) -> list[str]:
+        if not scopes_str:
+            return []
+        raw = scopes_str.strip()
+        if not raw:
+            return []
+        if raw.startswith("["):
+            try:
+                data = json.loads(raw)
+                if isinstance(data, list):
+                    return [str(s).strip() for s in data if str(s).strip()]
+            except json.JSONDecodeError:
+                pass
+        return [s for s in re.split(r"[\s,]+", raw) if s]
+
+    full_access_scopes = {
+        "https://mail.google.com/",
+        "https://www.googleapis.com/auth/gmail.modify",
+    }
+    required_send_scope = "https://www.googleapis.com/auth/gmail.send"
     
     accounts_data = []
     for ga, inbox in rows:
         # Parse the scopes stored in the database (space-separated)
-        granted_scopes = ga.scopes.split() if ga.scopes else []
+        granted_scopes = _parse_scopes(ga.scopes)
         
         # Check token validity
         token_valid = False
@@ -153,14 +175,13 @@ async def check_gmail_permissions(db: AsyncSession = Depends(get_db)):
                     "category": "Other"
                 })
         
-        # Find missing critical scopes
+        # Find missing critical scopes (send capability only)
         missing_scopes = []
-        for scope, details in available_scopes.items():
-            if scope not in granted_scopes and details["category"] in ["Send", "Compose"]:
-                missing_scopes.append({
-                    "scope": scope,
-                    **details
-                })
+        if not (set(granted_scopes) & full_access_scopes) and required_send_scope not in granted_scopes:
+            missing_scopes.append({
+                "scope": required_send_scope,
+                **available_scopes[required_send_scope],
+            })
         
         accounts_data.append({
             "id": ga.id,
@@ -288,6 +309,7 @@ async def google_callback(
     access_token = token_data.get("access_token", "")
     refresh_token = token_data.get("refresh_token", "")
     expires_in = token_data.get("expires_in", 3600)
+    scopes_str = token_data.get("scope", "") or GMAIL_SCOPE
     token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
 
     if not refresh_token:
@@ -319,6 +341,8 @@ async def google_callback(
             ga.access_token = access_token
             ga.refresh_token = refresh_token
             ga.token_expiry = token_expiry
+            if scopes_str:
+                ga.scopes = scopes_str
             ga.google_email = email
             ga.updated_at = datetime.utcnow()
         else:
@@ -328,6 +352,7 @@ async def google_callback(
                 access_token=access_token,
                 refresh_token=refresh_token,
                 token_expiry=token_expiry,
+                scopes=scopes_str or None,
             )
             db.add(ga)
     else:
@@ -348,6 +373,7 @@ async def google_callback(
             access_token=access_token,
             refresh_token=refresh_token,
             token_expiry=token_expiry,
+            scopes=scopes_str or None,
         )
         db.add(ga)
 

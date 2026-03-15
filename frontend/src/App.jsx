@@ -10,11 +10,13 @@ import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Unibox from './pages/Unibox';
 import DeliverabilityTips from './pages/DeliverabilityTips';
+import SystemHealth from './pages/SystemHealth';
 import Login from './pages/Login';
 import { api } from './api';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import SplashScreen from './components/SplashScreen';
 import { DarkModeProvider } from './context/DarkModeContext';
+import { SystemHealthProvider } from './context/SystemHealthContext';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -60,6 +62,7 @@ function AppRoutes() {
               <Route path="/analytics" element={<Analytics />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
+              <Route path="/system-health" element={<SystemHealth />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>
           </Layout>
@@ -73,7 +76,9 @@ export default function App() {
   return (
     <DarkModeProvider>
       <AuthProvider>
-        <AppRoutes />
+        <SystemHealthProvider>
+          <AppRoutes />
+        </SystemHealthProvider>
       </AuthProvider>
     </DarkModeProvider>
   );

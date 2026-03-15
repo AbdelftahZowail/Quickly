@@ -536,6 +536,40 @@ async def _ensure_access_token(db: AsyncSession, account: GmailAccount) -> str:
     return account.access_token
 
 
+async def _refresh_gmail_token(db: AsyncSession, account: GmailAccount) -> bool:
+    client_id, client_secret = await get_google_oauth_credentials(db)
+    refreshed = refresh_access_token(account, client_id, client_secret)
+    if refreshed:
+        await db.flush()
+    return bool(refreshed)
+
+
+async def _gmail_call_with_refresh(
+    db: AsyncSession,
+    account: GmailAccount,
+    func,
+    *args,
+    **kwargs,
+):
+    """Call a Gmail API helper, refreshing once on auth errors."""
+    try:
+        return await asyncio.to_thread(func, account.access_token, *args, **kwargs)
+    except GmailAPIError as exc:
+        if exc.status_code in (401, 403):
+            refreshed = await _refresh_gmail_token(db, account)
+            if refreshed:
+                return await asyncio.to_thread(func, account.access_token, *args, **kwargs)
+            try:
+                await maybe_fire_email_event(
+                    db,
+                    "token_expired",
+                    {"inbox_id": account.inbox_id, "at": time_provider.utcnow().isoformat()},
+                )
+            except Exception:
+                log.exception("failed firing token_expired webhook after Gmail auth failure")
+        raise
+
+
 async def _fire_lead_reply_webhook_bg(data: dict[str, Any]) -> None:
     """Fire the lead-reply webhook in a background task with its own DB session."""
     try:
@@ -1662,12 +1696,13 @@ async def _hydrate_thread_from_gmail(
     *,
     inbox_id: int,
     thread_id: str,
-    access_token: str,
+    account: GmailAccount,
 ) -> bool:
     try:
-        payload = await asyncio.to_thread(
+        payload = await _gmail_call_with_refresh(
+            db,
+            account,
             _gmail_get_thread,
-            access_token,
             thread_id,
             payload_format="full",
         )
@@ -1714,12 +1749,12 @@ async def hydrate_thread_on_demand(
         return False
 
     try:
-        access_token = await _ensure_access_token(db, account)
+        await _ensure_access_token(db, account)
         hydrated = await _hydrate_thread_from_gmail(
             db,
             inbox_id=inbox_id,
             thread_id=thread_id,
-            access_token=access_token,
+            account=account,
         )
     except Exception:
         log.exception("On-demand thread hydration failed inbox_id=%s thread_id=%s", inbox_id, thread_id)
@@ -1756,7 +1791,7 @@ async def hydrate_pending_threads_for_inbox(
                 await db.rollback()
                 return 0
 
-            access_token = await _ensure_access_token(db, account)
+            await _ensure_access_token(db, account)
 
             candidate_ids = [str(item) for item in (thread_ids or []) if str(item).strip()]
             if not candidate_ids:
@@ -1787,7 +1822,7 @@ async def hydrate_pending_threads_for_inbox(
                         db,
                         inbox_id=inbox_id,
                         thread_id=thread_id,
-                        access_token=access_token,
+                        account=account,
                     )
                 except Exception:
                     log.exception(
@@ -1855,9 +1890,9 @@ async def _sync_inbox(
         return touched_threads, hydrate_after_commit_thread_ids
 
     state = await _get_or_create_sync_state(db, inbox.id)
-    access_token = await _ensure_access_token(db, account)
+    await _ensure_access_token(db, account)
 
-    profile = await asyncio.to_thread(_gmail_get_profile, access_token)
+    profile = await _gmail_call_with_refresh(db, account, _gmail_get_profile)
     profile_history_id = str(profile.get("historyId", ""))
 
     do_full_sync = not state.anchor_history_id
@@ -1865,7 +1900,7 @@ async def _sync_inbox(
     if not do_full_sync:
         start_history_id = state.latest_history_id or state.last_history_id or state.anchor_history_id
         try:
-            delta = await asyncio.to_thread(_gmail_history_delta, access_token, start_history_id)
+            delta = await _gmail_call_with_refresh(db, account, _gmail_history_delta, start_history_id)
         except GmailAPIError as exc:
             # startHistoryId can become stale; full sync is required then.
             if exc.status_code in (400, 404):
@@ -1881,9 +1916,10 @@ async def _sync_inbox(
             # Initial sync stage 1: fetch metadata only so list can render quickly.
             sync_end = time_provider.utcnow()
             sync_start = sync_end - timedelta(days=INITIAL_SYNC_WINDOW_DAYS)
-            message_ids = await asyncio.to_thread(
+            message_ids = await _gmail_call_with_refresh(
+                db,
+                account,
                 _gmail_list_message_ids_in_window,
-                access_token,
                 start_dt=sync_start,
                 end_dt=sync_end,
                 max_messages=INITIAL_SYNC_MAX_MESSAGES,
@@ -1896,9 +1932,10 @@ async def _sync_inbox(
             oldest_synced_ms: int | None = None
             for idx, msg_id in enumerate(message_ids, start=1):
                 try:
-                    payload = await asyncio.to_thread(
+                    payload = await _gmail_call_with_refresh(
+                        db,
+                        account,
                         _gmail_get_message,
-                        access_token,
                         msg_id,
                         payload_format="metadata",
                     )
@@ -1950,7 +1987,7 @@ async def _sync_inbox(
     elif delta is not None:
         for msg_id in delta.added_ids:
             try:
-                payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+                payload = await _gmail_call_with_refresh(db, account, _gmail_get_message, msg_id)
             except GmailAPIError as exc:
                 if exc.status_code == 404:
                     log.debug(
@@ -1989,7 +2026,7 @@ async def _sync_inbox(
         recovered_threads = await _recover_recent_missing_messages(
             db,
             inbox_id=inbox.id,
-            access_token=access_token,
+            account=account,
             window_hours=INITIAL_SYNC_WINDOW_DAYS * 24,
             max_messages=INITIAL_SYNC_MAX_MESSAGES,
         )
@@ -1998,7 +2035,7 @@ async def _sync_inbox(
         recovered_threads = await _recover_recent_missing_messages(
             db,
             inbox_id=inbox.id,
-            access_token=access_token,
+            account=account,
         )
         touched_threads.update(recovered_threads)
 
@@ -2013,9 +2050,10 @@ async def _sync_inbox(
     )
     if renew_watch:
         try:
-            watch_history_id, watch_expiration = await asyncio.to_thread(
+            watch_history_id, watch_expiration = await _gmail_call_with_refresh(
+                db,
+                account,
                 _gmail_register_watch,
-                access_token,
                 topic,
             )
             if watch_history_id:
@@ -2052,16 +2090,17 @@ async def _backfill_older_window(
         return touched_threads, {"messages_synced": 0, "range_start": None, "range_end": None}
 
     state = await _get_or_create_sync_state(db, inbox.id)
-    access_token = await _ensure_access_token(db, account)
+    await _ensure_access_token(db, account)
 
     end_dt = _epoch_ms_to_dt(state.oldest_internal_date) if state.oldest_internal_date else time_provider.utcnow()
     if end_dt is None:
         end_dt = time_provider.utcnow()
     start_dt = end_dt - timedelta(days=max(1, int(window_days)))
 
-    message_ids = await asyncio.to_thread(
+    message_ids = await _gmail_call_with_refresh(
+        db,
+        account,
         _gmail_list_message_ids_in_window,
-        access_token,
         start_dt=start_dt,
         end_dt=end_dt,
         max_messages=BACKFILL_SYNC_MAX_MESSAGES,
@@ -2071,7 +2110,7 @@ async def _backfill_older_window(
     total_messages = len(message_ids)
     for idx, msg_id in enumerate(message_ids, start=1):
         try:
-            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+            payload = await _gmail_call_with_refresh(db, account, _gmail_get_message, msg_id)
         except GmailAPIError as exc:
             if exc.status_code == 404:
                 log.debug(
@@ -2124,15 +2163,16 @@ async def _recover_recent_missing_messages(
     db: AsyncSession,
     *,
     inbox_id: int,
-    access_token: str,
+    account: GmailAccount,
     window_hours: int = RECENT_RECOVERY_WINDOW_HOURS,
     max_messages: int | None = RECENT_RECOVERY_MAX_MESSAGES,
 ) -> set[tuple[int, str]]:
     end_dt = time_provider.utcnow()
     start_dt = end_dt - timedelta(hours=max(1, int(window_hours)))
-    recent_ids = await asyncio.to_thread(
+    recent_ids = await _gmail_call_with_refresh(
+        db,
+        account,
         _gmail_list_message_ids_in_window,
-        access_token,
         start_dt=start_dt,
         end_dt=end_dt,
         max_messages=max_messages,
@@ -2154,7 +2194,7 @@ async def _recover_recent_missing_messages(
     touched_threads: set[tuple[int, str]] = set()
     for msg_id in missing_ids:
         try:
-            payload = await asyncio.to_thread(_gmail_get_message, access_token, msg_id)
+            payload = await _gmail_call_with_refresh(db, account, _gmail_get_message, msg_id)
         except GmailAPIError as exc:
             if exc.status_code == 404:
                 log.debug(
@@ -2496,6 +2536,40 @@ async def _ensure_o365_access_token(db: AsyncSession, account: Office365Account)
     return account.access_token
 
 
+async def _refresh_o365_token(db: AsyncSession, account: Office365Account) -> bool:
+    client_id, client_secret, tenant_id = await get_office365_oauth_credentials(db)
+    refreshed = refresh_office365_token(account, client_id, client_secret, tenant_id)
+    if refreshed:
+        await db.flush()
+    return bool(refreshed)
+
+
+async def _o365_call_with_refresh(
+    db: AsyncSession,
+    account: Office365Account,
+    func,
+    *args,
+    **kwargs,
+):
+    """Call an Office 365 Graph helper, refreshing once on auth errors."""
+    try:
+        return await asyncio.to_thread(func, account.access_token, *args, **kwargs)
+    except GmailAPIError as exc:
+        if exc.status_code in (401, 403):
+            refreshed = await _refresh_o365_token(db, account)
+            if refreshed:
+                return await asyncio.to_thread(func, account.access_token, *args, **kwargs)
+            try:
+                await maybe_fire_email_event(
+                    db,
+                    "token_expired",
+                    {"inbox_id": account.inbox_id, "at": time_provider.utcnow().isoformat()},
+                )
+            except Exception:
+                log.exception("failed firing token_expired webhook after O365 auth failure")
+        raise
+
+
 async def _get_or_create_o365_sync_state(db: AsyncSession, inbox_id: int) -> Office365SyncState:
     res = await db.execute(select(Office365SyncState).where(Office365SyncState.inbox_id == inbox_id))
     state = res.scalar_one_or_none()
@@ -2652,7 +2726,7 @@ async def _sync_inbox_office365(
         return touched_threads
 
     state = await _get_or_create_o365_sync_state(db, inbox.id)
-    access_token = await _ensure_o365_access_token(db, account)
+    await _ensure_o365_access_token(db, account)
 
     sync_end = time_provider.utcnow()
     sync_start = sync_end - timedelta(days=O365_SYNC_WINDOW_DAYS)
@@ -2674,9 +2748,10 @@ async def _sync_inbox_office365(
 
         if stored_delta:
             try:
-                msgs, new_delta = await asyncio.to_thread(
+                msgs, new_delta = await _o365_call_with_refresh(
+                    db,
+                    account,
                     _graph_list_messages,
-                    access_token,
                     delta_link=stored_delta,
                 )
             except GmailAPIError as exc:
@@ -2698,9 +2773,10 @@ async def _sync_inbox_office365(
                 return folder_messages
 
         # Full scan for this folder
-        msgs, new_delta = await asyncio.to_thread(
+        msgs, new_delta = await _o365_call_with_refresh(
+            db,
+            account,
             _graph_list_messages,
-            access_token,
             folder=folder,
             filter_str=date_filter,
             use_delta_endpoint=True,

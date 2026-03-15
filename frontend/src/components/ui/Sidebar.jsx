@@ -10,9 +10,11 @@ import {
   RiSettingsLine,
   RiSidebarFoldLine,
   RiInformationLine,
+  RiHeartPulseLine,
 } from 'react-icons/ri';
 import { useUniboxNotifications } from '../../context/UniboxNotificationsContext';
 import { useOnboarding } from '../../context/OnboardingContext';
+import { useSystemHealth } from '../../context/SystemHealthContext';
 
 // links including icons
 const links = [
@@ -92,8 +94,16 @@ export default function Sidebar({ collapsed, onToggle }) {
   const location = useLocation();
   const { count: unreadCount } = useUniboxNotifications();
   const { startOnboarding } = useOnboarding();
+  const { overallStatus } = useSystemHealth();
   const [helpOpen, setHelpOpen] = useState(false);
   const helpRef = useRef(null);
+
+  const healthDotColor = {
+    error:   'bg-red-500',
+    warning: 'bg-yellow-400',
+    ok:      'bg-green-500',
+    unknown: 'bg-gray-400',
+  }[overallStatus] || 'bg-gray-400';
 
   useEffect(() => {
     function handleClickOutside(e) {
@@ -163,6 +173,31 @@ export default function Sidebar({ collapsed, onToggle }) {
 
       {/* Help item + collapse at bottom */}
       <div className="mt-auto flex flex-col gap-2">
+
+        {/* System Health */}
+        <div className="relative group">
+          <NavLink
+            to="/system-health"
+            className={({ isActive }) =>
+              `flex items-center py-2 rounded px-2 transition-colors transition-transform transform-gpu active:scale-95 hover:scale-102 duration-150 whitespace-nowrap !no-underline !hover:no-underline ${
+                isActive ? 'text-primary font-semibold bg-gray-700' : 'hover:bg-gray-700/50'
+              }`
+            }
+          >
+            <span className="flex-shrink-0 relative inline-flex">
+              <RiHeartPulseLine size={20} />
+              <span
+                className={`absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-gray-800 ${healthDotColor}`}
+              />
+            </span>
+            {!collapsed && <span className="ml-2">System Health</span>}
+          </NavLink>
+          {collapsed && (
+            <span className="absolute left-full top-1/2 transform -translate-y-1/2 ml-2 opacity-0 group-hover:opacity-100 transition-opacity bg-gray-700 text-white text-xs rounded px-2 py-1 whitespace-nowrap z-10 pointer-events-none shadow-md">
+              System Health
+            </span>
+          )}
+        </div>
 
         {/* Help — styled like nav links, popover opens to the right */}
         <div className="relative group" ref={helpRef}>

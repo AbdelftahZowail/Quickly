@@ -363,8 +363,16 @@ export default function Settings() {
         api_key: f.api_key,
       });
       setAiVerifyResult(prev => ({ ...prev, [featureId]: res }));
-      if (res.ok) notify({ type: 'success', message: 'Credentials verified ✓' });
-      else notify({ type: 'error', message: `Verification failed: ${res.error}` });
+      if (res.ok) {
+        // Mark as tested locally so the UI reflects the new state immediately
+        setAiFeatures(prev => ({
+          ...prev,
+          [featureId]: { ...prev[featureId], connection_tested: true, last_error: '' },
+        }));
+        notify({ type: 'success', message: 'Credentials verified ✓' });
+      } else {
+        notify({ type: 'error', message: `Verification failed: ${res.error}` });
+      }
     } catch (e) {
       setAiVerifyResult(prev => ({ ...prev, [featureId]: { ok: false, error: e.message } }));
       notify({ type: 'error', message: e.message });
@@ -816,7 +824,7 @@ export default function Settings() {
 
             {/* ── Expanded body ── */}
             <div className={`grid transition-[grid-template-rows] duration-200 ease-in-out ${notifOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-              <div className="min-h-0 overflow-hidden">
+              <div className={`min-h-0 ${notifOpen ? 'overflow-visible' : 'overflow-hidden'}`}>
                 <div className="mt-4 space-y-4 border-t pt-4">
                   {/* Notification email */}
                   <div>
@@ -932,6 +940,10 @@ export default function Settings() {
                       className="rounded"
                       onChange={e => {
                         const next = e.target.checked;
+                        if (next && !feature.connection_tested) {
+                          notify({ type: 'error', message: 'Test the connection successfully before enabling this feature.' });
+                          return;
+                        }
                         // update state without marking dirty — enabled auto-saves immediately
                         setAiFeatures(prev => ({ ...prev, [fid]: { ...prev[fid], enabled: next } }));
                         saveAiFeature(fid, { enabled: next });
@@ -945,7 +957,7 @@ export default function Settings() {
 
                 {/* ── Expanded body ── */}
                 <div className={`grid transition-[grid-template-rows] duration-200 ease-in-out ${isOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-                  <div className="min-h-0 overflow-hidden">
+                  <div className={`min-h-0 ${isOpen ? 'overflow-visible' : 'overflow-hidden'}`}>
                     <div className="mt-4 space-y-4 border-t pt-4">
                     <p className="text-xs text-gray-500">{feature.description}</p>
 
@@ -973,7 +985,7 @@ export default function Settings() {
                                 className={`block w-full text-left px-3 py-1.5 text-sm hover:bg-teal-50 dark:hover:bg-gray-800 ${p.value === feature.provider ? 'bg-teal-50 dark:bg-gray-800 font-medium' : ''}`}
                                 onMouseDown={e => {
                                   e.preventDefault();
-                                  setFeature({ provider: p.value, model: '' });
+                                  setFeature({ provider: p.value, model: '', connection_tested: false });
                                   setProvSearch(null);
                                   setModSearch('');
                                 }}
@@ -997,7 +1009,7 @@ export default function Settings() {
                         placeholder={feature.api_key_set ? `Saved key: ${feature.api_key_masked}` : 'Enter your API key'}
                         className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
                         value={feature.api_key || ''}
-                        onChange={e => setFeature({ api_key: e.target.value })}
+                        onChange={e => setFeature({ api_key: e.target.value, connection_tested: false })}
                       />
                       {feature.provider && (feature.api_key || feature.api_key_set) && (
                         <p className="text-[10px] mt-1 text-teal-600">
@@ -1025,7 +1037,7 @@ export default function Settings() {
                           value={modSearch !== '' ? modSearch : (feature.model || '')}
                           onChange={e => {
                             setModSearch(e.target.value);
-                            setFeature({ model: e.target.value });
+                            setFeature({ model: e.target.value, connection_tested: false });
                           }}
                           onFocus={() => setModSearch(feature.model || '')}
                           onBlur={() => setTimeout(() => setModSearch(''), 200)}
@@ -1039,7 +1051,7 @@ export default function Settings() {
                                 className={`block w-full text-left px-3 py-1.5 text-sm hover:bg-teal-50 dark:hover:bg-gray-800 ${m.id === feature.model ? 'bg-teal-50 dark:bg-gray-800 font-medium' : ''}`}
                                 onMouseDown={e => {
                                   e.preventDefault();
-                                  setFeature({ model: m.id });
+                                  setFeature({ model: m.id, connection_tested: false });
                                   setModSearch('');
                                 }}
                               >
@@ -1069,14 +1081,23 @@ export default function Settings() {
                       ) : null;
                     })()}
                     <div className="flex items-center gap-3 flex-wrap">
-                      <Button size="sm" variant="outline" onClick={() => verifyAiFeature(fid)} disabled={verifying}>
-                        {verifying ? 'Verifying…' : 'Verify'}
+                      <Button
+                        size="sm"
+                        variant={feature.connection_tested ? 'success' : 'outline'}
+                        className={feature.connection_tested ? 'bg-green-600 text-white border-green-600 hover:bg-green-700' : ''}
+                        onClick={() => verifyAiFeature(fid)}
+                        disabled={verifying}
+                      >
+                        {verifying ? 'Testing…' : feature.connection_tested ? '✓ Connection Tested' : 'Test Connection'}
                       </Button>
                       <Button size="sm" onClick={() => saveAiFeature(fid)}>Save</Button>
-                      {verifyResult && (
-                        <span className={`text-sm font-medium ${verifyResult.ok ? 'text-green-600' : 'text-red-500'}`}>
-                          {verifyResult.ok ? '✓ Credentials valid' : `✗ ${verifyResult.error}`}
+                      {verifyResult && !verifyResult.ok && (
+                        <span className="text-sm font-medium text-red-500">
+                          ✗ {verifyResult.error}
                         </span>
+                      )}
+                      {!feature.connection_tested && (
+                        <span className="text-xs text-amber-600">Test connection before enabling</span>
                       )}
                     </div>
                     </div>

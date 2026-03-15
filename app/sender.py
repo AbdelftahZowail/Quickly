@@ -390,6 +390,7 @@ def _send_via_gmail(
     list_unsubscribe_url: Optional[str] = None,
     google_client_id: str = "",
     google_client_secret: str = "",
+    retry_on_auth_fail: bool = True,
 ) -> Optional[SendResult]:
     """
     Send one email via Gmail API using an OAuth access token or ``GmailAccount``
@@ -407,14 +408,6 @@ def _send_via_gmail(
     """
     # prefer the token on the account if one is supplied
     if gmail_account:
-        # make sure the access token is fresh; refresh proactively 5 min before expiry
-        if gmail_account.token_expiry and gmail_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-            _cid = google_client_id or settings.google_client_id
-            _csec = google_client_secret or settings.google_client_secret
-            refreshed = refresh_access_token(gmail_account, _cid, _csec)
-            if not refreshed:
-                log.error("Gmail send: token refresh failed for %s", gmail_account.google_email)
-                return None
         access_token = gmail_account.access_token or ""
 
     if not access_token:
@@ -557,6 +550,28 @@ def _send_via_gmail(
                 message=f"Gmail rejected the message (400): {err_body[:300]}",
             )
         if status_code in (401, 403):
+            if retry_on_auth_fail and gmail_account and gmail_account.refresh_token:
+                _cid = google_client_id or settings.google_client_id
+                _csec = google_client_secret or settings.google_client_secret
+                refreshed = refresh_access_token(gmail_account, _cid, _csec)
+                if refreshed:
+                    return _send_via_gmail(
+                        to_email=to_email,
+                        subject=subject,
+                        body=body,
+                        from_email=from_email,
+                        from_name=from_name,
+                        reply_to_msg_id=reply_to_msg_id,
+                        references=references,
+                        is_html=is_html,
+                        access_token=gmail_account.access_token or "",
+                        gmail_account=gmail_account,
+                        thread_id=thread_id,
+                        list_unsubscribe_url=list_unsubscribe_url,
+                        google_client_id=google_client_id,
+                        google_client_secret=google_client_secret,
+                        retry_on_auth_fail=False,
+                    )
             # Auth / permission: token expired or account suspended.
             err_type = "auth_failed" if status_code == 401 else "permission_denied"
             return SendFailure(
@@ -738,6 +753,7 @@ def _send_via_office365(
     office365_client_secret: str = "",
     office365_tenant_id: str = "",
     reply_graph_message_id: Optional[str] = None,
+    retry_on_auth_fail: bool = True,
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via Microsoft Graph API using raw MIME format.
 
@@ -749,16 +765,6 @@ def _send_via_office365(
     if not office365_account:
         log.error("Office 365 send: no account provided for %s", from_email)
         return SendFailure(error_type="auth_failed", message="No Office 365 account")
-
-    # Refresh token if within 5 min of expiry
-    if office365_account.token_expiry and office365_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-        _cid = office365_client_id or settings.office365_client_id
-        _csec = office365_client_secret or settings.office365_client_secret
-        _tid = office365_tenant_id or settings.office365_tenant_id
-        refreshed = refresh_office365_token(office365_account, _cid, _csec, _tid)
-        if not refreshed:
-            log.error("Office 365 send: token refresh failed for %s", office365_account.microsoft_email)
-            return None
 
     access_token = office365_account.access_token
     if not access_token:
@@ -914,6 +920,30 @@ def _send_via_office365(
                 message=f"Microsoft rejected the message (400): {err_body[:300]}",
             )
         if status_code in (401, 403):
+            if retry_on_auth_fail and office365_account.refresh_token:
+                _cid = office365_client_id or settings.office365_client_id
+                _csec = office365_client_secret or settings.office365_client_secret
+                _tid = office365_tenant_id or settings.office365_tenant_id
+                refreshed = refresh_office365_token(office365_account, _cid, _csec, _tid)
+                if refreshed:
+                    return _send_via_office365(
+                        to_email=to_email,
+                        subject=subject,
+                        body=body,
+                        from_email=from_email,
+                        from_name=from_name,
+                        reply_to_msg_id=reply_to_msg_id,
+                        references=references,
+                        is_html=is_html,
+                        office365_account=office365_account,
+                        conversation_id=conversation_id,
+                        list_unsubscribe_url=list_unsubscribe_url,
+                        office365_client_id=office365_client_id,
+                        office365_client_secret=office365_client_secret,
+                        office365_tenant_id=office365_tenant_id,
+                        reply_graph_message_id=reply_graph_message_id,
+                        retry_on_auth_fail=False,
+                    )
             err_type = "auth_failed" if status_code == 401 else "permission_denied"
             return SendFailure(
                 error_type=err_type,

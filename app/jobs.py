@@ -34,8 +34,6 @@ from app.models import (
 )
 from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
-from app.routers.gmail_oauth import refresh_access_token
-from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
@@ -194,18 +192,7 @@ async def run_send_job():
                 )
                 o365_account = o365_res.scalar_one_or_none()
                 if o365_account:
-                    if o365_account.token_expiry and o365_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-                        refreshed = refresh_office365_token(o365_account, o365_client_id, o365_client_secret, o365_tenant_id)
-                        if refreshed:
-                            await session.flush()
-                        else:
-                            log.error("Office 365 token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
-                            await fire_webhook_event(
-                                session,
-                                "token_expired",
-                                {"inbox_id": inbox.id, "inbox_email": inbox.email},
-                            )
-                            continue
+                    pass
                 else:
                     log.warning("Office 365 inbox %s (%s) has no Office365Account — skipping", inbox.id, inbox.email)
                     continue
@@ -216,18 +203,6 @@ async def run_send_job():
                 )
                 ga = ga_result.scalar_one_or_none()
                 if ga:
-                    if ga.token_expiry and ga.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-                        refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
-                        if refreshed:
-                            await session.flush()
-                        else:
-                            log.error("Gmail token refresh failed for inbox %s (%s)", inbox.id, inbox.email)
-                            await fire_webhook_event(
-                                session,
-                                "token_expired",
-                                {"inbox_id": inbox.id, "inbox_email": inbox.email},
-                            )
-                            continue
                     gmail_token = ga.access_token
                 else:
                     if settings.test_mode:
@@ -1027,23 +1002,7 @@ async def send_slot_job(slot_id: int) -> None:
             )
             o365_account = o365_res.scalar_one_or_none()
             if o365_account:
-                if o365_account.token_expiry and o365_account.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-                    refreshed = refresh_office365_token(
-                        o365_account, o365_client_id, o365_client_secret, o365_tenant_id
-                    )
-                    if refreshed:
-                        await session.flush()
-                    else:
-                        log.error(
-                            "send_slot_job: O365 token refresh failed for inbox %s (%s)",
-                            inbox.id, inbox.email,
-                        )
-                        await fire_webhook_event(
-                            session, "token_expired",
-                            {"inbox_id": inbox.id, "inbox_email": inbox.email},
-                        )
-                        await session.commit()
-                        return
+                pass
             else:
                 log.warning(
                     "send_slot_job: O365 inbox %s has no Office365Account – skipping slot %d",
@@ -1056,21 +1015,6 @@ async def send_slot_job(slot_id: int) -> None:
             )
             ga = ga_result.scalar_one_or_none()
             if ga:
-                if ga.token_expiry and ga.token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
-                    refreshed = refresh_access_token(ga, g_client_id, g_client_secret)
-                    if refreshed:
-                        await session.flush()
-                    else:
-                        log.error(
-                            "send_slot_job: Gmail token refresh failed for inbox %s (%s)",
-                            inbox.id, inbox.email,
-                        )
-                        await fire_webhook_event(
-                            session, "token_expired",
-                            {"inbox_id": inbox.id, "inbox_email": inbox.email},
-                        )
-                        await session.commit()
-                        return
                 gmail_token = ga.access_token
             else:
                 if settings.test_mode:
