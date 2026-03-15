@@ -270,7 +270,7 @@ export default function Analytics() {
 
   return (
     <div className="p-8 space-y-6">
-      <h1 className="text-2xl font-semibold mb-4">Campaign Analytics</h1>
+      <h1 className="text-2xl font-semibold mb-4">Analytics</h1>
       {error && <div className="text-red-600">{error}</div>}
 
       {/* KPI cards */}

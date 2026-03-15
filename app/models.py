@@ -239,6 +239,12 @@ class SequenceVariant(Base):
 
 class CampaignLead(Base):
     __tablename__ = "campaign_lead"
+    __table_args__ = (
+        # Single: bulk analytics and recalculation scans by campaign
+        Index("ix_campaign_lead_campaign_id", "campaign_id"),
+        # Composite: inbox-persistence lookup and duplicate-enrollment check
+        Index("ix_campaign_lead_lead_campaign", "lead_id", "campaign_id"),
+    )
     id = Column(Integer, primary_key=True, index=True)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
@@ -260,6 +266,8 @@ class QueueSlot(Base):
         UniqueConstraint("campaign_lead_id", "sequence_index", name="uq_campaign_lead_sequence"),
         Index("ix_queue_slot_scheduled_date", "scheduled_date"),
         Index("ix_queue_slot_scheduled_date_pos", "scheduled_date", "position_in_day"),
+        # Composite: send job filters by (inbox_id, scheduled_date) on every tick
+        Index("ix_queue_slot_inbox_date", "inbox_id", "scheduled_date"),
     )
     id = Column(Integer, primary_key=True, index=True)
     campaign_lead_id = Column(Integer, ForeignKey("campaign_lead.id"), nullable=False)
@@ -275,6 +283,12 @@ class EmailLog(Base):
     __tablename__ = "email_log"
     __table_args__ = (
         Index("ix_email_log_sent_at", "sent_at"),
+        # Composite: send job queries last-sent-time and daily count per inbox
+        Index("ix_email_log_inbox_sent_at", "inbox_id", "sent_at"),
+        # Composite: follow-up thread-building and inbox-persistence checks
+        Index("ix_email_log_lead_campaign", "lead_id", "campaign_id"),
+        # Single: campaign-level aggregate queries (list_campaigns analytics)
+        Index("ix_email_log_campaign", "campaign_id"),
     )
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
@@ -343,6 +357,10 @@ class LeadUnsubscribeToken(Base):
 
 class LeadReply(Base):
     __tablename__ = "lead_reply"
+    __table_args__ = (
+        # Composite: stop_on_reply check runs inside the per-slot send loop
+        Index("ix_lead_reply_lead_campaign", "lead_id", "campaign_id"),
+    )
     id = Column(Integer, primary_key=True, index=True)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)

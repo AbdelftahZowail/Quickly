@@ -17,16 +17,19 @@ export default function EmailVerificationSettings() {
   const notify = useNotify();
 
   // ── core settings ──────────────────────────────────────────────────────────
-  const [expanded,     setExpanded]     = useState(false);
-  const [enabled,      setEnabled]      = useState(false);
-  const [provider,     setProvider]     = useState('mailtester_ninja');
-  const [apiKey,       setApiKey]       = useState('');
-  const [apiKeyMasked, setApiKeyMasked] = useState('');
-  const [providers,    setProviders]    = useState([]);
-  const [saving,       setSaving]       = useState(false);
-  const savedStateRef  = useRef(null); // snapshot of last-saved fields
-  const [testing,      setTesting]      = useState(false);
-  const [testResult,   setTestResult]   = useState(null);
+  const [expanded,          setExpanded]          = useState(false);
+  const [enabled,           setEnabled]           = useState(false);
+  const [provider,          setProvider]          = useState('mailtester_ninja');
+  const [apiKey,            setApiKey]            = useState('');
+  const [apiKeyMasked,      setApiKeyMasked]      = useState('');
+  const [providers,         setProviders]         = useState([]);
+  const [saving,            setSaving]            = useState(false);
+  const savedStateRef       = useRef(null); // snapshot of last-saved fields
+  const [testing,           setTesting]           = useState(false);
+  const [testResult,        setTestResult]        = useState(null);
+  // Tracks whether the current saved credentials have been successfully tested
+  const [connectionTested,  setConnectionTested]  = useState(false);
+  const [credsChanged,      setCredsChanged]      = useState(false); // unsaved cred change
 
   // ── custom provider ────────────────────────────────────────────────────────
   const [customUrl,          setCustomUrl]          = useState('');
@@ -63,6 +66,8 @@ export default function EmailVerificationSettings() {
       setCustomValidValues(cvv);
       setCustomInvalidValues(civ);
       setCustomMethod(cm);
+      setConnectionTested(data.connection_tested || false);
+      setCredsChanged(false);
       savedStateRef.current = { provider: p, customUrl: cu, customField: cf, customValidValues: cvv, customInvalidValues: civ, customMethod: cm };
     }).catch(() => {});
   }, []);
@@ -88,6 +93,12 @@ export default function EmailVerificationSettings() {
       setApiKeyMasked(res.api_key_masked || '');
       savedStateRef.current = { provider, customUrl, customField, customValidValues, customInvalidValues, customMethod };
       setCustomTestResults(null);
+      // Any credential change resets tested state on the backend; mirror that locally
+      if (credsChanged) {
+        setConnectionTested(false);
+        setTestResult(null);
+      }
+      setCredsChanged(false);
       notify({ type: 'success', message: 'Email verification settings saved' });
     } catch (e) {
       notify({ type: 'error', message: e.message });
@@ -104,6 +115,10 @@ export default function EmailVerificationSettings() {
       if (apiKey) body.api_key = apiKey;
       const res = await api.post('/settings/email-verification/test', body);
       setTestResult(res);
+      if (res.ok) {
+        setConnectionTested(true);
+        setCredsChanged(false);
+      }
     } catch (e) {
       setTestResult({ ok: false, error: e.message });
     } finally {
@@ -189,6 +204,10 @@ export default function EmailVerificationSettings() {
             className="rounded"
             onChange={async e => {
               const next = e.target.checked;
+              if (next && (!connectionTested || credsChanged)) {
+                notify({ type: 'error', message: 'Run "Test Connection" successfully before enabling email verification.' });
+                return;
+              }
               setEnabled(next);
               try {
                 await api.post('/settings/email-verification', {
@@ -231,6 +250,9 @@ export default function EmailVerificationSettings() {
                   setProvider(e.target.value);
                   setCustomTestResults(null);
                   setProbeResult(null);
+                  setConnectionTested(false);
+                  setCredsChanged(true);
+                  setTestResult(null);
                 }}
               >
                 {(providers.length > 0 ? providers : ['mailtester_ninja']).map(p => (
@@ -252,7 +274,14 @@ export default function EmailVerificationSettings() {
                   className="border rounded-lg px-3 py-2 text-sm w-full max-w-md dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-300"
                   placeholder={apiKeyMasked || 'Enter API key'}
                   value={apiKey}
-                  onChange={e => { setApiKey(e.target.value); }}
+                  onChange={e => {
+                    setApiKey(e.target.value);
+                    if (e.target.value) {
+                      setConnectionTested(false);
+                      setCredsChanged(true);
+                      setTestResult(null);
+                    }
+                  }}
                 />
                 {apiKeyMasked && !apiKey && (
                   <p className="text-xs text-gray-400 mt-1">Current key: {apiKeyMasked}</p>
@@ -475,9 +504,20 @@ export default function EmailVerificationSettings() {
                   {saving ? 'Saving…' : 'Save'}
                 </Button>
                 {provider !== 'custom' && (
-                  <Button size="sm" variant="outline" onClick={testApiKey} disabled={testing}>
-                    {testing ? 'Testing…' : 'Test connection'}
+                  <Button
+                    size="sm"
+                    className={(connectionTested && !credsChanged)
+                      ? 'bg-green-600 text-white border-green-600 hover:bg-green-700'
+                      : ''}
+                    variant={(connectionTested && !credsChanged) ? undefined : 'outline'}
+                    onClick={testApiKey}
+                    disabled={testing}
+                  >
+                    {testing ? 'Testing…' : (connectionTested && !credsChanged) ? '✓ Connection Tested' : 'Test Connection'}
                   </Button>
+                )}
+                {(!connectionTested || credsChanged) && (
+                  <span className="text-xs text-amber-600">Test connection before enabling</span>
                 )}
               </div>
             </div>

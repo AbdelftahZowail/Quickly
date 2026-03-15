@@ -22,7 +22,7 @@ from sqlalchemy import select, delete
 
 from app.database import get_db
 from app.models import EmailLog, EmailOpen, EmailClick, TrackedLink, Inbox, Lead, LeadUnsubscribeToken, CampaignLead, QueueSlot, KnownIP
-from app.tracking import PIXEL_GIF
+from app.tracking import PIXEL_GIF, is_domain_pending
 from app import time as time_provider
 from app.webhooks import fire_webhook_event
 
@@ -343,12 +343,19 @@ async def caddy_ask(
     except ValueError:
         pass  # not an IP — continue
 
-    # Approve only domains explicitly configured as a tracking domain on an inbox.
+    # Approve domains explicitly configured as a tracking domain on an inbox.
     result = await db.execute(
         select(Inbox).where(Inbox.tracking_domain == domain)
     )
     if result.scalar_one_or_none() is not None:
         log.info("caddy/ask: approved domain=%s (per-inbox tracking domain)", domain)
+        return Response(status_code=200)
+
+    # Also approve domains that are temporarily pending cert provisioning
+    # (user clicked "Check" before saving the inbox — allow Caddy to get a cert
+    # so the connection check can succeed; expires after 24 hours).
+    if is_domain_pending(domain):
+        log.info("caddy/ask: approved domain=%s (pending cert provisioning)", domain)
         return Response(status_code=200)
 
     # An unknown public-looking domain is worth a warning.

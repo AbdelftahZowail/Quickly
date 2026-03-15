@@ -111,7 +111,7 @@ async def fire_webhook_event(
             if wh.events and event_type not in wh.events:
                 continue
 
-            await _post_webhook(wh, event_type, data)
+            success = await _post_webhook(wh, event_type, data)
 
     # Email notifications (separate system, failures never propagate)
     try:

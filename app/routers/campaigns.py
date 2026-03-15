@@ -1684,6 +1684,22 @@ async def _run_background_verification(lead_ids: list[int]):
                     log.exception("Failed to verify lead %s (%s): %s", lead.id, lead.email, exc)
         except Exception as exc:
             log.exception("Background verification failed: %s", exc)
+            # Record failure for health monitoring and fire alert event
+            try:
+                from app.app_settings import put_setting
+                from app import time as _time
+                err_msg = f"{type(exc).__name__}: {exc}"[:500]
+                await put_setting(db, "email_verification_last_error", err_msg)
+                await put_setting(db, "email_verification_last_error_at", _time.utcnow().isoformat() + "Z")
+                from app.webhooks import fire_webhook_event
+                await fire_webhook_event(db, "feature.error", {
+                    "feature": "email_verification",
+                    "label": "Email Verification",
+                    "error": err_msg,
+                })
+                await db.commit()
+            except Exception:
+                pass
 
 
 @router.post("/{campaign_id}/leads/verify")

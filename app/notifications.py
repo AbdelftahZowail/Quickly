@@ -115,6 +115,16 @@ def format_notification_email(event_type: str, data: dict[str, Any]) -> tuple[st
             f"Campaign ID: {data.get('campaign_id', '—')}\n"
             f"Time: {ts}\n"
         )
+    elif event_type == "feature.error":
+        feature_label = data.get("label", data.get("feature", "Unknown Feature"))
+        error_msg = data.get("error", "Unknown error")
+        subject = f"Feature error — {feature_label}"
+        body = (
+            f"A system feature encountered an error during operation.\n\n"
+            f"Feature: {feature_label}\n"
+            f"Error: {error_msg}\n"
+            f"Time: {ts}\n"
+        )
     elif event_type == "daily_limit":
         subject = f"Daily limit hit — {data.get('inbox_email', 'an inbox')}"
         body = (

@@ -14,7 +14,9 @@ import {
   RiInformationLine,
   RiArrowRightSLine,
   RiArrowDownSLine,
+  RiHeartPulseLine,
 } from 'react-icons/ri';
+import { useSystemHealth } from '../context/SystemHealthContext';
 
 const links = [
   { to: '/', label: 'Home', icon: <RiHomeLine size={20} /> },
@@ -31,6 +33,14 @@ export default function Sidebar() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [tipsOpen, setTipsOpen] = useState(false);
   const helpRef = useRef(null);
+  const { overallStatus } = useSystemHealth();
+
+  const healthDotColor = {
+    error:   'bg-red-500',
+    warning: 'bg-yellow-400',
+    ok:      'bg-green-500',
+    unknown: 'bg-gray-400',
+  }[overallStatus] || 'bg-gray-400';
 
   useEffect(() => {
     function handleClickOutside(e) {
@@ -87,6 +97,27 @@ export default function Sidebar() {
 
       {/* help + toggle collapse control at bottom */}
       <div className="p-4 flex flex-col items-center gap-3">
+
+        {/* System Health indicator */}
+        <NavLink
+          to="/system-health"
+          title="System Health"
+          className={({ isActive }) =>
+            `flex items-center gap-2 text-gray-400 hover:text-teal-300 transition-colors ${
+              isActive ? 'text-teal-400' : ''
+            }`
+          }
+        >
+          <div className="relative flex-shrink-0">
+            <RiHeartPulseLine size={22} />
+            <span
+              className={`absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-gray-900 ${healthDotColor}`}
+            />
+          </div>
+          {!collapsed && (
+            <span className="text-xs font-medium whitespace-nowrap">System Health</span>
+          )}
+        </NavLink>
 
         {/* Help popover */}
         <div className="relative" ref={helpRef}>

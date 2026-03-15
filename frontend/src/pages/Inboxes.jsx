@@ -10,26 +10,86 @@ import { useNotify } from '../context/NotificationContext';
  * Lets the user choose between the app's default domain or a custom one,
  * and shows DNS setup instructions with the real CNAME target.
  */
-function TrackingDomainField({ value, onChange, cnameTarget }) {
+function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
   const isCustom = Boolean(value && value.trim());
   const [verifyState, setVerifyState] = useState(null); // null | 'checking' | 'ok' | {error}
+  const [verifyMsg, setVerifyMsg] = useState('');
+  // Ref used to abort an in-flight check when the domain changes mid-flight.
+  const abortRef = useRef(false);
 
   // Reset verification whenever the domain value changes
   const handleChange = (v) => {
+    abortRef.current = true; // signal any in-flight check to stop
     setVerifyState(null);
+    setVerifyMsg('');
+    onVerifyChange?.(false);
     onChange(v);
   };
 
   const verify = async () => {
     const domain = value.trim();
     if (!domain) return;
+
+    abortRef.current = false;
     setVerifyState('checking');
+    setVerifyMsg('Registering domain…');
+
+    // Step 1: tell the backend to whitelist this domain so Caddy can
+    // provision an SSL cert when it sees the first HTTPS connection.
     try {
-      const res = await fetch(`/api/settings/verify-tracking-domain?domain=${encodeURIComponent(domain)}`);
-      const data = await res.json();
-      setVerifyState(data.ok ? 'ok' : { error: data.error || 'Unknown error' });
-    } catch (e) {
-      setVerifyState({ error: e.message });
+      await fetch('/api/settings/register-tracking-domain-pending', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain }),
+      });
+    } catch (_) {
+      // Non-fatal — proceed to verify anyway.
+    }
+
+    if (abortRef.current) return;
+
+    // Step 2: poll the verify endpoint.  Caddy may need a few seconds to
+    // complete ACME cert provisioning so we retry up to 5 times.
+    const MAX_ATTEMPTS = 5;
+    const RETRY_DELAY_MS = 8000;
+    let lastError = 'Timed out waiting for SSL certificate to be provisioned';
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      if (abortRef.current) return;
+
+      if (attempt === 0) {
+        setVerifyMsg('Provisioning SSL certificate…');
+      } else {
+        setVerifyMsg(`Waiting for SSL certificate… (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
+      }
+
+      try {
+        const res = await fetch(
+          `/api/settings/verify-tracking-domain?domain=${encodeURIComponent(domain)}`
+        );
+        const data = await res.json();
+        if (abortRef.current) return;
+        if (data.ok) {
+          setVerifyState('ok');
+          setVerifyMsg('');
+          onVerifyChange?.(true);
+          return;
+        }
+        lastError = data.error || 'Unknown error';
+      } catch (e) {
+        if (abortRef.current) return;
+        lastError = e.message;
+      }
+
+      if (attempt < MAX_ATTEMPTS - 1) {
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      }
+    }
+
+    if (!abortRef.current) {
+      setVerifyState({ error: lastError });
+      setVerifyMsg('');
+      onVerifyChange?.(false);
     }
   };
 
@@ -77,10 +137,16 @@ function TrackingDomainField({ value, onChange, cnameTarget }) {
                 disabled={verifyState === 'checking'}
                 className="shrink-0 px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
               >
-                {verifyState === 'checking' ? 'Checking…' : 'Verify'}
+                {verifyState === 'checking' ? 'Verifying…' : 'Verify'}
               </button>
             )}
           </div>
+          {verifyState === 'checking' && verifyMsg && (
+            <p className="text-xs text-blue-600 flex items-center gap-1">
+              <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+              {verifyMsg}
+            </p>
+          )}
           {verifyState === 'ok' && (
             <p className="text-xs text-green-600 font-medium">✓ Domain is reachable and pointing to this server</p>
           )}
@@ -132,6 +198,11 @@ export default function Inboxes() {
   const [showEditWarning, setShowEditWarning] = useState(false);
   const [editWarningCloseSidebar, setEditWarningCloseSidebar] = useState(false);
   const [editMsg, setEditMsg] = useState(null);
+  // Tracks the saved tracking domain at the moment editing opened, so we only
+  // require re-verification when the user actually changes the domain.
+  const editOriginalDomain = useRef('');
+  const [editDomainVerified, setEditDomainVerified] = useState(false);
+  const [addDomainVerified, setAddDomainVerified] = useState(false);
   const [showAdd, setShowAdd] = useState(false); // controls add modal
   const confirm = useConfirm();
   const addBackdropDown = useRef(false);
@@ -225,13 +296,19 @@ export default function Inboxes() {
       window.location.href = '/oauth/office365/authorize?' + params;
       return;
     }
+    const addDomain = form.tracking_domain.trim();
+    if (addDomain && !addDomainVerified) {
+      setMessage({ type: 'error', text: 'Please verify the custom tracking domain before saving.' });
+      return;
+    }
     try {
       await api.post('/inboxes', {
         ...form,
-        tracking_domain: form.tracking_domain.trim() || null,
+        tracking_domain: addDomain || null,
       });
       setMessage({ type: 'success', text: 'Inbox added' });
       setForm(initialForm);
+      setAddDomainVerified(false);
       load();
       setShowAdd(false);
     } catch (e) {
@@ -243,6 +320,8 @@ export default function Inboxes() {
     setEditing({ ...inbox });
     setEditDirty(false);
     setEditMsg(null);
+    editOriginalDomain.current = inbox.tracking_domain || '';
+    setEditDomainVerified(false);
   };
   const closeEdit = () => {
     setEditing(null);
@@ -267,6 +346,12 @@ export default function Inboxes() {
   };
   const doSave = async () => {
     if (!editing) return;
+    const newDomain = (editing.tracking_domain || '').trim();
+    const domainChanged = newDomain !== editOriginalDomain.current;
+    if (newDomain && domainChanged && !editDomainVerified) {
+      setEditMsg({ type: 'error', text: 'Please verify the custom tracking domain before saving.' });
+      return;
+    }
     setEditDirty(false); // save in progress — don't treat as unsaved
     try {
       const body = {
@@ -275,7 +360,7 @@ export default function Inboxes() {
         max_emails_per_day: editing.max_emails_per_day,
         wait_minutes_between: editing.wait_minutes_between,
         max_jitter_seconds: editing.max_jitter_seconds ?? 180,
-        tracking_domain: (editing.tracking_domain || '').trim() || null,
+        tracking_domain: newDomain || null,
         ramp_up_enabled: editing.ramp_up_enabled,
         ramp_up_period_days: editing.ramp_up_period_days,
       };
@@ -526,6 +611,7 @@ export default function Inboxes() {
                       <TrackingDomainField
                         value={editing.tracking_domain || ''}
                         onChange={val => { setEditing(prev => ({ ...prev, tracking_domain: val })); setEditDirty(true); }}
+                        onVerifyChange={setEditDomainVerified}
                         cnameTarget={cnameTarget}
                       />
                       <div className="border rounded p-3 space-y-2 bg-gray-50">
@@ -734,7 +820,8 @@ export default function Inboxes() {
               {/* Tracking domain */}
               <TrackingDomainField
                 value={form.tracking_domain}
-                onChange={val => setForm(f => ({ ...f, tracking_domain: val }))}
+                onChange={val => { setForm(f => ({ ...f, tracking_domain: val })); setAddDomainVerified(false); }}
+                onVerifyChange={setAddDomainVerified}
                 cnameTarget={cnameTarget}
               />
               {/* Ramp-up / warm-up */}

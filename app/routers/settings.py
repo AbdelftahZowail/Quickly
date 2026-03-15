@@ -36,6 +36,7 @@ from app.models import EmailLog, EmailOpen, Webhook, WEBHOOK_EVENT_TYPES, KnownI
 from app.schemas import WebhookCreate, WebhookUpdate, WebhookResponse
 from app.webhooks import fire_webhook_event
 from app.ai_classifier import verify_ai_key, get_supported_providers, get_models_for_provider
+from app.tracking import register_pending_domain
 
 log = logging.getLogger("quickly.settings")
 
@@ -479,6 +480,45 @@ async def get_server_info():
 
 
 # ---------------------------------------------------------------------------
+# Register a domain as pending cert provisioning
+# ---------------------------------------------------------------------------
+
+class _RegisterPendingRequest(BaseModel):
+    domain: str
+
+@router.post("/register-tracking-domain-pending", include_in_schema=False)
+async def register_tracking_domain_pending(body: _RegisterPendingRequest):
+    """Temporarily whitelist *domain* so Caddy will provision a TLS cert.
+
+    Called by the frontend when the user clicks "Check" on a custom tracking
+    domain before the inbox is saved.  Without this, Caddy's on_demand_tls
+    ask endpoint rejects the domain and cert provisioning never starts.
+
+    The allowlist entry expires automatically after 24 hours.  Once the
+    inbox is saved with the domain, the permanent DB record takes over.
+    """
+    import ipaddress
+
+    domain = body.domain.strip()
+    for scheme in ("https://", "http://"):
+        if domain.startswith(scheme):
+            domain = domain[len(scheme):]
+    domain = domain.rstrip("/")
+
+    if not domain or "." not in domain:
+        raise HTTPException(status_code=400, detail="Invalid domain")
+    try:
+        ipaddress.ip_address(domain)
+        raise HTTPException(status_code=400, detail="IP addresses are not allowed")
+    except ValueError:
+        pass
+
+    register_pending_domain(domain)
+    log.info("register-tracking-domain-pending: registered domain=%s", domain)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
 # Verify a custom tracking domain is reachable and pointing here
 # ---------------------------------------------------------------------------
 
@@ -510,7 +550,7 @@ async def verify_tracking_domain(domain: str):
     for verify_ssl in (True, False):
         try:
             async with httpx.AsyncClient(
-                timeout=10,
+                timeout=30,
                 follow_redirects=True,
                 verify=verify_ssl,
             ) as client:
@@ -567,6 +607,9 @@ def _build_feature_response(feature_id: str, rows: dict[str, str]) -> dict:
         "model": rows.get(f"{prefix}model", ""),
         "api_key_set": bool(raw_key),
         "api_key_masked": _mask_secret(raw_key),
+        "connection_tested": rows.get(f"{prefix}connection_tested", "false").lower() in ("true", "1", "yes"),
+        "last_error": rows.get(f"{prefix}last_error", ""),
+        "last_error_at": rows.get(f"{prefix}last_error_at", ""),
     }
 
 
@@ -648,17 +691,53 @@ async def save_ai_feature_settings(
     payload: _AiFeaturePayload,
     db: AsyncSession = Depends(get_db),
 ):
-    """Save settings for a single AI feature."""
+    """Save settings for a single AI feature.
+
+    Enforces a test-before-enable policy: credentials must be verified via
+    the ``/verify`` endpoint before the feature can be enabled.  Saving new
+    credentials (provider / model / api_key) automatically resets the
+    ``connection_tested`` flag so the user must re-test.
+    """
     if feature_id not in _AI_FEATURES:
         raise HTTPException(404, f"Unknown AI feature: {feature_id}")
     from app.settings_manager import save_setting_to_db
+    from app.models import AppSetting
 
     prefix = f"ai_{feature_id}_"
+
+    # Load current stored values to detect credential changes
+    result = await db.execute(
+        select(AppSetting).where(AppSetting.key.like(f"{prefix}%"))
+    )
+    stored = {r.key[len(prefix):]: r.value for r in result.scalars().all()}
+
+    # Detect whether any credential field is changing
+    new_key = payload.api_key.strip()
+    creds_changed = (
+        bool(new_key)
+        or payload.provider.strip() != stored.get("provider", "")
+        or payload.model.strip() != stored.get("model", "")
+    )
+
+    currently_tested = stored.get("connection_tested", "false").lower() in ("true", "1", "yes")
+
+    # Block enabling without a successful connection test
+    if payload.enabled and (not currently_tested or creds_changed):
+        raise HTTPException(
+            400,
+            "Run \"Test Connection\" and verify credentials successfully before enabling this feature.",
+        )
+
     await save_setting_to_db(db, f"{prefix}enabled", str(payload.enabled).lower())
     await save_setting_to_db(db, f"{prefix}provider", payload.provider.strip())
     await save_setting_to_db(db, f"{prefix}model", payload.model.strip())
-    if payload.api_key.strip():
-        await save_setting_to_db(db, f"{prefix}api_key", payload.api_key.strip())
+    if new_key:
+        await save_setting_to_db(db, f"{prefix}api_key", new_key)
+
+    # Reset connection_tested whenever credentials change
+    if creds_changed:
+        await save_setting_to_db(db, f"{prefix}connection_tested", "false")
+
     await db.commit()
     return {"ok": True}
 
@@ -705,7 +784,18 @@ async def verify_ai_feature_settings(
     if missing:
         return {"ok": False, "error": f"Please provide: {', '.join(missing)}"}
 
-    return await verify_ai_key(provider=provider, model=model, api_key=api_key)
+    result = await verify_ai_key(provider=provider, model=model, api_key=api_key)
+
+    # On success, persist the connection_tested flag and clear any recorded errors
+    if result.get("ok"):
+        from app.settings_manager import save_setting_to_db
+        prefix = f"ai_{feature_id}_"
+        await save_setting_to_db(db, f"{prefix}connection_tested", "true")
+        await save_setting_to_db(db, f"{prefix}last_error", "")
+        await save_setting_to_db(db, f"{prefix}last_error_at", "")
+        await db.commit()
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -857,6 +947,9 @@ from app.app_settings import (
     EMAIL_VERIFICATION_CUSTOM_VALID_VALUES,
     EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES,
     EMAIL_VERIFICATION_CUSTOM_METHOD,
+    EMAIL_VERIFICATION_CONNECTION_TESTED,
+    EMAIL_VERIFICATION_LAST_ERROR,
+    EMAIL_VERIFICATION_LAST_ERROR_AT,
     get_setting,
     put_setting,
 )
@@ -886,6 +979,9 @@ async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
     custom_valid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
     custom_invalid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
     custom_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
+    connection_tested = (await get_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED) or "false").lower() in ("true", "1", "yes")
+    last_error = await get_setting(db, EMAIL_VERIFICATION_LAST_ERROR) or ""
+    last_error_at = await get_setting(db, EMAIL_VERIFICATION_LAST_ERROR_AT) or ""
     return {
         "enabled": enabled,
         "provider": provider,
@@ -897,6 +993,9 @@ async def get_email_verification_settings(db: AsyncSession = Depends(get_db)):
         "custom_valid_values": custom_valid,
         "custom_invalid_values": custom_invalid,
         "custom_method": custom_method,
+        "connection_tested": connection_tested,
+        "last_error": last_error,
+        "last_error_at": last_error_at,
     }
 
 
@@ -905,18 +1004,49 @@ async def save_email_verification_settings(
     payload: _EmailVerificationSettings,
     db: AsyncSession = Depends(get_db),
 ):
-    """Save email verification configuration."""
+    """Save email verification configuration.
+
+    Enforces a test-before-enable policy: the connection must be verified
+    (via ``/email-verification/test``) before the feature can be enabled.
+    Saving a new api_key or changing the provider resets the tested flag.
+    """
     import json
+
+    # Load current stored credentials to detect changes
+    stored_provider = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
+    stored_key_set = bool(await get_setting(db, EMAIL_VERIFICATION_API_KEY) or "")
+    stored_custom_url = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_URL) or ""
+    currently_tested = (await get_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED) or "false").lower() in ("true", "1", "yes")
+
+    new_key = payload.api_key.strip()
+    creds_changed = (
+        bool(new_key)
+        or (payload.provider.strip() or "mailtester_ninja") != stored_provider
+        or (payload.provider.strip() == "custom" and payload.custom_url.strip() != stored_custom_url)
+    )
+
+    # Block enabling without a successful connection test
+    if payload.enabled and (not currently_tested or creds_changed):
+        raise HTTPException(
+            400,
+            "Run \"Test Connection\" and verify credentials successfully before enabling email verification.",
+        )
+
     await put_setting(db, EMAIL_VERIFICATION_ENABLED, str(payload.enabled).lower())
     await put_setting(db, EMAIL_VERIFICATION_PROVIDER, payload.provider.strip() or "mailtester_ninja")
-    if payload.api_key.strip():
-        await put_setting(db, EMAIL_VERIFICATION_API_KEY, payload.api_key.strip())
+    if new_key:
+        await put_setting(db, EMAIL_VERIFICATION_API_KEY, new_key)
     # Custom provider settings
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_URL, payload.custom_url.strip())
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD, payload.custom_field_path.strip())
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES, json.dumps(payload.custom_valid_values))
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES, json.dumps(payload.custom_invalid_values))
     await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, payload.custom_method.strip().upper() or "GET")
+
+    # Reset connection_tested whenever credentials change
+    if creds_changed:
+        await put_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED, "false")
+
     await db.commit()
     raw_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
     return {"ok": True, "api_key_masked": _mask_secret(raw_key)}
@@ -926,15 +1056,25 @@ async def save_email_verification_settings(
 async def test_email_verification(
     db: AsyncSession = Depends(get_db),
 ):
-    """Test the configured email verification key by verifying a known address."""
+    """Test the configured email verification key by verifying a known address.
+
+    On success the ``connection_tested`` flag is persisted so the feature can
+    subsequently be enabled.
+    """
     api_key = await get_setting(db, EMAIL_VERIFICATION_API_KEY) or ""
     provider_name = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
     if not api_key:
         raise HTTPException(400, "No API key configured for email verification")
     from app.email_verification import verify_single
     result = await verify_single("test@gmail.com", api_key, provider_name)
+    success = result.status != "unknown"
+    if success:
+        await put_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED, "true")
+        await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR, "")
+        await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR_AT, "")
+        await db.commit()
     return {
-        "ok": result.status != "unknown",
+        "ok": success,
         "status": result.status,
         "message": result.message,
     }

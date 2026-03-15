@@ -36,6 +36,11 @@ EMAIL_VERIFICATION_CUSTOM_VALID_VALUES = "email_verification_custom_valid_values
 EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES = "email_verification_custom_invalid_values"  # JSON array
 EMAIL_VERIFICATION_CUSTOM_METHOD = "email_verification_custom_method"  # GET | POST
 
+# Connection test tracking (set to "true" after a successful Test Connection run)
+EMAIL_VERIFICATION_CONNECTION_TESTED = "email_verification_connection_tested"
+EMAIL_VERIFICATION_LAST_ERROR = "email_verification_last_error"
+EMAIL_VERIFICATION_LAST_ERROR_AT = "email_verification_last_error_at"
+
 
 # Generic helpers --------------------------------------------------------------
 

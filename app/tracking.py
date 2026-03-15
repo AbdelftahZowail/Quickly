@@ -8,6 +8,43 @@ from __future__ import annotations
 import base64
 import re
 import secrets
+from datetime import datetime, timedelta
+
+# ---------------------------------------------------------------------------
+# Pending tracking-domain allowlist
+# ---------------------------------------------------------------------------
+# When a user clicks "Check" on a custom tracking domain before it is saved
+# to an inbox, we temporarily whitelist the domain so that Caddy's
+# on_demand_tls ask endpoint approves it and can provision an SSL cert.
+# Each entry expires after 24 hours.
+_pending_domains: dict[str, datetime] = {}
+_PENDING_TTL = timedelta(hours=24)
+
+
+def register_pending_domain(domain: str) -> None:
+    """Add *domain* to the short-lived allowlist for Caddy cert provisioning.
+
+    Safe to call from any thread/coroutine — dict operations are GIL-protected.
+    Opportunistically removes expired entries on each call.
+    """
+    now = datetime.utcnow()
+    _pending_domains[domain] = now
+    # Lazy cleanup of expired entries to avoid unbounded growth.
+    cutoff = now - _PENDING_TTL
+    expired = [d for d, ts in list(_pending_domains.items()) if ts < cutoff]
+    for d in expired:
+        _pending_domains.pop(d, None)
+
+
+def is_domain_pending(domain: str) -> bool:
+    """Return True if *domain* is in the pending allowlist and not yet expired."""
+    ts = _pending_domains.get(domain)
+    if ts is None:
+        return False
+    if datetime.utcnow() - ts > _PENDING_TTL:
+        _pending_domains.pop(domain, None)
+        return False
+    return True
 
 # ── 1×1 transparent GIF ──────────────────────────────────────────────────────
 # Standard minimal GIF89a pixel used universally for email open tracking.

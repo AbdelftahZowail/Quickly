@@ -45,6 +45,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user
 from app.database import get_db
 from app.models import Inbox, Office365Account, Office365GraphSubscription
+from app.webhooks import maybe_fire_email_event
 
 log = logging.getLogger("quickly.office365_webhook")
 
@@ -64,11 +65,18 @@ RENEWAL_THRESHOLD_MINUTES = 60 * 24  # 24 hours
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+class GraphAPIError(RuntimeError):
+    def __init__(self, status_code: int, body: str):
+        super().__init__(f"Graph API error {status_code}: {body}")
+        self.status_code = status_code
+        self.body = body
+
+
 def _graph_request(method: str, url: str, access_token: str, body: dict | None = None) -> dict:
     """Execute a synchronous Microsoft Graph API request.
 
     Designed to be called inside ``asyncio.to_thread`` so the event loop
-    is not blocked.  Raises ``HTTPException(502)`` on API errors.
+    is not blocked.  Raises ``GraphAPIError`` on API errors.
     """
     data = json.dumps(body).encode() if body else None
     headers = {
@@ -84,14 +92,14 @@ def _graph_request(method: str, url: str, access_token: str, body: dict | None =
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode(errors="ignore")
         log.error("Graph API %s %s → %s: %s", method, url, exc.code, error_body)
-        raise HTTPException(status_code=502, detail=f"Microsoft Graph API error {exc.code}")
+        raise GraphAPIError(exc.code, error_body)
     except Exception as exc:
         log.error("Graph API %s %s unexpected error: %s", method, url, exc)
-        raise HTTPException(status_code=502, detail="Microsoft Graph API communication error")
+        raise GraphAPIError(0, str(exc))
 
 
-async def _fresh_token(db: AsyncSession, inbox_id: int) -> str:
-    """Return a fresh access token for an Office 365 inbox."""
+async def _fresh_token(db: AsyncSession, inbox_id: int) -> Office365Account:
+    """Return a fresh Office365Account (with access_token updated if needed)."""
     from app.unibox import _ensure_o365_access_token
 
     result = await db.execute(
@@ -100,7 +108,48 @@ async def _fresh_token(db: AsyncSession, inbox_id: int) -> str:
     account = result.scalar_one_or_none()
     if account is None:
         raise HTTPException(404, "Office 365 account not connected for this inbox")
-    return await _ensure_o365_access_token(db, account)
+    await _ensure_o365_access_token(db, account)
+    return account
+
+
+async def _force_refresh_token(db: AsyncSession, account: Office365Account) -> bool:
+    from app.routers.office365_oauth import refresh_access_token as _refresh_o365
+
+    refreshed = _refresh_o365(account)
+    if refreshed:
+        await db.flush()
+        return True
+    try:
+        await maybe_fire_email_event(
+            db,
+            "token_expired",
+            {"inbox_id": account.inbox_id, "at": datetime.utcnow().isoformat()},
+        )
+    except Exception:
+        log.exception("failed firing token_expired webhook after Graph auth failure")
+    return False
+
+
+async def _graph_request_with_refresh(
+    db: AsyncSession,
+    account: Office365Account,
+    method: str,
+    url: str,
+    body: dict | None = None,
+) -> dict:
+    try:
+        return await asyncio.to_thread(_graph_request, method, url, account.access_token, body)
+    except GraphAPIError as exc:
+        if exc.status_code in (401, 403):
+            refreshed = await _force_refresh_token(db, account)
+            if refreshed:
+                return await asyncio.to_thread(_graph_request, method, url, account.access_token, body)
+        detail = (
+            f"Microsoft Graph API error {exc.status_code}"
+            if exc.status_code
+            else "Microsoft Graph API communication error"
+        )
+        raise HTTPException(status_code=502, detail=detail)
 
 
 def _notification_url() -> str:
@@ -160,7 +209,7 @@ async def ensure_subscription(db: AsyncSession, inbox_id: int) -> dict:
     if inbox is None:
         raise HTTPException(404, "Office 365 inbox not found")
 
-    access_token = await _fresh_token(db, inbox_id)
+    account = await _fresh_token(db, inbox_id)
 
     sub_res = await db.execute(
         select(Office365GraphSubscription).where(Office365GraphSubscription.inbox_id == inbox_id)
@@ -173,11 +222,11 @@ async def ensure_subscription(db: AsyncSession, inbox_id: int) -> dict:
     if existing:
         # Attempt to renew via PATCH
         try:
-            await asyncio.to_thread(
-                _graph_request,
+            await _graph_request_with_refresh(
+                db,
+                account,
                 "PATCH",
                 f"{GRAPH_SUBSCRIPTIONS_URL}/{existing.subscription_id}",
-                access_token,
                 {"expirationDateTime": expiry_str},
             )
             existing.expiry = new_expiry
@@ -213,8 +262,12 @@ async def ensure_subscription(db: AsyncSession, inbox_id: int) -> dict:
         "clientState": client_state,
     }
 
-    result = await asyncio.to_thread(
-        _graph_request, "POST", GRAPH_SUBSCRIPTIONS_URL, access_token, payload
+    result = await _graph_request_with_refresh(
+        db,
+        account,
+        "POST",
+        GRAPH_SUBSCRIPTIONS_URL,
+        payload,
     )
     subscription_id = result.get("id", "")
     if not subscription_id:
@@ -263,12 +316,13 @@ async def delete_subscription(
         raise HTTPException(404, "No active Graph subscription found for this inbox")
 
     try:
-        access_token = await _fresh_token(db, inbox_id)
-        await asyncio.to_thread(
-            _graph_request,
+        account = await _fresh_token(db, inbox_id)
+        await _graph_request_with_refresh(
+            db,
+            account,
             "DELETE",
             f"{GRAPH_SUBSCRIPTIONS_URL}/{sub.subscription_id}",
-            access_token,
+            None,
         )
     except HTTPException:
         log.warning(
@@ -401,15 +455,15 @@ async def renew_expiring_subscriptions() -> None:
                     log.warning("Renewal: no Office365Account for inbox_id=%s", sub.inbox_id)
                     continue
 
-                access_token = await _ensure_o365_access_token(db, account)
+                await _ensure_o365_access_token(db, account)
                 new_expiry = datetime.utcnow() + timedelta(minutes=SUBSCRIPTION_LIFETIME_MINUTES)
                 expiry_str = new_expiry.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-                await asyncio.to_thread(
-                    _graph_request,
+                await _graph_request_with_refresh(
+                    db,
+                    account,
                     "PATCH",
                     f"{GRAPH_SUBSCRIPTIONS_URL}/{sub.subscription_id}",
-                    access_token,
                     {"expirationDateTime": expiry_str},
                 )
                 sub.expiry = new_expiry
