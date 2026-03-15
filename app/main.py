@@ -32,6 +32,7 @@ from app.routers import email_provider as email_provider_router
 from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
 from app.routers import system_health as system_health_router
+from app.routers import analytics as analytics_router
 from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
@@ -223,6 +224,7 @@ unibox_router.router.dependencies = _auth_deps
 # so it does NOT get global auth — individual endpoints handle auth internally.
 notifications_router.router.dependencies = _auth_deps
 system_health_router.router.dependencies = _auth_deps
+analytics_router.router.dependencies = _auth_deps
 
 app.include_router(inbox.router)
 app.include_router(leads.router)
@@ -239,6 +241,7 @@ app.include_router(unibox_router.router)
 app.include_router(tracking_router.router)
 app.include_router(notifications_router.router)
 app.include_router(system_health_router.router)
+app.include_router(analytics_router.router)
 
 # lightweight public utility for MX-based provider detection
 app.include_router(email_provider_router.router)

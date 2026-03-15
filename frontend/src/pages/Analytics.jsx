@@ -58,8 +58,7 @@ export default function Analytics() {
   const [currentChoice, setCurrentChoice] = useState('');
   const [selectedIds, setSelectedIds] = useState([]);
   const [error, setError] = useState(null);
-  // schedule sent data and filters
-  const [allSent, setAllSent] = useState(() => apiCache.get('/schedule/sent') || []);
+  const [analyticsData, setAnalyticsData] = useState([]);
   const [serverToday, setServerToday] = useState(null);
 
   const [presets, setPresets] = useState(() => buildPresets(new Date()));
@@ -86,13 +85,11 @@ export default function Analytics() {
   useEffect(() => {
     (async () => {
       try {
-        const [camps, sent, offsetData] = await Promise.all([
+        const [camps, offsetData] = await Promise.all([
           api.get('/campaigns'),
-          api.get('/schedule/sent').catch(() => []),
           api.get('/settings/time-offset').catch(() => ({ time_offset_days: 0 })),
         ]);
         setCampaigns(camps);
-        setAllSent(sent);
         // compute server today using offset
         const off = parseInt(offsetData.time_offset_days || 0, 10);
         const t = new Date();
@@ -111,6 +108,16 @@ export default function Analytics() {
     })();
   }, []);
 
+  // Re-fetch analytics data whenever the date range or campaign selection changes
+  useEffect(() => {
+    if (!startDate || !endDate) return;
+    const params = new URLSearchParams({ start_date: startDate, end_date: endDate });
+    if (selectedIds.length) selectedIds.forEach(id => params.append('campaign_id', id));
+    api.get(`/analytics/daily?${params}`)
+      .then(data => setAnalyticsData(data))
+      .catch(() => setAnalyticsData([]));
+  }, [startDate, endDate, selectedIds]);
+
   const applyPreset = (preset) => {
     setActivePreset(preset.label);
     setStartDate(preset.start);
@@ -128,67 +135,36 @@ export default function Analytics() {
   const openRateAll = totalSentForRates>0 ? Math.round((totalOpened/totalSentForRates)*100) : 0;
   const clickRateAll = totalSentForRates>0 ? Math.round((totalClicked/totalSentForRates)*100) : 0;
 
-  // filtered sent events by campaign and date range
-  const filteredSent = useMemo(() => allSent.filter(e => {
-    if (selectedIds.length && !selectedIds.includes(String(e.campaign_id))) return false;
-    if (startDate && e.sent_date < startDate) return false;
-    if (endDate && e.sent_date > endDate) return false;
-    return true;
-  }), [allSent, selectedIds, startDate, endDate]);
-  // per-campaign range stats aggregated from filteredSent
+  // per-campaign range stats from server-aggregated daily data
   const filteredStatsByCampaign = useMemo(() => {
     const map = {};
-    const seenLeads = {};
-    filteredSent.forEach(e => {
-      const cid = String(e.campaign_id);
-      if (!map[cid]) {
-        map[cid] = { sent: 0, replies: 0, totalOpens: 0, totalClicks: 0 };
-        seenLeads[cid] = new Set();
-      }
-      map[cid].sent += 1;
-      if (e.lead_id) seenLeads[cid].add(String(e.lead_id));
-      if (e.lead_status === 'replied') map[cid].replies += 1;
-      (e.opens || []).forEach(() => map[cid].totalOpens += 1);
-      (e.clicks || []).forEach(() => map[cid].totalClicks += 1);
+    analyticsData.forEach(row => {
+      const cid = String(row.campaign_id);
+      if (!map[cid]) map[cid] = { sent: 0, replies: 0, totalOpens: 0, totalClicks: 0, uniqueLeads: 0 };
+      map[cid].sent += row.sent;
+      map[cid].replies += row.total_replies;
+      map[cid].totalOpens += row.total_opens;
+      map[cid].totalClicks += row.total_clicks;
     });
-    Object.keys(map).forEach(cid => { map[cid].uniqueLeads = seenLeads[cid].size; });
     return map;
-  }, [filteredSent]);
-  // build daily data
+  }, [analyticsData]);
+  // aggregate server-side daily rows across campaigns for the chart
   const chartData = useMemo(() => {
     const dailyMap = {};
-    const seenOpen = {};
-    const seenClick = {};
-    filteredSent.forEach(e => {
-      const d = e.sent_date || (e.sent_at ? e.sent_at.slice(0,10) : '');
-      if (!d) return;
+    analyticsData.forEach(row => {
+      const d = row.date;
       if (!dailyMap[d]) {
         dailyMap[d] = { date: d, sent: 0, totalOpens: 0, uniqueOpens: 0, totalReplies: 0, totalClicks: 0, uniqueClicks: 0 };
-        seenOpen[d] = new Set();
-        seenClick[d] = new Set();
       }
-      dailyMap[d].sent += 1;
-      if (e.lead_status === 'replied') dailyMap[d].totalReplies += 1;
-      if (e.opens && e.opens.length) {
-        dailyMap[d].totalOpens += e.opens.length;
-        e.opens.forEach(o => {
-          if (o && o.ip) seenOpen[d].add(o.ip);
-        });
-      }
-      if (e.clicks && e.clicks.length) {
-        dailyMap[d].totalClicks += e.clicks.length;
-        e.clicks.forEach(c => {
-          if (c && c.ip) seenClick[d].add(c.ip);
-        });
-      }
-    });
-    // derive unique counts
-    Object.keys(dailyMap).forEach(d => {
-      dailyMap[d].uniqueOpens = seenOpen[d].size;
-      dailyMap[d].uniqueClicks = seenClick[d].size;
+      dailyMap[d].sent        += row.sent;
+      dailyMap[d].totalOpens  += row.total_opens;
+      dailyMap[d].uniqueOpens += row.unique_opens;
+      dailyMap[d].totalReplies+= row.total_replies;
+      dailyMap[d].totalClicks += row.total_clicks;
+      dailyMap[d].uniqueClicks+= row.unique_clicks;
     });
     return fillDateRange(dailyMap, startDate, endDate);
-  }, [filteredSent, startDate, endDate]);
+  }, [analyticsData, startDate, endDate]);
 
   // series metadata for chart and legend
   const seriesList = [
