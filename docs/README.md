@@ -1,18 +1,20 @@
 <p align="center">
+  <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" />
   <img src="https://img.shields.io/badge/Self--Hosted-100%25-teal" alt="Self-Hosted Cold Email Platform" />
-  <img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License - Free Forever" />
   <img src="https://img.shields.io/badge/Docker-One--Command_Deploy-2496ED?logo=docker&logoColor=white" alt="Docker Ready" />
+  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" />
 </p>
 
-<h1 align="center">Quickly — Self-Hosted Cold Email Software for Unlimited Outreach</h1>
+<h1 align="center">Quickly — Open-Source Cold Email Platform</h1>
 
 <p align="center"><strong>Own your cold email infrastructure. No SaaS fees. No per-seat pricing. No data leaving your server.</strong></p>
 
 <p align="center">
   <a href="#quick-start">Deploy in 5 minutes →</a> &nbsp;|&nbsp;
-  <a href="INSTALL.md">Full Install Guide</a> &nbsp;|&nbsp;
+  <a href="INSTALL.md">Installation Guide</a> &nbsp;|&nbsp;
   <a href="API.md">API Docs</a> &nbsp;|&nbsp;
-  <a href="WEBHOOKS.md">Webhooks</a>
+  <a href="WEBHOOKS.md">Webhooks</a> &nbsp;|&nbsp;
+  <a href="CONTRIBUTORS.md">Contributing</a>
 </p>
 
 ---
@@ -47,8 +49,8 @@ Build campaigns with unlimited follow-up steps. Set custom wait days between eac
 ### A/B Testing Built In
 Create multiple subject line or body variants per sequence step. Quickly randomly selects a variant at send time and tracks open rates, click rates, and reply rates per variant — so you always know what messaging wins.
 
-### Smart Inbox Rotation & Warm-Up
-Spread sends across as many inboxes as you want — **Gmail and Microsoft accounts are both supported**, including personal Outlook.com addresses and business Microsoft 365 / Office 365 accounts. Quickly's queue engine respects per-inbox daily limits, business-day schedules, configurable sending windows, and per-inbox cooldowns. New accounts? The **ramp-up warm-up** gradually increases daily send volume over a configurable period to protect deliverability.
+### Smart Inbox Rotation, Warm-Up & Jitter
+Spread sends across as many inboxes as you want — **Gmail and Microsoft accounts are both supported**, including personal Outlook.com addresses and business Microsoft 365 / Office 365 accounts. Quickly's queue engine respects per-inbox daily limits, business-day schedules, configurable sending windows, and per-inbox cooldowns. New accounts? The **ramp-up warm-up** gradually increases daily send volume over a configurable period to protect deliverability. **Random jitter** adds a configurable random delay (up to N seconds) to each scheduled send time so your outreach doesn't fire in perfectly uniform bursts — configurable per inbox.
 
 ### AI-Powered Reply Classification
 Every reply is automatically classified by AI into one of six categories: `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `unsubscribed`. Supports 19 AI providers including OpenAI, Anthropic Claude, Google Gemini, Mistral, Groq, and Ollama (for fully offline classification).
@@ -61,6 +63,15 @@ Built-in pixel tracking and link wrapping capture every open and click. Bring yo
 
 ### Full Analytics Dashboard
 See aggregated metrics, per-campaign breakdowns, per-step performance, timeline charts, open rates, click rates, reply rates, bounces, and unsubscribes — all in one view.
+
+### Lead Provider Matching
+Quickly detects each lead's email provider via DNS MX lookup (Google Workspace, Office 365, etc.) and can automatically route sends through matching inboxes. Google leads get Gmail senders; Microsoft leads get Office 365 senders. Toggle per campaign with zero configuration.
+
+### System Health Dashboard
+A dedicated **System Health** page gives you a live overview of every connected inbox's token status, OAuth scope coverage, tracking domain reachability, AI feature connectivity, and unibox sync mode — all in one place. No digging through logs.
+
+### Email Notifications
+Get notified by email when specific events occur (e.g. a lead replies as `interested`, a token expires, or a bounce happens). Configure per-user, per-event notification preferences with an hourly rate limit.
 
 ### Webhooks — React to Every Email Event
 Register any number of webhook endpoints and subscribe them to any combination of **15 real-time events**:
@@ -76,7 +87,10 @@ Verify lead addresses before sending via mailtester.ninja or any custom HTTP pro
 Drag campaigns to reorder send priority. Choose **priority-first** (exhaust the top campaign's slots first) or **round-robin** (spread sends evenly). Set a timezone per campaign so emails land during your recipients' business hours, not yours.
 
 ### CSV Import / Export, Full REST API & n8n Integration
-Bulk-import leads from CSV in seconds. Export any campaign's leads with full open/click/reply status at any time. Automate everything with 90+ REST API endpoints — every UI action has an API equivalent. For no-code automation, Quickly ships with a **custom n8n node** that exposes all API endpoints directly in your n8n workflows, making it trivial to wire Quickly into any automation pipeline without writing a line of code.
+Bulk-import leads from CSV in seconds. Export any campaign's leads with full open/click/reply status at any time. Automate everything with 90+ REST API endpoints secured by JWT auth and API keys — every UI action has an API equivalent. For no-code automation, Quickly ships with a **custom n8n node** that exposes all API endpoints directly in your n8n workflows, making it trivial to wire Quickly into any automation pipeline without writing a line of code.
+
+### Onboarding & Deliverability Tips
+A guided onboarding checklist walks new users through connecting inboxes, building their first campaign, and configuring tracking. A dedicated **Deliverability Tips** page covers DNS setup, warm-up best practices, and sending guidelines to maximize inbox placement.
 
 ---
 
@@ -94,11 +108,12 @@ Bulk-import leads from CSV in seconds. Export any campaign's leads with full ope
                    └──────────────┘
 ```
 
-1. **Connect inboxes** — Authorize Gmail accounts or Microsoft 365 / Outlook accounts with one OAuth click each.
-2. **Build sequences** — Write multi-step campaigns with subjects, bodies, and wait days.
-3. **Import leads** — Upload a CSV; the queue engine instantly reserves send slots across inboxes.
-4. **Emails go out automatically** — A background job runs every minute, respecting limits, windows, and cooldowns.
-5. **Track everything** — Opens, clicks, replies, AI classifications, and webhook events fire in real time.
+1. **Log in** — On first deploy, register your admin account directly from the login page.
+2. **Connect inboxes** — Authorize Gmail accounts or Microsoft 365 / Outlook accounts with one OAuth click each.
+3. **Build sequences** — Write multi-step campaigns with subjects, bodies, and wait days.
+4. **Import leads** — Upload a CSV; the queue engine instantly reserves send slots across inboxes.
+5. **Emails go out automatically** — A background scheduler runs every minute, respecting limits, windows, and cooldowns.
+6. **Track everything** — Opens, clicks, replies, AI classifications, and webhook events fire in real time.
 
 ---
 
@@ -129,7 +144,7 @@ docker compose up -d
 
 Quickly is optimized to run on any Docker-compatible platform: Railway, Render, Fly.io, a bare VPS, or your own machine. There's no mandatory infrastructure cost.
 
-> Need a step-by-step walkthrough? [INSTALL.md](INSTALL.md) covers Railway deployment, fresh VPS setup, existing Nginx setups, and local development.
+> Need a step-by-step walkthrough? [INSTALL.md](INSTALL.md) is an interactive guide — pick your deployment path (Railway, fresh VPS, nginx, or local dev) and it walks you through every step.
 
 ---
 
@@ -151,7 +166,10 @@ Yes. Quickly integrates with 19 AI providers (OpenAI, Anthropic, Gemini, Groq, M
 Yes. There are no seat limits. Deploy once, give your entire team access.
 
 **Is there an API? Can I use it with n8n?**
-Yes — 90+ REST endpoints covering every feature in the UI. Quickly also ships with a **custom n8n node** that wraps all API endpoints, so you can build automation workflows in n8n without writing any code. See [API.md](API.md) for the full reference.
+Yes — 90+ REST endpoints covering every feature in the UI, all secured via JWT auth. Quickly also ships with a **custom n8n node** that wraps all API endpoints, so you can build automation workflows in n8n without writing any code. See [API.md](API.md) for the full reference.
+
+**How does authentication work?**
+Quickly has a built-in user system. On first run, visit the login page and register your admin account. Log in with username/password, or with Google/Microsoft OAuth. For automation, generate API keys from the Settings page.
 
 **What happens when someone unsubscribes?**
 Quickly automatically catches unsubscribe replies via AI classification and marks those leads so they never receive another email.
@@ -160,6 +178,8 @@ Quickly automatically catches unsubscribe replies via AI classification and mark
 
 ## Environment Configuration
 
+The `.env` file is intentionally minimal. All runtime settings (test mode, time offset, AI provider keys, sending windows, warm-up schedules, tracking domains, etc.) are managed from the **Settings page** in the UI after deploy and stored in the database.
+
 | Variable | Required | Description |
 |---|---|---|
 | `CADDY_HOST` | For HTTPS | Your domain (e.g. `mail.yourdomain.com`) |
@@ -167,11 +187,11 @@ Quickly automatically catches unsubscribe replies via AI classification and mark
 | `DATABASE_URL` | Auto | Set by docker-compose; override for external Postgres |
 | `GOOGLE_CLIENT_ID` | For Gmail | Google OAuth 2.0 client ID |
 | `GOOGLE_CLIENT_SECRET` | For Gmail | Google OAuth 2.0 client secret |
-| `MICROSOFT_CLIENT_ID` | For Outlook/M365 | Microsoft Entra app client ID |
-| `MICROSOFT_CLIENT_SECRET` | For Outlook/M365 | Microsoft Entra app client secret |
-| `QUICKLY_MODE` | No | `production` (default in Docker) or `development` |
-
-All other settings — AI provider keys, sending windows, warm-up schedules, tracking domains — are managed from the **Settings page** in the UI after deploy.
+| `OFFICE365_CLIENT_ID` | For Office 365 | Microsoft Entra app (client) ID |
+| `OFFICE365_CLIENT_SECRET` | For Office 365 | Microsoft Entra app client secret |
+| `OFFICE365_TENANT_ID` | No | Directory (tenant) ID. Defaults to `common` (multi-tenant) |
+| `QUICKLY_SECRET_KEY` | Recommended | JWT signing secret. Auto-generated if not set (tokens reset on restart) |
+| `CORS_ORIGINS` | No | Comma-separated allowed origins for CORS (default: localhost dev setup) |
 
 ---
 
@@ -185,8 +205,9 @@ All other settings — AI provider keys, sending windows, warm-up schedules, tra
 | Email | Gmail API (OAuth2) · Microsoft Graph API (OAuth2) |
 | Reverse Proxy | Caddy (automatic HTTPS) |
 | Deployment | Docker, Docker Compose — Railway, Render, Fly.io, or any VPS |
-| Scheduling | APScheduler (in-process background jobs) |
-| Automation | Custom n8n node (all 90+ endpoints) |
+| Scheduling | APScheduler (in-process background jobs, PostgreSQL job store) |
+| Auth | JWT (HS256), bcrypt passwords, HMAC API keys, Fernet token encryption |
+| Automation | Custom n8n node (all endpoints) |
 
 ---
 
@@ -213,8 +234,9 @@ All other settings — AI provider keys, sending windows, warm-up schedules, tra
 
 | Document | What's inside |
 |---|---|
-| [INSTALL.md](INSTALL.md) | Railway deploy, VPS setup, Nginx config, local dev, OAuth guides (Google & Microsoft) |
-| [API.md](API.md) | Complete REST API reference — 90+ endpoints |
+| [INSTALL.md](INSTALL.md) | **Interactive installation guide** — choose Railway, fresh VPS, nginx, or local dev, then follow step-by-step through Gmail/Office 365 OAuth setup and first campaign |
+| [OFFICE365_SETUP.md](OFFICE365_SETUP.md) | Full Azure portal walkthrough for connecting Office 365 / Outlook inboxes |
+| [API.md](API.md) | Complete REST API reference — all endpoints including auth, system health, provider matching, notifications |
 | [WEBHOOKS.md](WEBHOOKS.md) | All 15 event types, payload schemas, auth setup |
 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | How to contribute, dev environment setup |
 
@@ -223,16 +245,24 @@ All other settings — AI provider keys, sending windows, warm-up schedules, tra
 ## API Examples
 
 ```bash
-# List all campaigns
-curl http://localhost:8000/api/campaigns
+# Authenticate and get a token
+curl -X POST http://localhost:8000/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "yourpassword"}'
+
+# List all campaigns (with Bearer token)
+curl http://localhost:8000/api/campaigns \
+  -H "Authorization: Bearer <access_token>"
 
 # Add leads to a campaign
 curl -X POST http://localhost:8000/api/campaigns/1/leads \
+  -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '[{"email": "alice@example.com", "name": "Alice"}]'
 
 # Check scheduler status
-curl http://localhost:8000/api/status
+curl http://localhost:8000/api/status \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---
@@ -263,7 +293,7 @@ If Quickly is saving you money or replacing a paid tool in your stack, **please 
 
 ## License
 
-MIT — free to use, modify, and self-host forever.
+[MIT](../LICENSE) — free to use, modify, and self-host forever.
 
 ---
 

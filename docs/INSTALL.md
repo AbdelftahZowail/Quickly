@@ -1,37 +1,125 @@
-# Installation Guide
+# Quickly — Installation Guide
 
-This guide covers every way to deploy Quickly, from a fresh VPS to integrating with an existing web server.
+> **How to use this guide:** Start at [Step 1](#step-1-choose-your-deployment-path) and follow the path that matches your situation. Every path leads back to the shared steps at the end.
 
 ---
 
 ## Table of Contents
 
-- [Option 1: Fresh VPS (Recommended)](#option-1-fresh-vps-recommended)
-- [Option 2: Existing Server with nginx](#option-2-existing-server-with-nginx)
-- [Option 3: Existing Server — Migrate nginx to Caddy](#option-3-existing-server--migrate-nginx-to-caddy)
-- [Option 4: Local Development](#option-4-local-development)
-- [Gmail OAuth Setup](#gmail-oauth-setup)
-- [Environment Variables](#environment-variables)
-- [Updating](#updating)
+- [Step 1: Choose Your Deployment Path](#step-1-choose-your-deployment-path)
+    - [Option A: Railway / PaaS (No server needed)](#option-a-railway--paas-no-server-needed)
+    - [Option B: Fresh VPS + Caddy (Recommended)](#option-b-fresh-vps--caddy-recommended)
+    - [Option C: Existing Server with nginx](#option-c-existing-server-with-nginx)
+    - [Option D: Local Development](#option-d-local-development)
+- [Step 2: First Login & User Setup](#step-2-first-login--user-setup)
+- [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
+- [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+- [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)
+- [Optional: AI Reply Classification](#optional-ai-reply-classification)
+- [Optional: Custom Tracking Domains](#optional-custom-tracking-domains)
+- [Updating Quickly](#updating-quickly)
+- [Environment Variables Reference](#environment-variables-reference)
 - [Troubleshooting](#troubleshooting)
 
 ---
 
-## Option 1: Fresh VPS (Recommended)
+## Step 1: Choose Your Deployment Path
 
-The simplest path. One command gets you a production instance with automatic HTTPS.
+|Path|Best for|Difficulty|
+|---|---|---|
+|[**A — Railway / PaaS**](#option-a-railway--paas-no-server-needed)|Fastest setup, no DevOps experience needed|⭐ Easiest|
+|[**B — Fresh VPS + Caddy**](#option-b-fresh-vps--caddy-recommended)|Full control, custom domain, production use|⭐⭐ Easy|
+|[**C — Existing server with nginx**](#option-c-existing-server-with-nginx)|You already have other sites on the same server|⭐⭐⭐ Medium|
+|[**D — Local development**](#option-d-local-development)|Contributing, testing, or hacking on the code|⭐⭐ Easy|
 
-### Prerequisites
+---
 
-- A Linux VPS (Ubuntu 22.04+ recommended) or any machine with Docker
-- [Docker Engine](https://docs.docker.com/engine/install/) + Docker Compose plugin
-- Ports **80** and **443** open
-- A domain name with an **A record** pointing to your server's IP
+## Option A: Railway / PaaS (No server needed)
+
+> **Best for:** Getting a running instance as fast as possible without managing any infrastructure. Railway has a free tier and provisions HTTPS automatically.
+
+### What you'll need
+
+- A [Railway](https://railway.com/) account (or Render, Fly.io, etc.)
+- Google OAuth credentials (if you want Gmail inboxes) — you'll set these up in [Step 3A](#step-3a-connect-gmail-inboxes)
+- Microsoft OAuth credentials (if you want Office 365 inboxes) — you'll set these up in [Step 3B](#step-3b-connect-office-365--outlook-inboxes)
+
+> **Note:** You need at least one of Google or Microsoft credentials for the app to be functional. You don't need both.
 
 ### Steps
 
+**1. Create a new project and deploy from Docker Hub.**
+
+In Railway: **New Project → Deploy a Docker image**
+
+- Image: `azowail/quickly:latest`
+
+**2. Add a PostgreSQL database.**
+
+In your Railway project, click **+ New → Database → Add PostgreSQL**.
+
+Railway automatically injects `DATABASE_URL` as an environment variable — Quickly picks this up with no extra configuration.
+
+**3. Set your environment variables.**
+
+In your Railway service, go to **Variables** and add:
+
+```env
+BASE_URL=https://<your-railway-domain>.up.railway.app
+```
+
+If you already have your Google credentials (see [Step 3A](#step-3a-connect-gmail-inboxes) for how to get them):
+
+```env
+GOOGLE_CLIENT_ID=<your-google-client-id>
+GOOGLE_CLIENT_SECRET=<your-google-client-secret>
+```
+
+If you already have your Microsoft credentials (see [Step 3B](#step-3b-connect-office-365--outlook-inboxes) for how to get them):
+
+```env
+OFFICE365_CLIENT_ID=<your-client-id>
+OFFICE365_CLIENT_SECRET=<your-client-secret>
+OFFICE365_TENANT_ID=common
+```
+
+**4. Deploy.**
+
+Railway deploys automatically when you save variables. The Docker image pull takes about 1–2 minutes.
+
+**5. Confirm your public URL.**
+
+In the Railway dashboard, go to **Settings → Domains** and copy the generated URL (e.g. `https://quickly-production.up.railway.app`). If this differs from the `BASE_URL` you set above, update `BASE_URL` to match exactly, then redeploy.
+
+---
+
+**→ Continue to [Step 2: First Login & User Setup](#step-2-first-login--user-setup)**
+
+---
+
+## Option B: Fresh VPS + Caddy (Recommended)
+
+> **Best for:** Full control with a custom domain. Caddy handles HTTPS automatically — no Certbot or manual certificate management required.
+
+### What you'll need
+
+- A Linux VPS running Ubuntu 22.04+ (or any Docker-capable Linux distro)
+- [Docker Engine](https://docs.docker.com/engine/install/) with the Docker Compose plugin
+    - Quick install: `curl -fsSL https://get.docker.com | sh`
+- Ports **80** and **443** open in your firewall (see [Firewall Setup](#firewall-setup) below)
+- A domain name with an **A record** pointing to your server's public IP
+
+### Steps
+
+**1. SSH into your server.**
+
 ```bash
-# 1. Create a directory and download the required files
+ssh user@your-server-ip
+```
+
+**2. Download the required files.**
+
+```bash
 mkdir quickly && cd quickly
 
 curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
@@ -40,142 +128,93 @@ curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.exampl
 mv .env.example .env
 ```
 
+**3. Edit your `.env` file.**
+
 ```bash
-# 2. Configure your environment
 nano .env
 ```
 
-Set these values in `.env`:
+Set these values at minimum:
 
 ```env
-# Your domain — Caddy auto-fetches a Let's Encrypt cert
+# Your domain — Caddy will automatically obtain a Let's Encrypt certificate for it
 CADDY_HOST=yourdomain.com
 
-# Used for OAuth redirects and email links
+# The full public URL — used for OAuth redirects and email links
 BASE_URL=https://yourdomain.com
 
-# Google OAuth (required only for Gmail inboxes)
-GOOGLE_CLIENT_ID=your-client-id
-GOOGLE_CLIENT_SECRET=your-client-secret
+# Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(64))"
+QUICKLY_SECRET_KEY=your-generated-secret
 ```
 
-> `DATABASE_URL` is already set by `docker-compose.yml` to use the bundled PostgreSQL container — you don't need to change it.
+For your inbox credentials, you can add them now or later via the Settings page:
 
-```bash
-# 3. Start everything
-docker compose up -d
+```env
+# Google credentials — see Step 3A for how to get these
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+
+# Microsoft credentials — see Step 3B for how to get these
+OFFICE365_CLIENT_ID=
+OFFICE365_CLIENT_SECRET=
+OFFICE365_TENANT_ID=common
 ```
 
-Caddy obtains a Let's Encrypt certificate automatically on first request. Visit `https://yourdomain.com` — Quickly is running.
+> `DATABASE_URL` is already pre-configured in `docker-compose.yml` to use the bundled PostgreSQL container. You don't need to change it.
 
-### Firewall
+**4. Open the required firewall ports.**
 
-Caddy needs ports 80 and 443 for the ACME HTTP-01 challenge:
+Caddy needs ports 80 and 443 for the Let's Encrypt domain challenge:
 
 ```bash
-# Ubuntu with ufw
+# Ubuntu/Debian with ufw
 sudo ufw allow 80/tcp
 sudo ufw allow 443/tcp
 sudo ufw reload
 ```
 
-For cloud providers (DigitalOcean, Hetzner, Vultr, AWS), open these ports in your security group / firewall dashboard.
+If you're on a cloud provider, also open these ports in your cloud dashboard:
 
----
+|Provider|Where to open ports|
+|---|---|
+|DigitalOcean|Networking → Firewalls|
+|Hetzner|Firewall settings for the server|
+|Vultr|Settings → Firewall|
+|AWS EC2|Security Groups → Inbound Rules|
+|Google Cloud|VPC Network → Firewall rules|
 
-## Option 2: Existing Server with nginx
-
-Use this if you already have nginx managing other sites and don't want to change your setup.
-
-> **Note:** Custom tracking domains require Caddy and won't work with this setup. Standard open/click tracking on your app's domain works fine.
-
-### Steps
-
-**1. Modify `docker-compose.yml`:**
-
-Remove the `caddy` service block and its volumes. Change the `app` service to expose port 8000 on localhost:
-
-```yaml
-services:
-  db:
-    image: postgres:15-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: quickly
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  app:
-    image: azowail/quickly:latest
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8000:8000"
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file: .env
-    environment:
-      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
-
-volumes:
-  pgdata:
-```
-
-**2. Add an nginx site configuration:**
-
-```nginx
-server {
-    listen 80;
-    server_name yourdomain.com;
-    return 301 https://$host$request_uri;
-}
-
-server {
-    listen 443 ssl;
-    server_name yourdomain.com;
-
-    ssl_certificate     /etc/letsencrypt/live/yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/yourdomain.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-**3. Get a certificate (if you don't already have one):**
+**5. Start everything.**
 
 ```bash
-sudo certbot --nginx -d yourdomain.com
-```
-
-**4. Start:**
-
-```bash
-sudo nginx -t && sudo systemctl reload nginx
 docker compose up -d
 ```
 
+On first start, Caddy contacts Let's Encrypt and obtains a TLS certificate for your domain (takes a few seconds). Visit `https://yourdomain.com` — Quickly is live.
+
+Certificates are stored in the `caddy_data` Docker volume and **renew automatically**. You never need to manage them again.
+
+**6. Verify all services are running.**
+
+```bash
+docker compose ps        # all services should show "running"
+docker compose logs app  # check for any startup errors
+```
+
 ---
 
-## Option 3: Existing Server — Migrate nginx to Caddy
+**→ Continue to [Step 2: First Login & User Setup](#step-2-first-login--user-setup)**
 
-If you're open to replacing nginx, Caddy gives you automatic HTTPS for all your sites and enables custom tracking domains in Quickly.
+---
+
+## Option C: Existing Server with nginx
+
+> **Best for:** You already have nginx running on this server and don't want to disrupt your current setup.
+
+The recommended approach is to migrate from nginx to Caddy. This gives you automatic HTTPS for all your existing sites _and_ enables Quickly's custom tracking domain feature.
 
 ### Steps
 
-**1. Install Caddy on the host:**
+**1. Install Caddy on the host.**
 
 ```bash
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
@@ -184,10 +223,12 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo 
 sudo apt update && sudo apt install caddy
 ```
 
-**2. Convert your nginx sites to Caddyfile format:**
+**2. Convert your existing nginx sites to Caddyfile format.**
+
+For most sites, the conversion is simple:
 
 ```nginx
-# nginx (before)
+# nginx — before
 server {
     listen 80;
     server_name example.com;
@@ -196,13 +237,15 @@ server {
 ```
 
 ```caddy
-# Caddy (after) — HTTPS is automatic
+# Caddy — after (HTTPS is automatic, no extra config needed)
 example.com {
     reverse_proxy localhost:3000
 }
 ```
 
-**3. Stop nginx, start Caddy:**
+> **Have a complex nginx config?** If your existing config uses rewrites, custom headers, caching rules, or multiple `location` blocks, the conversion isn't always straightforward. Search for "nginx to Caddy migration" for your specific use case, or paste your nginx config into any AI chatbot and ask it to convert it to Caddyfile format — it handles this well.
+
+**3. Stop nginx and start Caddy.**
 
 ```bash
 sudo systemctl stop nginx
@@ -211,17 +254,26 @@ sudo systemctl enable caddy
 sudo systemctl start caddy
 ```
 
-**4. Update `docker-compose.yml`:**
+Caddy will automatically obtain Let's Encrypt certificates for all your domains on first request.
 
-Remove the `caddy` service block from docker-compose.yml (since host Caddy handles everything). Change `expose: ["8000"]` to `ports: ["127.0.0.1:8000:8000"]` on the app service.
+**4. Update `docker-compose.yml`.**
 
-**5. Add Quickly to your host Caddyfile:**
+Since the host Caddy now handles everything, remove the Caddy Docker service:
+
+- Remove the `caddy:` service block and its volumes from `docker-compose.yml`
+- Change `expose: ["8000"]` on the `app` service to `ports: ["127.0.0.1:8000:8000"]`
+
+**5. Add Quickly to your host Caddyfile.**
+
+Edit `/etc/caddy/Caddyfile` and add:
 
 ```caddy
 yourdomain.com {
     reverse_proxy localhost:8000
 }
 ```
+
+Then reload and start:
 
 ```bash
 sudo systemctl reload caddy
@@ -230,166 +282,474 @@ docker compose up -d
 
 ---
 
-## Option 4: Local Development
+**→ Continue to [Step 2: First Login & User Setup](#step-2-first-login--user-setup)**
 
-Run Quickly locally without Docker for development and testing.
+---
+
+## Option D: Local Development
+
+> **Best for:** Contributing to Quickly, testing features, or running it on your own machine.
 
 ### Prerequisites
 
 - Python 3.12+
 - Node.js 18+
-- PostgreSQL 15+ (running locally or in Docker)
+- PostgreSQL 15+ (local install or via Docker)
 
-### Backend
+---
+
+### Quick Option: Docker Dev Stack
+
+The fastest way to run everything locally with hot-reload:
 
 ```bash
-cd Quickly
-
-# Create virtual environment
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-# source .venv/bin/activate     # macOS/Linux
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set database URL (adjust credentials as needed)
-set DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/quickly    # Windows
-# export DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/quickly  # macOS/Linux
-
-# Start the backend
-uvicorn app.main:app --reload
+git clone https://github.com/azowail/quickly.git
+cd quickly
+cp .env.example .env
+# Edit .env and set: BASE_URL=http://localhost:8000
+docker compose -f docker-compose.dev.yml up
 ```
 
-The API is now available at `http://localhost:8000`.
+Open `http://localhost:5173` — the frontend hot-reloads on changes; the backend reloads on Python changes.
 
-### Frontend (hot reload)
+---
+
+### Manual Setup (Recommended for backend development)
+
+**1. Clone the repo and set up Python.**
+
+```bash
+git clone https://github.com/azowail/quickly.git
+cd quickly
+
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+# source .venv/bin/activate   # macOS/Linux
+
+pip install -r requirements.txt
+```
+
+**2. Start a PostgreSQL instance.**
+
+**Option A — Docker (no local install required):**
+
+```bash
+docker run -d --name quickly-db \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=quickly \
+  -p 5432:5432 \
+  postgres:15-alpine
+```
+
+**Option B — Native install:** See [postgresql.org/download](https://www.postgresql.org/download/).
+
+
+**3. Configure your environment.**
+
+```bash
+cp .env.example .env
+```
+
+Minimum values for local development:
+
+```env
+BASE_URL=http://localhost:8000
+DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/quickly
+```
+
+Add `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` if you want to test Gmail connections locally (see [Step 3A](#step-3a-connect-gmail-inboxes) for how to get these).
+
+**4. Start the backend.**
+
+```bash
+uvicorn app.main:app --reload
+# API available at http://localhost:8000
+```
+
+**5. Start the frontend (in a separate terminal).**
 
 ```bash
 cd frontend
 npm install
 npm run dev
+# UI available at http://localhost:5173 — proxies /api calls to localhost:8000
 ```
-
-The Vite dev server runs at `http://localhost:5173` and proxies API calls to the backend.
 
 ### Running Tests
 
 ```bash
-# Uses an in-memory SQLite database by default
+# Fast — in-memory SQLite, no PostgreSQL required
 pytest
 
-# Or run against Postgres for closer-to-production testing
-set TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/test_quickly
+# Against PostgreSQL — closer to production
+set TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/test_quickly  # Windows
+# export TEST_DATABASE_URL=...  # macOS/Linux
 pytest
 ```
 
 ---
 
-## Gmail OAuth Setup
+**→ Continue to [Step 2: First Login & User Setup](#step-2-first-login--user-setup)**
 
-Gmail is the only supported email provider. You must complete this step to send emails.
+---
+
+## Step 2: First Login & User Setup
+
+**1. Open your Quickly URL in a browser.**
+
+**2. Create your admin account.**
+
+Click **Register** and sign in with your Google or Microsoft account. Make sure you've added credentials for whichever provider you want to use before attempting this (see [Step 3A](#step-3a-connect-gmail-inboxes) or [Step 3B](#step-3b-connect-office-365--outlook-inboxes)).
+
+**3. Log in.**
+
+Use the same account you registered with.
+
+**4. (Optional) Connect an account for email notifications.**
+
+From the **Settings** page, you can connect your personal Google or Microsoft account to receive email notifications (e.g. "a lead replied as interested"). This is separate from the inboxes used for outbound sending.
+
+### API Keys
+
+For programmatic access (n8n, scripts, custom integrations), generate API keys from **Settings → API Keys**. Keys are shown only once at creation — store them securely.
+
+> **Important:** Set `QUICKLY_SECRET_KEY` in your `.env` to a stable random string. If omitted, a new key is generated on every restart, which invalidates all existing login sessions.
+
+---
+
+**→ Connect your sending inboxes:**
+
+- → [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
+- → [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+- → [Connect both Gmail and Office 365](#connecting-both-gmail-and-office-365)
+
+---
+
+## Step 3A: Connect Gmail Inboxes
+
+> You can connect as many Gmail accounts as you want. Each becomes a sending inbox that Quickly rotates emails across.
 
 ### 1. Create a Google Cloud Project
 
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project (or select an existing one)
-3. Enable the **Gmail API** (`APIs & Services → Library → Gmail API`)
-4. Enable the **Pub/Sub API** (for real-time inbox sync)
+2. Click the project selector → **New Project**
+3. Give it a name (e.g. "Quickly Email") and click **Create**
 
-### 2. Create OAuth Credentials
+### 2. Enable Required APIs
 
-1. Go to `APIs & Services → Credentials`
-2. Click **Create Credentials → OAuth client ID**
-3. Application type: **Web application**
-4. Authorized redirect URI: `https://yourdomain.com/oauth/google/callback`
-5. Copy the **Client ID** and **Client Secret** into your `.env`:
+1. Go to **APIs & Services → Library**
+2. Search for and enable **Gmail API**
+3. Search for and enable **Cloud Pub/Sub API** _(required for real-time reply detection in Unibox)_
+
+### 3. Create OAuth Credentials
+
+1. Go to **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+2. Application type: **Web application**
+3. Under **Authorized redirect URIs**, add both:
+    - `https://yourdomain.com/oauth/app/google/callback` _(for login/registration)_
+    - `https://yourdomain.com/oauth/google/callback` _(for inboxes)_
+4. Click **Create** and copy your **Client ID** and **Client Secret**
+
+> **Stuck in the Google Cloud Console?** The UI can be confusing if this is your first time. Try searching "create Google OAuth client ID for web app", or paste these instructions into any AI chatbot and ask it to walk you through them — just mention you need OAuth credentials for a self-hosted web app with specific redirect URIs.
+
+### 4. Add Credentials to Your Environment
+
+Add the values you just copied to your `.env` file (or your PaaS environment variables):
 
 ```env
 GOOGLE_CLIENT_ID=123456789-abc.apps.googleusercontent.com
 GOOGLE_CLIENT_SECRET=GOCSPX-abcdef...
 ```
 
-### 3. Configure OAuth Consent Screen
+Then restart your containers:
 
-1. Go to `APIs & Services → OAuth consent screen`
-2. User type: **External** (or Internal for Google Workspace)
-3. Add the Gmail scopes:
-   - `https://www.googleapis.com/auth/gmail.readonly`
-   - `https://www.googleapis.com/auth/gmail.send`
-   - `https://www.googleapis.com/auth/gmail.modify`
+```bash
+docker compose up -d
+```
 
-### 4. Set Up Pub/Sub (for Unibox)
+### 5. Configure the OAuth Consent Screen
 
-1. Go to `Pub/Sub → Topics → Create Topic`
-2. Create a subscription with push delivery to: `https://yourdomain.com/api/unibox/gmail/push`
-3. Grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role on the topic
-4. If your organization has domain-restricted sharing, add `gmail-api-push@system.gserviceaccount.com` to the allowed list
+1. Go to **APIs & Services → OAuth consent screen**
+2. User type: **External** (or **Internal** for Google Workspace organizations)
+3. Fill in app name, support email, and developer contact
+4. Under **Scopes**, add: `https://mail.google.com/`
+5. Under **Test users**, add the Gmail addresses you plan to use
 
-### 5. Connect Gmail Accounts
+> **About publishing:** While in "Testing" mode, only listed test users can authorize. For personal use, this is perfectly fine — just add your own addresses. To allow any Google account, click **Publish App** and follow the verification process.
 
-In the Quickly UI, go to **Inboxes → Add Inbox** and click **Connect Gmail Account**. This starts the OAuth flow and creates the inbox automatically.
+### 6. (Optional) Set Up Pub/Sub for Real-Time Reply Detection
+
+Skip this if you're happy with scheduled polling for reply detection.
+
+1. Go to **Pub/Sub → Topics → Create Topic**
+2. Topic ID: `quickly-gmail-push` (or any name you prefer)
+3. Create a **Push subscription** on the topic pointing to: `https://yourdomain.com/api/unibox/gmail/push`
+4. In the topic's **Permissions** tab, grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role
+5. In Quickly, go to **Settings → Gmail Sync** and enter the full topic name (e.g. `projects/your-project/topics/quickly-gmail-push`)
+
+> **This is the most involved step in the whole guide.** IAM roles, push subscriptions, and topic naming are easy to get wrong. If you're hitting errors, search "Google Cloud Pub/Sub push subscription setup" or ask an AI chatbot to walk you through it — describe that you need a push subscription that forwards to a webhook URL, with the Gmail push service account as publisher.
+
+### 7. Connect Gmail Accounts in Quickly
+
+1. In Quickly, go to **Inboxes → Add Inbox → Connect Gmail Account**
+2. Complete the Google OAuth flow
+3. The inbox appears automatically and is ready to use
+
+Repeat for as many Gmail accounts as you want.
 
 ---
 
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `CADDY_HOST` | For HTTPS | _(empty)_ | Domain name for Caddy auto-HTTPS |
-| `BASE_URL` | Yes | — | Full URL with protocol (e.g. `https://yourdomain.com`) |
-| `DATABASE_URL` | Auto | Set by compose | PostgreSQL connection string |
-| `GOOGLE_CLIENT_ID` | Yes | — | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | Yes | — | Google OAuth client secret |
-| `QUICKLY_MODE` | No | `production` | `production` or `development` |
-| `TEST_MODE` | No | `false` | Set to `true` to simulate sends without hitting Gmail |
-| `TIME_OFFSET_DAYS` | No | `0` | Shift the current date by N days (useful for development) |
-
-> All other settings (webhooks, scheduling strategy, AI, email verification, etc.) are managed from the web UI **Settings** page and stored in the database.
+**→ Also setting up Office 365? See [Step 3B](#step-3b-connect-office-365--outlook-inboxes)** **→ Ready to send? Skip to [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)**
 
 ---
 
-## Updating
+## Step 3B: Connect Office 365 / Outlook Inboxes
+
+> Quickly supports Microsoft 365, Office 365, and personal Outlook.com accounts. Gmail and Microsoft inboxes can be mixed freely in the same campaign.
+
+> **The Azure portal can be overwhelming.** If you've never registered an app there before, the navigation is dense and the permission/consent flow is easy to get wrong. If you get stuck at any point below, search "Azure app registration OAuth web app" or ask an AI chatbot to guide you through registering an app in Azure AD with delegated Microsoft Graph permissions — it's a very common setup and well-documented.
+
+### Quick Summary
+
+**1. Register an app in Azure.**
+
+Go to [Azure Portal](https://portal.azure.com/) → **Azure Active Directory → App registrations → New registration**
+
+**2. Add redirect URIs.**
+
+Under **Authentication**, set the redirect URIs to:
+
+- `https://yourdomain.com/oauth/office365/callback`
+- `https://yourdomain.com/oauth/app/office365/callback`
+
+**3. Add required API permissions.**
+
+Go to **API permissions → Add a permission → Microsoft Graph → Delegated permissions** and add:
+
+- `Mail.ReadWrite`
+- `Mail.Send`
+- `User.Read`
+- `offline_access`
+
+**4. Create a client secret.**
+
+Go to **Certificates & secrets → New client secret**. Copy the **Value** immediately — it won't be shown again.
+
+**5. Copy your credentials.**
+
+From the app's **Overview** page, copy:
+
+- **Application (client) ID** → this is your `OFFICE365_CLIENT_ID`
+- **Directory (tenant) ID** → use `common` for multi-tenant, or your specific ID for single-tenant
+
+**6. Add credentials to your environment.**
+
+Add the values you just copied to your `.env` file (or your PaaS environment variables):
+
+```env
+OFFICE365_CLIENT_ID=<application-client-id>
+OFFICE365_CLIENT_SECRET=<client-secret-value>
+OFFICE365_TENANT_ID=common   # or your specific tenant ID for single-tenant setups
+```
+
+Then restart your containers:
+
+```bash
+docker compose up -d
+```
+
+**7. Connect accounts in Quickly.**
+
+Go to **Inboxes → Add Inbox → Connect Office 365 Account** and complete the OAuth flow.
+
+---
+
+**→ Continue to [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)**
+
+---
+
+## Connecting Both Gmail and Office 365
+
+No problem — complete both guides, then continue:
+
+1. [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
+2. [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+3. [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)
+
+Gmail and Microsoft inboxes can be mixed freely in any campaign.
+
+---
+
+## Step 4: Create Your First Campaign
+
+> This is a brief overview. The UI includes onboarding tooltips that walk you through each screen in detail.
+
+**1. Go to Campaigns → New Campaign.**
+
+Give your campaign a name and an optional timezone. If set, emails will be scheduled in the recipient's local timezone.
+
+**2. Assign inboxes.**
+
+Select which inboxes this campaign sends from. Quickly automatically rotates sends across them, respecting per-inbox daily limits and warm-up schedules.
+
+**3. Build your sequence.**
+
+Click **Add Step** to create your first email:
+
+- Write a subject and body (HTML or plain text)
+- Use `{{name}}`, `{{email}}`, `{{company}}`, or any `{{custom_field}}` as template variables
+- Set **wait days** — how many days after the previous step before this one sends
+
+Add as many follow-up steps as you want.
+
+**4. (Optional) Add A/B variants.**
+
+On any step, click **Add Variant** to create an alternate subject or body. Quickly selects randomly at send time and tracks performance per variant.
+
+**5. Import leads.**
+
+Click **Import Leads → Upload CSV**. Your CSV needs at minimum an `email` column. Any additional columns (`name`, `company`, `title`, etc.) automatically become available as template variables.
+
+**6. Start the campaign.**
+
+Click **Start Campaign**. The queue engine reserves send slots across your inboxes and begins sending at the scheduled times.
+
+---
+
+**→ Explore more:**
+
+- [Set up webhooks](docs/WEBHOOKS.md) — react to opens, clicks, and replies in real time
+- [Explore the REST API](docs/API.md) — automate everything programmatically
+- [Configure AI reply classification](#optional-ai-reply-classification) — auto-classify incoming replies
+
+---
+
+## Optional: AI Reply Classification
+
+Quickly automatically classifies every reply into one of six categories: `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `unsubscribed`.
+
+**Supported providers:** OpenAI, Anthropic Claude, Google Gemini, Mistral, Groq, Cohere, and 13+ others — including **Ollama** for fully local/offline classification.
+
+**To configure:**
+
+1. Go to **Settings → AI Features**
+2. Select your AI provider
+3. Enter your API key (or your Ollama endpoint for local models)
+4. Select the model
+5. Enable the feature
+
+All AI settings are stored in the database — no restart required.
+
+---
+
+## Optional: Custom Tracking Domains
+
+> Requires Caddy (Option B or C). Not available on PaaS deployments that don't support custom Caddy configurations.
+
+Custom tracking domains make your open/click tracking links appear to come from your own domain (e.g. `track.yourdomain.com`) instead of your main app domain.
+
+**To configure:**
+
+1. In your DNS provider, add a CNAME record:
+    - **Name:** `track` (or any subdomain you prefer)
+    - **Value:** your Quickly server's main domain (e.g. `mail.yourdomain.com`)
+2. In Quickly, go to **Settings → Tracking → Custom Tracking Domain**
+3. Enter the full subdomain (e.g. `track.yourdomain.com`)
+
+Caddy automatically provisions a certificate for this domain on the first request.
+
+---
+
+## Updating Quickly
 
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-Database volumes are preserved across updates. Quickly creates missing columns/tables on startup automatically.
+Database volumes are preserved across updates. Quickly automatically applies any schema changes on startup — no manual migrations needed.
+
+---
+
+## Environment Variables Reference
+
+> The `.env` file is intentionally minimal. Most runtime settings (send windows, warm-up schedules, AI providers, etc.) are configured from the **Settings page** in the UI and stored in the database.
+
+|Variable|Required|Default|Description|
+|---|---|---|---|
+|`BASE_URL`|**Yes**|—|Full URL with protocol, e.g. `https://yourdomain.com`|
+|`CADDY_HOST`|For Caddy HTTPS|_(empty = HTTP on :80)_|Domain for Caddy auto-HTTPS|
+|`DATABASE_URL`|Auto|Set by docker-compose|PostgreSQL connection string|
+|`GOOGLE_CLIENT_ID`|For Gmail|—|Google OAuth 2.0 client ID — [see Step 3A](#step-3a-connect-gmail-inboxes)|
+|`GOOGLE_CLIENT_SECRET`|For Gmail|—|Google OAuth 2.0 client secret — [see Step 3A](#step-3a-connect-gmail-inboxes)|
+|`OFFICE365_CLIENT_ID`|For Office 365|—|Microsoft Entra app (client) ID — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
+|`OFFICE365_CLIENT_SECRET`|For Office 365|—|Microsoft Entra app client secret — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
+|`OFFICE365_TENANT_ID`|No|`common`|Use `common` for multi-tenant, or your specific tenant ID — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
+|`QUICKLY_SECRET_KEY`|No|auto-generated|JWT signing key — **set this** or sessions reset on every restart|
+|`CORS_ORIGINS`|No|`http://localhost:5173,...`|Comma-separated allowed CORS origins|
+
+**Generate a secret key:**
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+```
 
 ---
 
 ## Troubleshooting
 
-### Caddy can't get a certificate
+### Caddy can't get a TLS certificate
 
-- Confirm your A record: `dig yourdomain.com`
-- Confirm ports 80/443 are reachable: `curl http://yourdomain.com` from outside
-- Check logs: `docker compose logs caddy`
+- Verify your A record resolves to your server: `dig yourdomain.com`
+- Verify ports 80 and 443 are reachable from the internet: `curl http://yourdomain.com` from another machine
+- Check Caddy logs: `docker compose logs caddy`
+- Ensure `CADDY_HOST` in `.env` matches your DNS record exactly — no `https://` prefix, no trailing slash
 
-### App won't start
+### App is unreachable after `docker compose up`
 
-- Check all services: `docker compose ps`
+- Check that all services started: `docker compose ps`
 - Check app logs: `docker compose logs app`
-- Verify `.env` exists with correct values
+- Verify `.env` exists and `BASE_URL` is correctly set
 
 ### Database connection errors
 
-- `DATABASE_URL` is set automatically by `docker-compose.yml` — don't override it unless you have a custom Postgres setup
-- If overriding, make sure the hostname is `db` (the container), not `localhost`
+- `DATABASE_URL` is set automatically by `docker-compose.yml` — don't override it unless you have a custom PostgreSQL setup
+- If you did override it, make sure the hostname is `db` (the Docker service name), not `localhost`
 
 ### Gmail OAuth errors
 
-- Ensure `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are in your `.env`
-- Verify the redirect URI in Google Cloud Console matches your domain exactly
-- Check that the Gmail API is enabled in your Google Cloud project
+- Verify `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are set in your environment — [how to get them](#step-3a-connect-gmail-inboxes)
+- Verify the **Authorized redirect URI** in Google Cloud Console exactly matches `https://yourdomain.com/oauth/google/callback`
+- Confirm the **Gmail API** is enabled in your Google Cloud project
+- If the app is in "Testing" mode, make sure the Gmail address is listed as a **test user** in the OAuth consent screen
 
-### Running on HTTP only (no domain)
+### Office 365 OAuth errors
 
-Leave `CADDY_HOST` empty or unset. Caddy will serve on port 80 over plain HTTP:
+- Verify `OFFICE365_CLIENT_ID` and `OFFICE365_CLIENT_SECRET` are set in your environment — [how to get them](#step-3b-connect-office-365--outlook-inboxes)
+- Verify the redirect URI in the Azure portal exactly matches `https://yourdomain.com/oauth/office365/callback`
+- Confirm all required delegated permissions (`Mail.ReadWrite`, `Mail.Send`, `User.Read`, `offline_access`) are granted with admin consent
+- For single-tenant setups, set `OFFICE365_TENANT_ID` to your specific tenant ID instead of `common`
+
+### Login sessions expire on every restart
+
+Set a stable `QUICKLY_SECRET_KEY` in your `.env`. Without it, a new random key is generated on every startup, which invalidates all JWT tokens.
+
+### Running without HTTPS (local or HTTP-only)
+
+Leave `CADDY_HOST` unset in `.env`. Caddy will serve on port 80 over plain HTTP:
 
 ```bash
 docker compose up -d
-# Open http://localhost
+# open http://localhost  (or http://your-server-ip)
 ```
+
+---
+
+## Additional Resources
+
+| Document                                       | What's inside                                                   |
+| ---------------------------------------------- | --------------------------------------------------------------- |
+| [API.md](docs/API.md)                         | Complete REST API reference (90+ endpoints)                     |
+| [WEBHOOKS.md](docs/WEBHOOKS.md)                | All 15 webhook event types, payload schemas, and authentication |
+| [OFFICE365_SETUP.md](docs/OFFICE365_SETUP.md) | Full Azure portal walkthrough for Office 365 setup              |
+| [CONTRIBUTORS.md](docs/CONTRIBUTORS.md)       | Dev environment setup and contribution guidelines               |

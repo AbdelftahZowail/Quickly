@@ -1,30 +1,156 @@
 # API Reference
 
-Quickly exposes a JSON REST API over HTTP. **No authentication is required** — the service is designed as a personal tool and access should be restricted at the network level (firewall, VPN, or reverse-proxy auth).
+Quickly exposes a JSON REST API over HTTP. **All endpoints require authentication** via a Bearer token (JWT access token) or the httpOnly `access_token` cookie set at login.
 
 All request/response bodies use `Content-Type: application/json`.
 
 > **Base URL:** `http://localhost:8000` (or your configured domain)
 
+### Authentication Header
+
+```http
+Authorization: Bearer <access_token>
+```
+
+Obtain an access token via `POST /api/auth/login`. Tokens expire after 30 minutes. Use `POST /api/auth/refresh` (with the httpOnly refresh-token cookie) to get a new one.
+
+The tracking endpoints (`/o/`, `/c/`, `/u/`) are **public** (no auth) — they are embedded in sent emails and must be reachable by recipients.
+
 ---
 
 ## Table of Contents
 
+- [Authentication](#authentication)
 - [Status](#status)
+- [System Health](#system-health)
 - [Campaigns](#campaigns)
 - [Sequences](#sequences)
 - [Sequence Variants (A/B Testing)](#sequence-variants-ab-testing)
 - [Leads](#leads)
+- [Provider Matching](#provider-matching)
 - [Inboxes](#inboxes)
 - [Schedule](#schedule)
 - [Settings](#settings)
 - [Webhooks](#webhooks)
 - [Gmail OAuth](#gmail-oauth)
+- [Microsoft / Office 365 OAuth](#microsoft--office-365-oauth)
+- [App OAuth (Login with Google/Microsoft)](#app-oauth-login-with-googlemicrosoft)
 - [Unibox](#unibox)
+- [Notifications](#notifications)
 - [Tracking](#tracking)
 - [Test Mode](#test-mode)
 - [Known IPs](#known-ips)
 - [Email Verification](#email-verification)
+
+---
+
+## Authentication
+
+### `GET /api/auth/setup-status`
+
+Check whether initial setup is complete (i.e. whether the first admin account exists). Public — no auth required.
+
+**Response:** `{ "setup_complete": false }`
+
+When `setup_complete` is `false`, the frontend shows the registration form so the first user can create an admin account.
+
+### `POST /api/auth/register`
+
+Register the first (admin) user. Closes automatically after the first account is created — subsequent accounts must be invited by an admin.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `username` | string | 3–150 chars, alphanumeric + hyphens/underscores |
+| `email` | string | Valid email address |
+| `password` | string | Min 8 chars, must include uppercase, lowercase, and a digit |
+
+**Response:** `201 Created` with user object.
+
+### `POST /api/auth/login`
+
+Authenticate and receive a JWT access token.
+
+**Body:** `{ "username": "admin", "password": "..." }`
+
+**Response:**
+
+```json
+{ "access_token": "eyJ...", "token_type": "bearer", "expires_in": 1800 }
+```
+
+Also sets two httpOnly cookies: `refresh_token` (7-day, `/api/auth` path) and `access_token` (30-min, `/api` path).
+
+### `POST /api/auth/refresh`
+
+Exchange the `refresh_token` cookie for a new access token (token rotation). No body required.
+
+**Response:** Same shape as `/login`. Both cookies are rotated.
+
+### `POST /api/auth/logout`
+
+Clears the `refresh_token` cookie.
+
+**Response:** `{ "detail": "Logged out" }`
+
+### `GET /api/auth/me`
+
+Return the currently authenticated user.
+
+**Response:**
+
+```json
+{ "id": 1, "username": "admin", "email": "admin@example.com", "role": "admin", "is_active": true, "created_at": "2026-03-01T00:00:00Z" }
+```
+
+### `PUT /api/auth/change-password`
+
+Change the current user's password.
+
+**Body:** `{ "current_password": "...", "new_password": "..." }`
+
+---
+
+### User Management (admin only)
+
+### `POST /api/auth/users`
+
+Create a new user (admin only). Returns `201 Created`.
+
+**Body:** Same as `/register` plus optional `{ "role": "user"|"admin" }`.
+
+### `GET /api/auth/users`
+
+List all users (admin only).
+
+---
+
+### API Keys
+
+API keys allow programmatic access without a username/password login. Each key is shown once at creation; only a hash is stored.
+
+### `POST /api/auth/api-keys`
+
+Create an API key for the current user.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Descriptive label |
+| `scopes` | string[] | Optional scope list |
+| `expires_in_days` | int\|null | Days until expiry (null = never) |
+
+**Response:** `{ "id": 1, "key": "qk_live_...", "name": "...", ... }` — `key` is shown **once only**.
+
+### `GET /api/auth/api-keys`
+
+List API keys for the current user (keys are masked, never returned in full).
+
+### `DELETE /api/auth/api-keys/{key_id}`
+
+Revoke an API key.
 
 ---
 
@@ -52,6 +178,98 @@ manipulated via `time_offset_days`).
   "app_mode": "production"
 }
 ```
+
+---
+
+## System Health
+
+### `GET /api/system-health`
+
+Aggregated health snapshot for all monitored services. The frontend **System Health** page polls this endpoint to show live operational status without multiple round-trips.
+
+**Response:**
+
+```json
+{
+  "google_oauth": {
+    "configured": true,
+    "accounts": [
+      {
+        "id": 1,
+        "inbox_id": 2,
+        "google_email": "outreach@gmail.com",
+        "inbox_display_name": "Sales",
+        "token_status": "valid",
+        "token_valid": true,
+        "token_expiry": "2026-03-15T14:00:00Z",
+        "can_refresh": true,
+        "login_status": "valid",
+        "login_valid": true,
+        "missing_scopes": []
+      }
+    ]
+  },
+  "microsoft_oauth": {
+    "configured": true,
+    "accounts": [
+      {
+        "id": 1,
+        "inbox_id": 3,
+        "microsoft_email": "sales@company.com",
+        "inbox_display_name": "Office 365",
+        "token_status": "valid",
+        "token_valid": true,
+        "token_expiry": "2026-03-15T14:00:00Z",
+        "login_status": "valid",
+        "login_valid": true
+      }
+    ]
+  },
+  "inboxes": [
+    {
+      "id": 2,
+      "email": "outreach@gmail.com",
+      "display_name": "Sales",
+      "provider": "gmail",
+      "paused": false,
+      "effective_max_per_day": 32,
+      "tracking_domain": "track.yourdomain.com",
+      "tracking_domain_status": "ok"
+    }
+  ],
+  "unibox_sync": {
+    "push_enabled": true,
+    "push_topic": "projects/my-project/topics/gmail-push",
+    "sync_interval_minutes": 5,
+    "initial_list_sync_in_progress": false,
+    "inflight_inbox_ids": []
+  },
+  "ai_features": [
+    {
+      "id": "reply_classifier",
+      "label": "Reply Interest Classifier",
+      "enabled": true,
+      "api_key_set": true,
+      "connection_tested": true,
+      "last_error": "",
+      "last_error_at": ""
+    }
+  ],
+  "email_verification": {
+    "enabled": true,
+    "provider": "mailtester_ninja",
+    "api_key_set": true,
+    "connection_tested": true,
+    "last_error": "",
+    "last_error_at": ""
+  },
+  "flags": {
+    "test_mode": false
+  }
+}
+```
+
+The `tracking_domain_status` field for each inbox is `"ok"`, `"error"`, or `null` (if no tracking domain configured). The health endpoint probes live tokens against the Gmail and Microsoft Graph APIs to report real-time validity.
 
 ---
 
@@ -125,6 +343,7 @@ Create a new campaign.
 | `add_unsubscribe_header` | bool | No | `true` | Add List-Unsubscribe header |
 | `send_first_as_text` | bool | No | `false` | Send first sequence as plain text |
 | `send_all_as_text` | bool | No | `false` | Send all sequences as plain text |
+| `match_lead_provider` | bool | No | `false` | Prefer Gmail inboxes for Google leads, Office 365 inboxes for Microsoft leads |
 
 **Response:** Campaign object
 
@@ -346,6 +565,20 @@ List leads enrolled in a campaign with progress info.
 
 Remove a lead from a campaign and delete their pending queue slots.
 
+---
+
+## Provider Matching
+
+Provider matching performs DNS MX-record lookups to detect each lead's email provider (Google Workspace, Office 365, etc.) and optionally routes sends through matching inboxes.
+
+### `POST /api/campaigns/{id}/leads/detect-providers`
+
+Trigger background provider detection for all leads in a campaign. Re-probes DNS MX records for every lead and updates the `provider` field.
+
+**Response:** `{ "ok": true, "queued": 150 }`
+
+The detected `provider` value (e.g. `"google"`, `"office365"`) is stored on the Lead and shown as a badge in the campaign leads table. When `match_lead_provider` is enabled on the campaign, the queue engine filters inboxes by provider to maximize deliverability.
+
 ### `POST /api/campaigns/{id}/leads/verify`
 
 Trigger background email verification for all unverified leads in a campaign. Requires email verification to be configured in Settings.
@@ -384,7 +617,7 @@ Import leads from a CSV file. Expects an `email` column; `name` and any extra co
 
 ## Inboxes
 
-Inboxes are sending email addresses using Gmail OAuth. Each inbox has its own daily limit and optional custom tracking domain.
+Inboxes are sending email addresses connected via Gmail OAuth or Office 365 OAuth. Each inbox has its own daily limit, optional warm-up ramp, optional jitter, and optional custom tracking domain.
 
 ### `GET /api/inboxes`
 
@@ -392,7 +625,7 @@ List all inboxes. Each includes a `sent_today` count.
 
 ### `POST /api/inboxes`
 
-Create an inbox.
+Create an inbox manually (most inboxes are created automatically during the OAuth flow).
 
 **Body:**
 
@@ -402,10 +635,11 @@ Create an inbox.
 | `display_name` | string | No | Sender display name |
 | `max_emails_per_day` | int | No | Daily sending limit (default `50`) |
 | `wait_minutes_between` | int | No | Cooldown between sends (default `5`) |
-| `provider` | string | No | Always `gmail` |
+| `provider` | string | No | `gmail` or `office365` |
 | `tracking_domain` | string | No | Custom tracking domain hostname |
 | `ramp_up_enabled` | bool | No | Enable send-volume warm-up ramp (default `false`) |
 | `ramp_up_period_days` | int | No | Ramp-up duration in days (default `42`) |
+| `max_jitter_seconds` | int | No | Max random seconds added to each scheduled send time (default `180`; set to `0` to disable) |
 
 The `GET /api/inboxes` and `GET /api/inboxes/{id}` responses include computed fields:
 
@@ -647,7 +881,7 @@ Check OAuth scopes and permissions for all connected Gmail accounts.
 
 ### `GET /oauth/google/authorize`
 
-Start the Google OAuth flow. Redirects the user to Google's consent screen.
+Start the Google OAuth inbox-connection flow. Redirects the user to Google's consent screen.
 
 **Query params:** `display_name` (optional), `max_per_day` (optional)
 
@@ -658,6 +892,72 @@ OAuth callback handler. Creates or updates the inbox and Gmail account, then red
 ### `DELETE /api/gmail/accounts/{id}`
 
 Disconnect a Gmail account. Removes stored tokens and reverts the inbox provider.
+
+---
+
+## Microsoft / Office 365 OAuth
+
+### `GET /api/office365/status`
+
+Check if Microsoft OAuth credentials are configured on the server.
+
+**Response:** `{ "configured": true, "redirect_uri": "https://yourdomain.com/oauth/office365/callback" }`
+
+### `GET /api/office365/accounts`
+
+List all connected Office 365 accounts.
+
+**Response:**
+
+```json
+[
+  {
+    "id": 1,
+    "inbox_id": 4,
+    "microsoft_email": "sales@company.com",
+    "inbox_display_name": "Office 365 Sales",
+    "max_emails_per_day": 50,
+    "token_expiry": "2026-01-15T12:00:00Z",
+    "connected_at": "2026-01-01T00:00:00Z"
+  }
+]
+```
+
+### `GET /oauth/office365/authorize`
+
+Start the Microsoft Office 365 inbox-connection OAuth flow. Redirects to Microsoft's consent screen.
+
+**Query params:** `display_name` (optional), `max_per_day` (optional)
+
+### `GET /oauth/office365/callback`
+
+OAuth callback handler. Creates or updates the inbox and Office 365 account, then redirects to `/inboxes`.
+
+### `DELETE /api/office365/accounts/{id}`
+
+Disconnect an Office 365 account. Removes stored tokens and reverts the inbox provider.
+
+---
+
+## App OAuth (Login with Google/Microsoft)
+
+These endpoints allow users to log in to Quickly itself using their Google or Microsoft account instead of a username/password. They are separate from the inbox-connection OAuth flows.
+
+### `GET /oauth/app/google/authorize`
+
+Start the app-level Google login flow. Redirects to Google's consent screen. On completion, creates or signs in the user and sets JWT cookies.
+
+### `GET /oauth/app/google/callback`
+
+OAuth callback for app-level Google login.
+
+### `GET /oauth/app/microsoft/authorize`
+
+Start the app-level Microsoft login flow.
+
+### `GET /oauth/app/microsoft/callback`
+
+OAuth callback for app-level Microsoft login.
 
 ---
 
@@ -731,6 +1031,42 @@ Server-Sent Events (SSE) stream for real-time unibox updates (new messages, sync
 ### `POST /api/unibox/gmail/push`
 
 Google Pub/Sub push notification endpoint. Called automatically by Gmail when new messages arrive.
+
+---
+
+## Notifications
+
+Email notifications let Quickly send you an email (via your connected Gmail or Microsoft account) when specific events occur.
+
+### `GET /api/notifications/config`
+
+Get the current user's email notification configuration.
+
+**Response:**
+
+```json
+{
+  "enabled": true,
+  "notification_email": "you@example.com",
+  "events": ["lead.interested", "email.bounced"],
+  "rate_limit_per_hour": 10
+}
+```
+
+### `PUT /api/notifications/config`
+
+Create or update the current user's notification configuration.
+
+**Body:**
+
+| Field | Type | Description |
+|---|---|---|
+| `enabled` | bool | Enable/disable notifications |
+| `notification_email` | string | Email address to send notifications to |
+| `events` | string[] | Event types to notify on (same set as webhooks) |
+| `rate_limit_per_hour` | int | Max notifications per hour (1–100, default `10`) |
+
+**Response:** Updated config object.
 
 ---
 
@@ -1095,7 +1431,11 @@ Common HTTP status codes:
 |---|---|
 | 200 | Success |
 | 400 | Bad request / validation error |
+| 401 | Unauthorized — missing or invalid token |
+| 403 | Forbidden — insufficient permissions |
 | 404 | Resource not found |
 | 405 | Method not allowed |
+| 409 | Conflict — duplicate resource |
 | 422 | Unprocessable entity (Pydantic validation) |
+| 429 | Too many requests (rate limit: 200 req/min) |
 | 500 | Internal server error |

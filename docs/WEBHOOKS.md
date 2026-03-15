@@ -18,10 +18,13 @@ Quickly can notify external services of important events via outbound webhooks. 
 
 Configure webhooks from the **Settings** page in the web UI (under the Webhooks section), or via the REST API.
 
+> **Authentication:** All webhook management API calls require a Bearer token. See `POST /api/auth/login` in [API.md](API.md) to obtain one.
+
 ### Create a Webhook
 
 ```bash
 curl -X POST http://localhost:8000/api/settings/webhooks \
+  -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://example.com/hooks/quickly",
@@ -34,13 +37,15 @@ curl -X POST http://localhost:8000/api/settings/webhooks \
 ### List All Webhooks
 
 ```bash
-curl http://localhost:8000/api/settings/webhooks
+curl http://localhost:8000/api/settings/webhooks \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ### Update a Webhook
 
 ```bash
 curl -X PATCH http://localhost:8000/api/settings/webhooks/1 \
+  -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"active": false}'
 ```
@@ -48,17 +53,20 @@ curl -X PATCH http://localhost:8000/api/settings/webhooks/1 \
 ### Delete a Webhook
 
 ```bash
-curl -X DELETE http://localhost:8000/api/settings/webhooks/1
+curl -X DELETE http://localhost:8000/api/settings/webhooks/1 \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ### Test a Webhook
 
 ```bash
 # Generic test event
-curl -X POST http://localhost:8000/api/settings/webhooks/1/test
+curl -X POST http://localhost:8000/api/settings/webhooks/1/test \
+  -H "Authorization: Bearer <access_token>"
 
 # Simulate a specific event type (see exact payload format)
 curl -X POST http://localhost:8000/api/settings/webhooks/1/test-event \
+  -H "Authorization: Bearer <access_token>" \
   -H "Content-Type: application/json" \
   -d '{"event": "email.sent"}'
 ```
@@ -66,7 +74,8 @@ curl -X POST http://localhost:8000/api/settings/webhooks/1/test-event \
 ### Get Available Event Types
 
 ```bash
-curl http://localhost:8000/api/settings/webhooks/events
+curl http://localhost:8000/api/settings/webhooks/events \
+  -H "Authorization: Bearer <access_token>"
 ```
 
 ---

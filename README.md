@@ -1,35 +1,104 @@
-﻿# Quickly
-
-<p>
-  <img src="https://img.shields.io/badge/Self--Hosted-100%25-teal" alt="Self-Hosted" />
-  <img src="https://img.shields.io/badge/License-MIT-blue" alt="License" />
-  <img src="https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white" alt="Docker" />
+<p align="center">
+  <img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" />
+  <img src="https://img.shields.io/badge/Self--Hosted-100%25-teal" alt="Self-Hosted Cold Email Platform" />
+  <img src="https://img.shields.io/badge/Docker-One--Command_Deploy-2496ED?logo=docker&logoColor=white" alt="Docker One-Command Deploy" />
+  <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" />
+  <img src="https://img.shields.io/badge/AI_Reply_Classification-19_Providers-orange" alt="AI Reply Classification" />
 </p>
 
-**Cold email infrastructure you own.** Self-hosted email campaign platform with multi-step sequences, a smart queue, Gmail OAuth sending, open/click/bounce tracking, webhooks, and a unified inbox  all in one `docker compose up`.
+<h1 align="center">Quickly — Open-Source Self-Hosted Cold Email Platform</h1>
+
+<p align="center"><strong>Replace Instantly, Smartlead, and Lemlist. Self-host on your own server. Pay nothing, forever.</strong></p>
+
+<p align="center">
+  <a href="docs/INSTALL.md">Installation Guide</a> &nbsp;|&nbsp;
+  <a href="docs/API.md">API Docs</a> &nbsp;|&nbsp;
+  <a href="docs/WEBHOOKS.md">Webhooks</a> &nbsp;|&nbsp;
+  <a href="docs/CONTRIBUTORS.md">Contributing</a>
+</p>
+
+---
+
+<!-- SCREENSHOT / DEMO GIF — replace with your own -->
+<!-- ![Quickly dashboard showing campaign analytics and inbox rotation](docs/assets/demo.gif) -->
+
+---
+
+## What is Quickly?
+
+**Quickly is a free, open-source cold email platform you self-host with a single Docker command.** It gives sales teams, agencies, and indie hackers the same multi-inbox sequencing, AI reply classification, and campaign analytics as tools like Instantly and Smartlead — with no monthly fees, no per-seat pricing, and no lead data leaving your server.
+
+```bash
+# Get up and running in under 5 minutes
+docker compose up -d
+```
+
+If this saves you money, please consider dropping a ⭐ — it helps others find the project.
+
+---
+
+## Why Quickly? (vs. Instantly, Smartlead, Lemlist)
+
+| What you're paying for today | What Quickly gives you instead |
+|---|---|
+| $97–$500/month in SaaS fees | Deploy free on Railway or any Linux VPS |
+| Per-seat pricing that scales against you | Unlimited team members, unlimited contacts |
+| Your lead data on vendor servers | 100% self-hosted — your server, your Postgres database |
+| Vendor lock-in and feature gating | MIT licensed, fully hackable, 90+ REST API endpoints |
+| Complex multi-tool onboarding | One `docker compose up` — live in under 5 minutes |
+
+> **Quickly is the open-source alternative to Instantly, Smartlead, and Lemlist** for teams that want full ownership of their cold email infrastructure.
 
 ---
 
 ## Features
 
-- **Multi-step sequences**  Build campaigns with any number of follow-up emails, configurable wait days, and automatic threading.
-- **Smart queue**  Emails are scheduled across your inboxes respecting daily limits, business days, sending windows, and per-inbox cooldowns.
-- **Multiple inboxes**  Spread sends across as many Gmail accounts as you want. Add more accounts at any time.
-- **Open & click tracking**  Built-in pixel tracking and link wrapping with optional custom tracking domains (automatic HTTPS via Caddy).
-- **Bounce detection**  Permanent send failures (bounced, invalid address, auth errors) are detected automatically. Affected leads are marked and further sends stop.
-- **Unified inbox (Unibox)**  Real-time Gmail sync with lead-reply detection, threaded view, and compose/reply inside the app.
-- **Analytics**  Aggregated metrics, per-campaign progress, timeline charts, open/click/reply rates.
-- **Priority scheduling**  Drag campaigns to set send priority. Choose between priority-first or round-robin strategies.
-- **Webhooks**  Subscribe multiple endpoints to any of 10 event types: `email.sent`, `email.opened`, `email.clicked`, `email.bounced`, `lead.replied`, `lead.unsubscribed`, `lead.status_changed`, `daily_limit`, `rate_limit`, `token_expired`.
-- **Test mode**  Simulate sends without delivering real emails. Validate templates safely.
-- **Full REST API**  Every UI action has an equivalent API endpoint.
-- **Dark mode**  Because of course.
+### Core Sending
+- **Multi-step email sequences** — Unlimited follow-up steps, configurable wait days, automatic reply threading, HTML or plain-text bodies
+- **Smart inbox rotation** — Spread sends across unlimited Gmail and Microsoft 365 inboxes, with per-inbox daily limits respected automatically
+- **Warm-up scheduling** — Built-in ramp-up and configurable send-time jitter to protect deliverability
+- **Bounce detection** — Permanent failures are caught automatically; affected leads are stopped to protect sender reputation
+
+### Personalization & Testing
+- **Template variables** — Use `{{name}}`, `{{company}}`, `{{title}}`, or any custom field from your CSV in subject lines and email bodies
+- **A/B testing** — Multiple subject/body variants per step; Quickly tracks open rates, click rates, and reply rates per variant and selects randomly at send time
+- **CSV import** — Any CSV column beyond `email` automatically becomes a template variable
+
+### Inbox & Replies
+- **Unified inbox (Unibox)** — Real-time reply detection across all connected Gmail and Microsoft 365 accounts, with threaded view and compose/reply
+- **AI reply classification** — Automatically classifies every reply as `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `unsubscribed`. Supports 19 AI providers including **Ollama** for fully offline, on-premise classification
+- **Lead provider matching** — DNS lookup routes sends through inboxes that match the lead's email provider
+
+### Tracking & Analytics
+- **Open & click tracking** — Pixel tracking and link wrapping with custom domain support (automatic HTTPS via Caddy)
+- **Full analytics** — Per-campaign stats, per-step performance, open/click/reply rates, and timeline charts
+- **System health dashboard** — Live status for inbox token health, tracking domain reachability, and AI provider connectivity
+
+### Developer & Automation
+- **Webhooks** — 15 real-time event types: `email.sent`, `email.opened`, `email.clicked`, `email.bounced`, `lead.replied`, `lead.interested`, `lead.unsubscribed`, `lead.status_changed`, and more
+- **REST API** — 90+ endpoints secured by JWT auth and API keys. Custom n8n node included
+- **Email verification** — Verify lead addresses before sending via any HTTP provider
+- **Test mode** — Simulate sends, opens, and clicks without delivering real emails
+- **Priority scheduling** — Drag campaigns to set priority; choose priority-first or round-robin strategies
 
 ---
 
 ## Quick Start
 
-### Option 1  Self-hosted (VPS + Caddy, recommended)
+### Option A: Deploy on Railway (Fastest — no server needed)
+
+> Up and running in under 5 minutes with automatic HTTPS. Railway has a free tier.
+
+1. Create a new project on [Railway](https://railway.com) → **Deploy a Docker image** → `azowail/quickly:latest`
+2. Add a **PostgreSQL** database plugin — Railway injects `DATABASE_URL` automatically
+3. Set your environment variables (see [Environment Variables](#environment-variables) below)
+4. Deploy — Railway provides a public HTTPS URL automatically
+
+→ [Full Railway walkthrough](docs/INSTALL.md#option-a-railway--paas-no-server-needed)
+
+---
+
+### Option B: Self-host on Any Linux VPS (Recommended for production)
 
 ```bash
 mkdir quickly && cd quickly
@@ -40,72 +109,81 @@ curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.exampl
 mv .env.example .env
 ```
 
-Edit `.env`  at minimum set:
+Edit `.env` and set at minimum:
 
 ```env
 CADDY_HOST=yourdomain.com
 BASE_URL=https://yourdomain.com
-GOOGLE_CLIENT_ID=...
-GOOGLE_CLIENT_SECRET=...
+QUICKLY_SECRET_KEY=<run: python -c "import secrets; print(secrets.token_urlsafe(64))">
 ```
 
 ```bash
 docker compose up -d
 ```
 
-Caddy obtains a Let's Encrypt certificate automatically. Open `https://yourdomain.com`.
+Caddy automatically provisions and renews a Let's Encrypt TLS certificate. Open `https://yourdomain.com` — Quickly is live.
 
-### Option 2  PaaS (Railway, Render, Fly.io, etc.)
+→ [Full VPS guide with firewall setup and nginx migration](docs/INSTALL.md#option-b-fresh-vps--caddy-recommended)
 
-1. Create a new service and deploy image `azowail/quickly:latest` from Docker Hub.
-2. Add a managed PostgreSQL database and copy the connection string to `DATABASE_URL`.
-3. Set the environment variables from `.env.example` in your platform's dashboard.
-4. Done  you get a public HTTPS URL automatically.
+---
 
-### Option 3  Local development
+### Option C: Local Development
 
 ```bash
 git clone https://github.com/azowail/quickly.git
 cd quickly
 
-# Backend
 python -m venv .venv
-.venv\Scripts\activate        # Windows
-# source .venv/bin/activate   # macOS/Linux
+source .venv/bin/activate   # macOS/Linux
+# .venv\Scripts\activate    # Windows
+
 pip install -r requirements.txt
+cp .env.example .env
+# Edit .env: set BASE_URL=http://localhost:8000
 
-set DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/quickly
-set GOOGLE_CLIENT_ID=...
-set GOOGLE_CLIENT_SECRET=...
-set BASE_URL=http://localhost:8000
-uvicorn app.main:app --reload
+uvicorn app.main:app --reload    # API at http://localhost:8000
 
-# Frontend (separate terminal)
-cd frontend
-npm install
-npm run dev   # Vite on localhost:5173, proxies /api to localhost:8000
+# In a separate terminal:
+cd frontend && npm install && npm run dev   # UI at http://localhost:5173
 ```
 
-Or use the dev compose stack:
+→ [Full local dev guide including Docker dev stack](docs/INSTALL.md#option-d-local-development)
 
-```bash
-docker compose -f docker-compose.dev.yml up
-```
+---
+
+## First Login
+
+On first deploy, visit your Quickly URL — a registration form appears to create the initial admin account. **Registration closes after the first account is created.** Additional users must be invited by an admin from the Settings page.
+
+---
+
+## Connecting Inboxes
+
+Quickly supports Gmail (via Google OAuth) and Microsoft 365 / Outlook (via Azure OAuth). Gmail and Microsoft inboxes can be mixed freely in the same campaign.
+
+- → [Connect Gmail inboxes (Google Cloud OAuth setup)](docs/INSTALL.md#step-3a-connect-gmail-inboxes)
+- → [Connect Office 365 / Outlook inboxes (Azure portal setup)](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes)
 
 ---
 
 ## Environment Variables
 
+The `.env` file is intentionally minimal. All runtime settings — AI providers, sending windows, warm-up schedules, tracking domains — are configured from the **Settings page** in the UI after deployment.
+
 | Variable | Required | Description |
 |---|---|---|
-| `DATABASE_URL` | Auto (docker-compose sets it) | PostgreSQL connection string |
-| `BASE_URL` | Yes | Full URL including protocol (e.g. `https://yourdomain.com`) |
-| `GOOGLE_CLIENT_ID` | Yes | Google OAuth client ID |
-| `GOOGLE_CLIENT_SECRET` | Yes | Google OAuth client secret |
-| `CADDY_HOST` | For HTTPS | Domain name for Caddy's auto-TLS (e.g. `yourdomain.com`) |
-| `QUICKLY_MODE` | No | `production` (default in Docker) or `development` |
+| `BASE_URL` | **Yes** | Full URL with protocol, e.g. `https://yourdomain.com` |
+| `CADDY_HOST` | For HTTPS | Your domain — Caddy auto-provisions a Let's Encrypt certificate |
+| `DATABASE_URL` | Auto | Set by `docker-compose.yml`; only override for an external Postgres instance |
+| `GOOGLE_CLIENT_ID` | For Gmail | Google OAuth 2.0 client ID — [how to get this](docs/INSTALL.md#step-3a-connect-gmail-inboxes) |
+| `GOOGLE_CLIENT_SECRET` | For Gmail | Google OAuth 2.0 client secret — [how to get this](docs/INSTALL.md#step-3a-connect-gmail-inboxes) |
+| `OFFICE365_CLIENT_ID` | For Office 365 | Microsoft Entra app (client) ID — [how to get this](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes) |
+| `OFFICE365_CLIENT_SECRET` | For Office 365 | Microsoft Entra client secret — [how to get this](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes) |
+| `OFFICE365_TENANT_ID` | No | Defaults to `common` (multi-tenant); set to your tenant ID for single-tenant orgs |
+| `QUICKLY_SECRET_KEY` | Recommended | JWT signing secret. Auto-generated if unset — **set this**, or all sessions reset on restart |
+| `CORS_ORIGINS` | No | Comma-separated allowed origins for CORS |
 
-See `.env.example` for the full list with comments.
+See [`.env.example`](.env.example) for the full annotated reference.
 
 ---
 
@@ -114,36 +192,38 @@ See `.env.example` for the full list with comments.
 | Layer | Technology |
 |---|---|
 | Frontend | React 18, Vite, Tailwind CSS |
-| Backend | Python 3.12, FastAPI, SQLAlchemy (async) |
+| Backend | Python 3.12, FastAPI, SQLAlchemy 2.0 (async) |
 | Database | PostgreSQL 15 |
-| Email | Gmail API (OAuth2) |
-| Deployment | Docker, Caddy (auto HTTPS) |
-| Scheduling | APScheduler (in-process) |
+| Email APIs | Gmail API (OAuth2) · Microsoft Graph API (OAuth2) |
+| Reverse Proxy | Caddy (automatic HTTPS + custom tracking domains) |
+| Scheduling | APScheduler (in-process, PostgreSQL job store) |
+| Auth | JWT HS256, bcrypt, HMAC API keys, Fernet token encryption |
+| Automation | Custom n8n node (covers all API endpoints) |
 
 ---
 
 ## Template Variables
 
-Use these in email subject and body:
+Use these placeholders in email subjects and bodies:
 
-| Variable | Source |
+| Variable | Value |
 |---|---|
-| `{{name}}` | Lead name |
-| `{{email}}` | Lead email |
-| `{{company}}` | Lead `custom_data.company` |
-| `{{title}}` | Lead `custom_data.title` |
-| Any other key | Lead `custom_data.*` |
+| `{{name}}` | Lead's name |
+| `{{email}}` | Lead's email address |
+| `{{company}}` | `custom_data.company` |
+| `{{title}}` | `custom_data.title` |
+| `{{any_key}}` | Any column from your imported CSV |
 
 ---
 
 ## Running Tests
 
 ```bash
-# Fast  in-memory SQLite (default)
+# Fast — in-memory SQLite (no PostgreSQL required)
 pytest
 
-# Full  PostgreSQL
-set TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/test_quickly
+# Full — against PostgreSQL
+export TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/test_quickly
 pytest
 ```
 
@@ -151,15 +231,43 @@ pytest
 
 ## Documentation
 
-| Document | Description |
+| Document | What's inside |
 |---|---|
-| [docs/INSTALL.md](docs/INSTALL.md) | Full installation & deployment guide |
-| [docs/API.md](docs/API.md) | Complete API reference |
-| [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | Webhook events, payloads & examples |
-| [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) | Contributing guidelines |
+| [docs/INSTALL.md](docs/INSTALL.md) | **Full installation guide** — Railway, VPS, nginx migration, local dev, Gmail & Office 365 OAuth setup |
+| [docs/OFFICE365_SETUP.md](docs/OFFICE365_SETUP.md) | Step-by-step Azure portal walkthrough for Microsoft 365 / Outlook inboxes |
+| [docs/API.md](docs/API.md) | Complete REST API reference — 90+ endpoints |
+| [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | All 15 webhook event types, payload schemas, and authentication |
+| [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) | Contributing guidelines and local dev environment setup |
+
+---
+
+## Frequently Asked Questions
+
+**Is Quickly really free?**
+Yes. Quickly is MIT licensed. You pay nothing to Quickly — your only cost is the server you host it on (or Railway's free tier).
+
+**How does Quickly compare to Instantly or Smartlead?**
+Quickly covers the core features both tools offer: multi-step sequences, inbox rotation, A/B testing, AI reply classification, open/click tracking, and a unified inbox. The difference is ownership — your data stays on your server, and there are no monthly fees or seat limits.
+
+**Does Quickly support Microsoft 365 / Outlook?**
+Yes. Quickly connects to Gmail via Google OAuth and to Microsoft 365, Office 365, and personal Outlook.com accounts via Microsoft Graph. Both inbox types can be mixed in the same campaign.
+
+**Can I use Quickly without a custom domain?**
+Yes. You can deploy on Railway and use the generated subdomain, or run Quickly over plain HTTP without `CADDY_HOST` set.
+
+**Does AI reply classification require an OpenAI key?**
+No. Quickly supports 19 AI providers including Anthropic, Google Gemini, Mistral, Groq, Cohere, and Ollama — which lets you run classification fully locally with no external API calls.
+
+---
+
+## Contributing
+
+Contributions are welcome — bug reports, feature requests, and pull requests. See [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) for setup instructions and contribution guidelines.
+
+If Quickly is saving you money or replacing a paid tool in your workflow, a ⭐ goes a long way toward helping others find it.
 
 ---
 
 ## License
 
-MIT
+[MIT](LICENSE) — free to use, modify, and self-host forever.
