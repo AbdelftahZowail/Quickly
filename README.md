@@ -18,8 +18,15 @@
 </p>
 
 ---
-
-![Quickly dashboard showing campaign analytics and inbox rotation](docs/assets/app_screen_recording.gif)
+<video autoplay loop muted playsinline width="100%"
+       poster="docs/assets/app_demo_poster.jpg"
+       aria-label="Quickly dashboard showing campaign analytics and inbox rotation">
+  <source src="docs/assets/app_demo.webm" type="video/webm">
+  <source src="docs/assets/app_demo.mp4"  type="video/mp4">
+  <img src="docs/assets/app_demo_poster.jpg"
+       alt="Quickly dashboard showing campaign analytics and inbox rotation"
+       width="100%">
+</video>
 
 ---
 
