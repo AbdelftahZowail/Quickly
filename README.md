@@ -8,7 +8,7 @@
 
 <h1 align="center">Quickly — Open-Source Self-Hosted Cold Email Platform</h1>
 
-<p align="center"><strong>Replace Instantly, Smartlead, and Lemlist. Self-host on your own server. Pay nothing, forever.</strong></p>
+<p align="center"><strong>A simple, focused cold email platform you host yourself. Built to feel just like Instantly, Smartlead, and Lemlist — but free and fully under your control.</strong></p>
 
 <p align="center">
   <a href="docs/INSTALL.md">Installation Guide</a> &nbsp;|&nbsp;
@@ -23,7 +23,11 @@
 
 ## What is Quickly?
 
-**Quickly is a free, open-source cold email platform you self-host with a single Docker command.** It gives sales teams, agencies, and indie hackers the same multi-inbox sequencing, AI reply classification, and campaign analytics as tools like Instantly and Smartlead — with no monthly fees, no per-seat pricing, and no lead data leaving your server.
+**Quickly is a free, open-source cold email platform designed to be extremely simple and purpose-built for cold outreach.** It gives sales teams, agencies, and indie hackers the same multi-inbox sequencing, AI reply classification, and campaign analytics you expect from tools like Instantly, Smartlead, and Lemlist — but self-hosted on your own infrastructure.
+
+Emails are sent through **Google and Microsoft’s official APIs using OAuth 2.0**, meaning your campaigns use **Gmail and Microsoft 365's own sending infrastructure and IP reputation** rather than shared SMTP servers. The result is deliverability that matches — and often exceeds — traditional SaaS cold email tools.
+
+Quickly focuses on doing **cold email extremely well**, without unnecessary complexity. If you've used Instantly, Smartlead, or Lemlist before, you'll feel immediately at home.
 
 ```bash
 # Get up and running in under 5 minutes
@@ -36,47 +40,53 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 
 ## Why Quickly? (vs. Instantly, Smartlead, Lemlist)
 
-| What you're paying for today | What Quickly gives you instead |
-|---|---|
-| $97–$500/month in SaaS fees | Deploy free on Railway or any Linux VPS |
-| Per-seat pricing that scales against you | Unlimited team members, unlimited contacts |
-| Your lead data on vendor servers | 100% self-hosted — your server, your Postgres database |
-| Vendor lock-in and feature gating | MIT licensed, fully hackable, 90+ REST API endpoints |
-| Complex multi-tool onboarding | One `docker compose up` — live in under 5 minutes |
+| What you're paying for today             | What Quickly gives you instead                         |
+| ---------------------------------------- | ------------------------------------------------------ |
+| $97–$500/month in SaaS fees              | Deploy free on Railway or any Linux VPS                |
+| Per-seat pricing that scales against you | Unlimited team members, unlimited contacts             |
+| Your lead data on vendor servers         | 100% self-hosted — your server, your Postgres database |
+| Vendor lock-in and feature gating        | MIT licensed, fully hackable, 90+ REST API endpoints   |
+| Complex multi-tool onboarding            | One `docker compose up` — live in under 5 minutes      |
 
-> **Quickly is the open-source alternative to Instantly, Smartlead, and Lemlist** for teams that want full ownership of their cold email infrastructure.
+> **Quickly is the open-source alternative to Instantly, Smartlead, and Lemlist** — built to feel familiar, but simpler, self-hosted, and fully under your control.
 
 ---
 
 ## Features
 
 ### Core Sending
-- **Multi-step email sequences** — Unlimited follow-up steps, configurable wait days, automatic reply threading, HTML or plain-text bodies
-- **Smart inbox rotation** — Spread sends across unlimited Gmail and Microsoft 365 inboxes, with per-inbox daily limits respected automatically
-- **Warm-up scheduling** — Built-in ramp-up and configurable send-time jitter to protect deliverability
-- **Bounce detection** — Permanent failures are caught automatically; affected leads are stopped to protect sender reputation
+
+* **Multi-step email sequences** — Unlimited follow-up steps, configurable wait days, automatic reply threading, HTML or plain-text bodies
+* **Smart inbox rotation** — Spread sends across unlimited Gmail and Microsoft 365 inboxes, with per-inbox daily limits respected automatically
+* **OAuth2 sending via Gmail & Microsoft 365** — Emails are sent using Google and Microsoft’s official APIs, leveraging their trusted infrastructure and IP reputation instead of shared SMTP servers
+* **Warm-up scheduling** — Built-in ramp-up and configurable send-time jitter to protect deliverability
+* **Bounce detection** — Permanent failures are caught automatically; affected leads are stopped to protect sender reputation
 
 ### Personalization & Testing
-- **Template variables** — Use `{{name}}`, `{{company}}`, `{{title}}`, or any custom field from your CSV in subject lines and email bodies
-- **A/B testing** — Multiple subject/body variants per step; Quickly tracks open rates, click rates, and reply rates per variant and selects randomly at send time
-- **CSV import** — Any CSV column beyond `email` automatically becomes a template variable
+
+* **Template variables** — Use `{{name}}`, `{{company}}`, `{{title}}`, or any custom field from your CSV in subject lines and email bodies
+* **A/B testing** — Multiple subject/body variants per step; Quickly tracks open rates, click rates, and reply rates per variant and selects randomly at send time
+* **CSV import** — Any CSV column beyond `email` automatically becomes a template variable
 
 ### Inbox & Replies
-- **Unified inbox (Unibox)** — Real-time reply detection across all connected Gmail and Microsoft 365 accounts, with threaded view and compose/reply
-- **AI reply classification** — Automatically classifies every reply as `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `unsubscribed`. Supports 19 AI providers including **Ollama** for fully offline, on-premise classification
-- **Lead provider matching** — DNS lookup routes sends through inboxes that match the lead's email provider
+
+* **Unified inbox (Unibox)** — Real-time reply detection across all connected Gmail and Microsoft 365 accounts, with threaded view and compose/reply
+* **AI reply classification** — Automatically classifies every reply as `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `unsubscribed`. Supports 19 AI providers including **Ollama** for fully offline, on-premise classification
+* **Lead provider matching** — DNS lookup routes sends through inboxes that match the lead's email provider
 
 ### Tracking & Analytics
-- **Open & click tracking** — Pixel tracking and link wrapping with custom domain support (automatic HTTPS via Caddy)
-- **Full analytics** — Per-campaign stats, per-step performance, open/click/reply rates, and timeline charts
-- **System health dashboard** — Live status for inbox token health, tracking domain reachability, and AI provider connectivity
+
+* **Open & click tracking** — Pixel tracking and link wrapping with custom domain support (automatic HTTPS via Caddy)
+* **Full analytics** — Per-campaign stats, per-step performance, open/click/reply rates, and timeline charts
+* **System health dashboard** — Live status for inbox token health, tracking domain reachability, and AI provider connectivity
 
 ### Developer & Automation
-- **Webhooks** — 15 real-time event types: `email.sent`, `email.opened`, `email.clicked`, `email.bounced`, `lead.replied`, `lead.interested`, `lead.unsubscribed`, `lead.status_changed`, and more
-- **REST API** — 90+ endpoints secured by JWT auth and API keys. Custom n8n node included
-- **Email verification** — Verify lead addresses before sending via any HTTP provider
-- **Test mode** — Simulate sends, opens, and clicks without delivering real emails
-- **Priority scheduling** — Drag campaigns to set priority; choose priority-first or round-robin strategies
+
+* **Webhooks** — 15 real-time event types: `email.sent`, `email.opened`, `email.clicked`, `email.bounced`, `lead.replied`, `lead.interested`, `lead.unsubscribed`, `lead.status_changed`, and more
+* **REST API** — 90+ endpoints secured by JWT auth and API keys. Custom n8n node included
+* **Email verification** — Verify lead addresses before sending via any HTTP provider
+* **Test mode** — Simulate sends, opens, and clicks without delivering real emails
+* **Priority scheduling** — Drag campaigns to set priority; choose priority-first or round-robin strategies
 
 ---
 
@@ -158,8 +168,8 @@ On first deploy, visit your Quickly URL — a registration form appears to creat
 
 Quickly supports Gmail (via Google OAuth) and Microsoft 365 / Outlook (via Azure OAuth). Gmail and Microsoft inboxes can be mixed freely in the same campaign.
 
-- → [Connect Gmail inboxes (Google Cloud OAuth setup)](docs/INSTALL.md#step-3a-connect-gmail-inboxes)
-- → [Connect Office 365 / Outlook inboxes (Azure portal setup)](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes)
+* → [Connect Gmail inboxes (Google Cloud OAuth setup)](docs/INSTALL.md#step-3a-connect-gmail-inboxes)
+* → [Connect Office 365 / Outlook inboxes (Azure portal setup)](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes)
 
 ---
 
@@ -167,18 +177,18 @@ Quickly supports Gmail (via Google OAuth) and Microsoft 365 / Outlook (via Azure
 
 The `.env` file is intentionally minimal. All runtime settings — AI providers, sending windows, warm-up schedules, tracking domains — are configured from the **Settings page** in the UI after deployment.
 
-| Variable | Required | Description |
-|---|---|---|
-| `BASE_URL` | **Yes** | Full URL with protocol, e.g. `https://yourdomain.com` |
-| `CADDY_HOST` | For HTTPS | Your domain — Caddy auto-provisions a Let's Encrypt certificate |
-| `DATABASE_URL` | Auto | Set by `docker-compose.yml`; only override for an external Postgres instance |
-| `GOOGLE_CLIENT_ID` | For Gmail | Google OAuth 2.0 client ID — [how to get this](docs/INSTALL.md#step-3a-connect-gmail-inboxes) |
-| `GOOGLE_CLIENT_SECRET` | For Gmail | Google OAuth 2.0 client secret — [how to get this](docs/INSTALL.md#step-3a-connect-gmail-inboxes) |
-| `OFFICE365_CLIENT_ID` | For Office 365 | Microsoft Entra app (client) ID — [how to get this](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes) |
-| `OFFICE365_CLIENT_SECRET` | For Office 365 | Microsoft Entra client secret — [how to get this](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes) |
-| `OFFICE365_TENANT_ID` | No | Defaults to `common` (multi-tenant); set to your tenant ID for single-tenant orgs |
-| `QUICKLY_SECRET_KEY` | Recommended | JWT signing secret. Auto-generated if unset — **set this**, or all sessions reset on restart |
-| `CORS_ORIGINS` | No | Comma-separated allowed origins for CORS |
+| Variable                  | Required       | Description                                                                       |
+| ------------------------- | -------------- | --------------------------------------------------------------------------------- |
+| `BASE_URL`                | **Yes**        | Full URL with protocol, e.g. `https://yourdomain.com`                             |
+| `CADDY_HOST`              | For HTTPS      | Your domain — Caddy auto-provisions a Let's Encrypt certificate                   |
+| `DATABASE_URL`            | Auto           | Set by `docker-compose.yml`; only override for an external Postgres instance      |
+| `GOOGLE_CLIENT_ID`        | For Gmail      | Google OAuth 2.0 client ID                                                        |
+| `GOOGLE_CLIENT_SECRET`    | For Gmail      | Google OAuth 2.0 client secret                                                    |
+| `OFFICE365_CLIENT_ID`     | For Office 365 | Microsoft Entra app (client) ID                                                   |
+| `OFFICE365_CLIENT_SECRET` | For Office 365 | Microsoft Entra client secret                                                     |
+| `OFFICE365_TENANT_ID`     | No             | Defaults to `common` (multi-tenant); set to your tenant ID for single-tenant orgs |
+| `QUICKLY_SECRET_KEY`      | Recommended    | JWT signing secret                                                                |
+| `CORS_ORIGINS`            | No             | Comma-separated allowed origins                                                   |
 
 See [`.env.example`](.env.example) for the full annotated reference.
 
@@ -186,52 +196,21 @@ See [`.env.example`](.env.example) for the full annotated reference.
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Frontend | React 18, Vite, Tailwind CSS |
-| Backend | Python 3.12, FastAPI, SQLAlchemy 2.0 (async) |
-| Database | PostgreSQL 15 |
-| Email APIs | Gmail API (OAuth2) · Microsoft Graph API (OAuth2) |
-| Reverse Proxy | Caddy (automatic HTTPS + custom tracking domains) |
-| Scheduling | APScheduler (in-process, PostgreSQL job store) |
-| Auth | JWT HS256, bcrypt, HMAC API keys, Fernet token encryption |
-| Automation | Custom n8n node (covers all API endpoints) |
-
----
-
-## Template Variables
-
-Use these placeholders in email subjects and bodies:
-
-| Variable | Value |
-|---|---|
-| `{{name}}` | Lead's name |
-| `{{email}}` | Lead's email address |
-| `{{company}}` | `custom_data.company` |
-| `{{title}}` | `custom_data.title` |
-| `{{any_key}}` | Any column from your imported CSV |
-
----
-
-## Running Tests
-
-```bash
-# Fast — in-memory SQLite (no PostgreSQL required)
-pytest
-
-# Full — against PostgreSQL
-export TEST_DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost/test_quickly
-pytest
-```
-
----
-
+| Layer         | Technology                                                |
+| ------------- | --------------------------------------------------------- |
+| Frontend      | React 18, Vite, Tailwind CSS                              |
+| Backend       | Python 3.12, FastAPI, SQLAlchemy 2.0 (async)              |
+| Database      | PostgreSQL 15                                             |
+| Email APIs    | Gmail API (OAuth2) · Microsoft Graph API (OAuth2)         |
+| Reverse Proxy | Caddy (automatic HTTPS + custom tracking domains)         |
+| Scheduling    | APScheduler (in-process, PostgreSQL job store)            |
+| Auth          | JWT HS256, bcrypt, HMAC API keys, Fernet token encryption |
+| Automation    | Custom n8n node (covers all API endpoints)                |
 ## Documentation
 
 | Document | What's inside |
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | **Full installation guide** — Railway, VPS, nginx migration, local dev, Gmail & Office 365 OAuth setup |
-| [docs/OFFICE365_SETUP.md](docs/OFFICE365_SETUP.md) | Step-by-step Azure portal walkthrough for Microsoft 365 / Outlook inboxes |
 | [docs/API.md](docs/API.md) | Complete REST API reference — 90+ endpoints |
 | [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | All 15 webhook event types, payload schemas, and authentication |
 | [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) | Contributing guidelines and local dev environment setup |
