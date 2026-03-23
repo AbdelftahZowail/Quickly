@@ -1013,31 +1013,16 @@ async def save_email_verification_settings(
     import json
 
     # Load current stored credentials to detect changes
-    def _norm_list(vals: list[str]) -> set[str]:
-        return {v.strip().lower() for v in vals if v and v.strip()}
-
     stored_provider = await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja"
     stored_key_set = bool(await get_setting(db, EMAIL_VERIFICATION_API_KEY) or "")
     stored_custom_url = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_URL) or ""
-    stored_custom_field = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD) or ""
-    stored_custom_valid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
-    stored_custom_invalid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
-    stored_custom_method = (await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET").upper()
     currently_tested = (await get_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED) or "false").lower() in ("true", "1", "yes")
 
     new_key = payload.api_key.strip()
-    custom_changed = (
-        payload.custom_url.strip() != stored_custom_url
-        or payload.custom_field_path.strip() != stored_custom_field
-        or (payload.custom_method.strip().upper() or "GET") != stored_custom_method
-        or _norm_list(payload.custom_valid_values) != _norm_list(stored_custom_valid)
-        or _norm_list(payload.custom_invalid_values) != _norm_list(stored_custom_invalid)
-    ) if payload.provider.strip() == "custom" else False
-
     creds_changed = (
         bool(new_key)
         or (payload.provider.strip() or "mailtester_ninja") != stored_provider
-        or (payload.provider.strip() == "custom" and custom_changed)
+        or (payload.provider.strip() == "custom" and payload.custom_url.strip() != stored_custom_url)
     )
 
     # Block enabling without a successful connection test
@@ -1124,23 +1109,8 @@ async def test_custom_email_verification(
 
     Pass ``test_emails`` to override the default sample selection.
     """
-    import json
-    from app import time as _time
     from app.email_verification import CustomHttpProvider, _get_nested
     from app.models import Inbox, Lead
-    from app.app_settings import (
-        get_setting,
-        put_setting,
-        EMAIL_VERIFICATION_PROVIDER,
-        EMAIL_VERIFICATION_CUSTOM_URL,
-        EMAIL_VERIFICATION_CUSTOM_FIELD,
-        EMAIL_VERIFICATION_CUSTOM_VALID_VALUES,
-        EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES,
-        EMAIL_VERIFICATION_CUSTOM_METHOD,
-        EMAIL_VERIFICATION_CONNECTION_TESTED,
-        EMAIL_VERIFICATION_LAST_ERROR,
-        EMAIL_VERIFICATION_LAST_ERROR_AT,
-    )
 
     if not payload.url_template or "{email}" not in payload.url_template:
         raise HTTPException(400, "url_template must contain {email}")
@@ -1178,10 +1148,6 @@ async def test_custom_email_verification(
         for synthetic in ["test@gmail.com", "invalid@nonexistent-domain-xyz123.com"]:
             emails_with_source.append((synthetic, "synthetic"))
 
-    # Helper to compare list values case-insensitively while ignoring whitespace
-    def _norm_list(vals: list[str]) -> set[str]:
-        return {v.strip().lower() for v in vals if v and v.strip()}
-
     results = []
     for email, source in emails_with_source:
         vr = await provider.verify(email, "")
@@ -1198,48 +1164,5 @@ async def test_custom_email_verification(
             "message": vr.message,
         })
 
-    decisive_statuses = {"valid", "invalid", "risky", "catch_all"}
-    has_decisive = any(r["status"] in decisive_statuses for r in results)
-
-    connection_tested = False
-    try:
-        stored_provider = (await get_setting(db, EMAIL_VERIFICATION_PROVIDER) or "mailtester_ninja").strip()
-        stored_url = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_URL) or ""
-        stored_field = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD) or ""
-        stored_valid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES) or "[]")
-        stored_invalid = json.loads(await get_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES) or "[]")
-        stored_method = await get_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD) or "GET"
-
-        matches_saved_config = (
-            stored_url.strip() == payload.url_template.strip()
-            and stored_field.strip() == payload.field_path.strip()
-            and _norm_list(stored_valid) == _norm_list(payload.valid_values)
-            and _norm_list(stored_invalid) == _norm_list(payload.invalid_values)
-            and stored_method.strip().upper() == (payload.method or "GET").strip().upper()
-        )
-
-        if has_decisive:
-            # Persist the tested config so enabling can proceed without an extra save step
-            await put_setting(db, EMAIL_VERIFICATION_PROVIDER, "custom")
-            await put_setting(db, EMAIL_VERIFICATION_CUSTOM_URL, payload.url_template.strip())
-            await put_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD, payload.field_path.strip())
-            await put_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES, json.dumps(payload.valid_values))
-            await put_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES, json.dumps(payload.invalid_values))
-            await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, (payload.method or "GET").strip().upper())
-            await put_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED, "true")
-            await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR, "")
-            await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR_AT, "")
-            await db.commit()
-            connection_tested = True
-        elif matches_saved_config and stored_provider == "custom":
-            # Only overwrite connection state when the test used the saved config
-            await put_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED, "false")
-            await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR,
-                              "Custom provider test did not return a decisive status")
-            await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR_AT, _time.utcnow().isoformat() + "Z")
-            await db.commit()
-    except Exception as exc:
-        log.warning("Unable to update custom provider connection status: %s", exc)
-
-    return {"results": results, "connection_tested": connection_tested}
+    return {"results": results}
 
