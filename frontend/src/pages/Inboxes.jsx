@@ -37,11 +37,7 @@ function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
     // Step 1: tell the backend to whitelist this domain so Caddy can
     // provision an SSL cert when it sees the first HTTPS connection.
     try {
-      await fetch('/api/settings/register-tracking-domain-pending', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain }),
-      });
+      await api.post('/settings/register-tracking-domain-pending', { domain });
     } catch (_) {
       // Non-fatal — proceed to verify anyway.
     }
@@ -64,10 +60,9 @@ function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
       }
 
       try {
-        const res = await fetch(
-          `/api/settings/verify-tracking-domain?domain=${encodeURIComponent(domain)}`
+        const data = await api.get(
+          `/settings/verify-tracking-domain?domain=${encodeURIComponent(domain)}`
         );
-        const data = await res.json();
         if (abortRef.current) return;
         if (data.ok) {
           setVerifyState('ok');
