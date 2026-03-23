@@ -172,6 +172,8 @@ export default function EmailVerificationSettings() {
         test_emails: extra, // empty = backend auto-picks from inboxes/leads/synthetics
       });
       setCustomTestResults(res.results || []);
+      setConnectionTested(true);
+      setCredsChanged(false);
       notify({ type: 'success', message: `Tested ${res.results?.length ?? 0} emails` });
     } catch (e) {
       notify({ type: 'error', message: e.message });
