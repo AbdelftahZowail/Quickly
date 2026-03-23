@@ -172,10 +172,6 @@ export default function EmailVerificationSettings() {
         test_emails: extra, // empty = backend auto-picks from inboxes/leads/synthetics
       });
       setCustomTestResults(res.results || []);
-      if (res.connection_tested) {
-        setConnectionTested(true);
-        setCredsChanged(false);
-      }
       notify({ type: 'success', message: `Tested ${res.results?.length ?? 0} emails` });
     } catch (e) {
       notify({ type: 'error', message: e.message });
@@ -316,20 +312,12 @@ export default function EmailVerificationSettings() {
                         setCustomUrl(e.target.value);
                         setProbeResult(null);
                         setCustomTestResults(null);
-                        setConnectionTested(false);
-                        setCredsChanged(true);
-                        setTestResult(null);
                       }}
                     />
                     <select
                       className="border rounded-lg px-3 py-2 text-sm dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-teal-300"
                       value={customMethod}
-                      onChange={e => {
-                        setCustomMethod(e.target.value);
-                        setConnectionTested(false);
-                        setCredsChanged(true);
-                        setTestResult(null);
-                      }}
+                      onChange={e => setCustomMethod(e.target.value)}
                     >
                       <option value="GET">GET</option>
                       <option value="POST">POST</option>
@@ -381,12 +369,7 @@ export default function EmailVerificationSettings() {
                     className="border rounded-lg px-3 py-2 text-sm w-full max-w-sm dark:bg-gray-800 dark:border-gray-600 font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
                     placeholder="status"
                     value={customField}
-                    onChange={e => {
-                      setCustomField(e.target.value);
-                      setConnectionTested(false);
-                      setCredsChanged(true);
-                      setTestResult(null);
-                    }}
+                    onChange={e => setCustomField(e.target.value)}
                   />
                 </div>
 
@@ -407,12 +390,7 @@ export default function EmailVerificationSettings() {
                         className="border rounded-lg px-3 py-2 text-sm w-full dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-green-300"
                         placeholder="valid, ok, deliverable"
                         value={customValidValues}
-                        onChange={e => {
-                          setCustomValidValues(e.target.value);
-                          setConnectionTested(false);
-                          setCredsChanged(true);
-                          setTestResult(null);
-                        }}
+                        onChange={e => setCustomValidValues(e.target.value)}
                       />
                     </div>
                     <div>
@@ -424,12 +402,7 @@ export default function EmailVerificationSettings() {
                         className="border rounded-lg px-3 py-2 text-sm w-full dark:bg-gray-800 dark:border-gray-600 focus:outline-none focus:ring-2 focus:ring-red-300"
                         placeholder="invalid, blocked, risky"
                         value={customInvalidValues}
-                        onChange={e => {
-                          setCustomInvalidValues(e.target.value);
-                          setConnectionTested(false);
-                          setCredsChanged(true);
-                          setTestResult(null);
-                        }}
+                        onChange={e => setCustomInvalidValues(e.target.value)}
                       />
                     </div>
                   </div>
