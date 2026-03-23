@@ -1164,5 +1164,18 @@ async def test_custom_email_verification(
             "message": vr.message,
         })
 
+    # Persist the tested settings so that creds_changed stays False on save
+    # and the enable gate can pass.
+    import json as _json
+    await put_setting(db, EMAIL_VERIFICATION_PROVIDER, "custom")
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_URL, payload.url_template.strip())
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_FIELD, payload.field_path.strip())
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_VALID_VALUES, _json.dumps(payload.valid_values))
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_INVALID_VALUES, _json.dumps(payload.invalid_values))
+    await put_setting(db, EMAIL_VERIFICATION_CUSTOM_METHOD, payload.method.strip().upper() or "GET")
+    await put_setting(db, EMAIL_VERIFICATION_CONNECTION_TESTED, "true")
+    await put_setting(db, EMAIL_VERIFICATION_LAST_ERROR, "")
+    await db.commit()
+
     return {"results": results}
 
