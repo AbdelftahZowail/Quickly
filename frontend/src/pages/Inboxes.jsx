@@ -181,6 +181,7 @@ export default function Inboxes() {
     tracking_domain: '',
     ramp_up_enabled: false,
     ramp_up_period_days: 42,
+    ramp_up_start: 1,
   };
   const [form, setForm] = useState(initialForm);
   const [message, setMessage] = useState(null);
@@ -274,7 +275,7 @@ export default function Inboxes() {
         return;
       }
       // redirect to Gmail OAuth
-      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false' });
+      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false', ramp_up_start: form.ramp_up_start });
       window.location.href = '/oauth/google/authorize?' + params;
       return;
     }
@@ -287,7 +288,7 @@ export default function Inboxes() {
         return;
       }
       // redirect to Office 365 OAuth
-      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false' });
+      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false', ramp_up_start: form.ramp_up_start });
       window.location.href = '/oauth/office365/authorize?' + params;
       return;
     }
@@ -358,6 +359,7 @@ export default function Inboxes() {
         tracking_domain: newDomain || null,
         ramp_up_enabled: editing.ramp_up_enabled,
         ramp_up_period_days: editing.ramp_up_period_days,
+        ramp_up_start: editing.ramp_up_start ?? 1,
       };
       await api.patch(`/inboxes/${editing.id}`, body);
       setEditMsg({ type: 'success', text: 'Inbox updated' });
@@ -459,6 +461,19 @@ export default function Inboxes() {
       load();
     } catch (e) {
       notify({ type: 'error', message: 'Error resuming inbox: ' + e.message });
+    }
+  };
+
+  const reconnectInbox = (inbox) => {
+    const params = new URLSearchParams({
+      display_name: inbox.display_name || '',
+      max_per_day: inbox.max_emails_per_day,
+      ramp_up_enabled: inbox.ramp_up_enabled ? 'true' : 'false',
+    });
+    if (inbox.provider === 'gmail') {
+      window.location.href = '/oauth/google/authorize?' + params;
+    } else if (inbox.provider === 'office365') {
+      window.location.href = '/oauth/office365/authorize?' + params;
     }
   };
 
@@ -619,10 +634,23 @@ export default function Inboxes() {
                           Enable inbox warm-up (ramp-up)
                         </label>
                         {editing.ramp_up_enabled && (
-                          <p className="text-xs text-gray-500">
-                            Sends 1 email on day one, 2 on day two, and so on until it reaches {editing.max_emails_per_day}, then turns off automatically.
-                            Today's limit: <strong>{editing.effective_max_per_day ?? 1}</strong> / {editing.max_emails_per_day}
-                          </p>
+                          <div className="space-y-2">
+                            <div>
+                              <label className="block text-xs font-medium text-gray-700">Starting emails per day</label>
+                              <input
+                                type="number"
+                                value={editing.ramp_up_start ?? 1}
+                                onChange={e => { setEditing(prev => ({ ...prev, ramp_up_start: Math.max(1, +e.target.value) })); setEditDirty(true); }}
+                                min={1}
+                                max={editing.max_emails_per_day}
+                                className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                              />
+                            </div>
+                            <p className="text-xs text-gray-500">
+                              Starts at {editing.ramp_up_start ?? 1} email{(editing.ramp_up_start ?? 1) !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {editing.max_emails_per_day}.
+                              Today's limit: <strong>{editing.effective_max_per_day ?? editing.ramp_up_start ?? 1}</strong> / {editing.max_emails_per_day}
+                            </p>
+                          </div>
                         )}
                       </div>
                       <div className="flex gap-2 pt-1">
@@ -733,7 +761,7 @@ export default function Inboxes() {
                           )}
                           <div className="flex justify-between text-sm">
                             <span className="text-gray-600">Ramp period</span>
-                            <span className="font-medium text-gray-900">{selectedInbox.ramp_up_period_days || 42} days</span>
+                            <span className="font-medium text-gray-900">{selectedInbox.max_emails_per_day - (selectedInbox.ramp_up_start || 1)} days</span>
                           </div>
                         </div>
                       </>
@@ -767,6 +795,17 @@ export default function Inboxes() {
                         : <Button variant="outline" size="sm" className="flex-1 bg-orange-50 text-orange-700 border-orange-300 hover:bg-orange-100" onClick={() => openPauseModal(selectedInbox)}>Pause</Button>
                       }
                     </div>
+                    {(selectedInbox.provider === 'gmail' || selectedInbox.provider === 'office365') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={() => reconnectInbox(selectedInbox)}
+                        title="Re-authenticate this inbox to refresh the OAuth login"
+                      >
+                        Reconnect login
+                      </Button>
+                    )}
                     <Button variant="danger" size="sm" className="w-full" onClick={() => deleteInbox(selectedInbox.id, selectedInbox.email)}>Delete inbox</Button>
                   </div>
                 </>
@@ -830,9 +869,22 @@ export default function Inboxes() {
                   Enable inbox warm-up (ramp-up)
                 </label>
                 {form.ramp_up_enabled && (
-                  <p className="text-xs text-gray-500">
-                    Starts at 1 email on day one, adds 1 more each day, and turns off automatically once it reaches {form.max_emails_per_day}.
-                  </p>
+                  <div className="space-y-2">
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700">Starting emails per day</label>
+                      <input
+                        type="number"
+                        value={form.ramp_up_start}
+                        onChange={e => setForm(f => ({ ...f, ramp_up_start: Math.max(1, +e.target.value) }))}
+                        min={1}
+                        max={form.max_emails_per_day}
+                        className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                      />
+                    </div>
+                    <p className="text-xs text-gray-500">
+                      Starts at {form.ramp_up_start} email{form.ramp_up_start !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {form.max_emails_per_day}.
+                    </p>
+                  </div>
                 )}
               </div>
               {form.provider === 'gmail' && (

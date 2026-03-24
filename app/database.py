@@ -66,12 +66,32 @@ async def get_db():
 # A clean database will be created by init_db() using SQLAlchemy metadata.
 
 
+async def _run_migrations(conn) -> None:
+    """Apply incremental schema changes to existing databases.
+
+    Each statement is idempotent — safe to run on every startup.
+    New columns are added with ADD COLUMN IF NOT EXISTS so they are
+    skipped silently when they already exist.
+    """
+    from sqlalchemy import text
+
+    migrations = [
+        # 2026-03-24: ramp-up starting number (default 1 preserves old behaviour)
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_start INTEGER NOT NULL DEFAULT 1",
+        # 2026-03-24: track when ramp-up was last enabled (NULL = use created_at as fallback)
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_started_at TIMESTAMP WITHOUT TIME ZONE NULL",
+    ]
+    for stmt in migrations:
+        await conn.execute(text(stmt))
+
+
 async def init_db():
     from app import models  # noqa: F401 - so Base.metadata has all tables
     from app.settings_manager import initialize_settings
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _run_migrations(conn)
 
     # Load settings from database into memory
     async with AsyncSessionLocal() as session:

@@ -982,6 +982,10 @@ class PreviewRequest(BaseModel):
     sequence_id: int
     lead_id: int | None = None
     variant_id: int | None = None  # If set, preview this A/B variant's content
+    # Optional unsaved-content overrides (used when previewing before saving)
+    subject_override: str | None = None
+    body_override: str | None = None
+    is_html_override: bool | None = None
 
 
 @router.post("/{campaign_id}/preview")
@@ -1011,9 +1015,10 @@ async def preview_email(
         raise HTTPException(404, "Campaign not found")
 
     # Resolve variant content when a variant_id is supplied.
-    preview_body = seq.body or ""
-    preview_subject = seq.subject or ""
-    preview_is_html = bool(seq.is_html)
+    # If unsaved overrides are provided, use them instead of the DB values.
+    preview_body = data.body_override if data.body_override is not None else (seq.body or "")
+    preview_subject = data.subject_override if data.subject_override is not None else (seq.subject or "")
+    preview_is_html = data.is_html_override if data.is_html_override is not None else bool(seq.is_html)
     variant_label: str | None = None
     if data.variant_id is not None:
         from app.models import SequenceVariant

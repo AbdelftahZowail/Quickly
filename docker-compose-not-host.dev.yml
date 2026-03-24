@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: quickly
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
+    volumes:
+      - ./:/app
+    ports:
+      - "8000:8000"   # direct access
+***REMOVED***
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    command: npm run dev -- --host
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5173:5173"
+    env_file: .env
+    environment:
+      VITE_API_URL: "http://backend:8000"
+    depends_on:
+      backend:
+        condition: service_started
+
+# Use the existing production volume that already has your data.
+# This volume was created by the original quickly_db_1 container.
+volumes:
+  pgdata:
+    external: true
+    name: quickly_pgdata

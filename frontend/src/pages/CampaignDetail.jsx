@@ -1926,7 +1926,7 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewTe
 }
 
 // ─── Preview Modal ────────────────────────────────────────────────────────────
-function PreviewModal({ sequence, campaignId, leads, onClose, variant = null }) {
+function PreviewModal({ sequence, campaignId, leads, onClose, variant = null, editingOverride = null }) {
   const [leadId,    setLeadId]    = useState(leads[0]?.lead_id ?? '');
   const [preview,   setPreview]   = useState(null);
   const [loading,   setLoading]   = useState(false);
@@ -1949,6 +1949,11 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null }) 
         sequence_id: sequence.id,
         lead_id: leadId ? Number(leadId) : null,
         ...(variant ? { variant_id: variant.id } : {}),
+        ...(editingOverride ? {
+          subject_override: editingOverride.subject ?? null,
+          body_override: editingOverride.body ?? null,
+          is_html_override: editingOverride.is_html ?? null,
+        } : {}),
       });
       setPreview(data);
     } catch (e) {
@@ -1956,7 +1961,7 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null }) 
     } finally {
       setLoading(false);
     }
-  }, [campaignId, sequence.id, leadId, variant]);
+  }, [campaignId, sequence.id, leadId, variant, editingOverride]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -2103,6 +2108,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
   const [showEditWarning, setShowEditWarning] = useState(false);
   const [previewSeq, setPreviewSeq] = useState(null);
   const [previewVariant, setPreviewVariant] = useState(null);
+  const [previewOverride, setPreviewOverride] = useState(null);
   const [selectedIdx, setSelectedIdx] = useState(sequences.length > 0 ? 0 : null);
   const [showAddForm, setShowAddForm] = useState(sequences.length === 0);
   const [editingVariant, setEditingVariant] = useState(null);
@@ -2309,7 +2315,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                 <p className="text-xs text-gray-400">Modify the email content and timing</p>
               </div>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => setPreviewSeq(editing)}>Preview</Button>
+                <Button size="sm" variant="outline" onClick={() => { setPreviewSeq(editing); setPreviewVariant(null); setPreviewOverride(editing); }}>Preview</Button>
                 <Button size="sm" variant="destructive" onClick={() => deleteSeq(editing)}>Delete</Button>
               </div>
             </div>
@@ -2342,7 +2348,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                 <p className="text-xs text-gray-400">{selectedSeq.wait_days_after_previous}d wait{selectedSeq.is_html ? ' · HTML' : ' · Plain text'}{' · Day ' + getCumulativeDay(selectedIdx)}</p>
               </div>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => setPreviewSeq(selectedSeq)}>Preview</Button>
+                <Button size="sm" variant="outline" onClick={() => { setPreviewSeq(selectedSeq); setPreviewOverride(null); }}>Preview</Button>
                 <Button size="sm" variant="default" onClick={() => openEdit(selectedSeq)}>Edit</Button>
                 <Button size="sm" variant="destructive" onClick={() => deleteSeq(selectedSeq)}>Delete</Button>
               </div>
@@ -2400,7 +2406,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                           {v.body && <p className="text-xs text-gray-400 mt-0.5 truncate">{v.body.replace(/<[^>]+>/g, '').slice(0, 80)}…</p>}
                         </div>
                         <div className="flex gap-1.5 shrink-0">
-                          <button onClick={() => { setPreviewSeq(selectedSeq); setPreviewVariant(v); }} className="px-2.5 py-1 text-xs bg-white border border-teal-200 rounded hover:bg-teal-50 text-teal-700 transition-colors">Preview</button>
+                          <button onClick={() => { setPreviewSeq(selectedSeq); setPreviewVariant(v); setPreviewOverride(null); }} className="px-2.5 py-1 text-xs bg-white border border-teal-200 rounded hover:bg-teal-50 text-teal-700 transition-colors">Preview</button>
                           <button onClick={() => openEditVariant(v)} className="px-2.5 py-1 text-xs bg-white border border-gray-300 rounded hover:bg-gray-100 text-gray-600 transition-colors">Edit</button>
                           <button onClick={() => deleteVariant(v)} className="px-2.5 py-1 text-xs bg-white border border-red-200 rounded hover:bg-red-50 text-red-600 transition-colors">Delete</button>
                         </div>
@@ -2481,7 +2487,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
       )}
 
       {previewSeq && (
-        <PreviewModal sequence={previewSeq} campaignId={campaignId} leads={leads} variant={previewVariant} onClose={() => { setPreviewSeq(null); setPreviewVariant(null); }} />
+        <PreviewModal sequence={previewSeq} campaignId={campaignId} leads={leads} variant={previewVariant} editingOverride={previewOverride} onClose={() => { setPreviewSeq(null); setPreviewVariant(null); setPreviewOverride(null); }} />
       )}
     </div>
   );
