@@ -254,6 +254,67 @@ _QUOTE_START_RE = re.compile(
     r"|\bOn .{10,120}wrote:",  # "On <date> <person> wrote:"
     re.IGNORECASE | re.DOTALL,
 )
+
+# ── NDR / bounce-detection patterns ──────────────────────────────────────────
+# Senders that indicate an automated delivery failure notification.
+_MAILER_DAEMON_RE = re.compile(r"^(mailer-daemon|postmaster)@", re.IGNORECASE)
+# Subjects that strongly suggest an NDR.
+_BOUNCE_SUBJECT_RE = re.compile(
+    r"(delivery.*(failed|failure|status|notification|problem)"
+    r"|undeliverable"
+    r"|mail.*not.*deliver"
+    r"|returned.*mail"
+    r"|failure.*notice)",
+    re.IGNORECASE,
+)
+# DSN standard: Final-Recipient / Original-Recipient / X-Failed-Recipients
+_FINAL_RECIPIENT_RE = re.compile(
+    r"(?:Final-Recipient|Original-Recipient)\s*:\s*(?:rfc822\s*;\s*)?([^\s;,\r\n]+)",
+    re.IGNORECASE,
+)
+_X_FAILED_RE = re.compile(r"X-Failed-Recipients\s*:\s*([^\r\n,]+)", re.IGNORECASE)
+# Generic email-address pattern (used as fallback near 5xx codes).
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# Permanent SMTP error (5xx).
+_SMTP_5XX_RE = re.compile(r"\b5[0-9]{2}\b|\b5\.[0-9]\.[0-9]\b")
+
+
+def _extract_bounced_recipient(body_plain: str, body_html: str, snippet: str = "") -> str | None:
+    """Try to extract the original recipient address from an NDR/bounce email.
+
+    Tries, in order:
+    1. DSN standard headers (Final-Recipient / Original-Recipient)
+    2. X-Failed-Recipients header
+    3. Email addresses found on lines containing a 5xx SMTP error code
+    Returns the address in lower-case, or *None* if nothing is found.
+    """
+    text = body_plain or _strip_html_tags(body_html) or snippet
+
+    # 1. DSN standard
+    m = _FINAL_RECIPIENT_RE.search(text)
+    if m:
+        addr = m.group(1).strip().lower().strip("<>")
+        if "@" in addr:
+            return addr
+
+    # 2. X-Failed-Recipients
+    m = _X_FAILED_RE.search(text)
+    if m:
+        addr = m.group(1).strip().lower()
+        if "@" in addr:
+            return addr
+
+    # 3. Email address near a 5xx error line
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if _SMTP_5XX_RE.search(line):
+            window = "\n".join(lines[max(0, i - 2) : i + 3])
+            for candidate in _EMAIL_RE.findall(window):
+                cl = candidate.lower()
+                if not _MAILER_DAEMON_RE.match(cl):
+                    return cl
+
+    return None
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 # Hidden preheader divs should not contribute to visible snippets.
 _PREHEADER_RE = re.compile(
@@ -952,6 +1013,77 @@ async def _upsert_message_from_gmail(
                         thread_id=thread_id,
                     )
                 )
+    # -----------------------------------------------------------------------
+
+    # ---------- NDR / bounce detection (mailer-daemon messages) ----------
+    # Delayed bounces arrive as a real email FROM mailer-daemon / postmaster
+    # rather than as an immediate API error.  Detect them during inbox sync and
+    # mark the affected lead as bounced so it is excluded from future sends.
+    if created and "SENT" not in [lbl.upper() for lbl in labels]:
+        from_hdr = _header_value(headers_json, "From")
+        from_addr_ndr = _extract_email_only(from_hdr) or from_hdr.strip()
+        if _MAILER_DAEMON_RE.match(from_addr_ndr):
+            subject_hdr = _header_value(headers_json, "Subject")
+            # Accept any mailer-daemon sender or a subject that clearly
+            # indicates a delivery failure.
+            if not subject_hdr or _BOUNCE_SUBJECT_RE.search(subject_hdr):
+                bounced_addr = _extract_bounced_recipient(body_plain, body_html, snippet)
+                if bounced_addr:
+                    b_lead_res = await db.execute(
+                        select(Lead).where(func.lower(Lead.email) == bounced_addr)
+                    )
+                    b_lead = b_lead_res.scalar_one_or_none()
+                    if b_lead is not None and b_lead.status not in ("bounced", "unsubscribed"):
+                        log.info(
+                            "NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
+                            b_lead.id, bounced_addr, inbox_id,
+                        )
+                        b_lead.status = "bounced"
+                        # Remove all remaining queue slots for this lead.
+                        b_cl_res = await db.execute(
+                            select(CampaignLead.id).where(
+                                CampaignLead.lead_id == b_lead.id
+                            )
+                        )
+                        b_cl_ids = [r[0] for r in b_cl_res.all()]
+                        if b_cl_ids:
+                            await db.execute(
+                                delete(QueueSlot).where(
+                                    QueueSlot.campaign_lead_id.in_(b_cl_ids)
+                                )
+                            )
+                        await db.flush()
+                        # Fire bounce webhook for each campaign the lead is in.
+                        b_camp_res = await db.execute(
+                            select(CampaignLead.campaign_id).where(
+                                CampaignLead.lead_id == b_lead.id
+                            ).distinct()
+                        )
+                        b_camp_ids = [r[0] for r in b_camp_res.all()]
+                        for b_camp_id in b_camp_ids:
+                            try:
+                                from app.webhooks import fire_webhook_event as _fwe
+                                await _fwe(db, "email.bounced", {
+                                    "lead_id": b_lead.id,
+                                    "lead_email": b_lead.email,
+                                    "campaign_id": b_camp_id,
+                                    "inbox_id": inbox_id,
+                                    "error_type": "bounce",
+                                    "error_message": snippet[:300] or subject_hdr,
+                                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                                })
+                                await _fwe(db, "lead.status_changed", {
+                                    "lead_id": b_lead.id,
+                                    "lead_email": b_lead.email,
+                                    "old_status": "active",
+                                    "new_status": "bounced",
+                                    "reason": f"NDR from {from_addr_ndr}",
+                                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                                })
+                            except Exception:
+                                log.exception(
+                                    "Failed to fire bounce webhook for lead_id=%s", b_lead.id
+                                )
     # -----------------------------------------------------------------------
 
     # ---------- Sent-to-lead detection (outbound messages only) ----------
@@ -2962,6 +3094,81 @@ async def _detect_o365_lead_replies(
                 "O365 lead reply detected: lead=%s campaign=%s inbox=%s conv=%s",
                 lead.email, camp_id, inbox.id, conv_id,
             )
+
+    # ── NDR / delayed bounce detection ────────────────────────────────────
+    # After processing normal lead replies, iterate again over the same batch
+    # looking for mailer-daemon / postmaster bounce notifications.
+    for msg in messages:
+        from_data = msg.get("from", {}) or {}
+        from_ea = from_data.get("emailAddress", {}) or {}
+        from_addr_ndr = str(from_ea.get("address", "")).lower()
+
+        if not _MAILER_DAEMON_RE.match(from_addr_ndr):
+            continue
+
+        subject_ndr = str(msg.get("subject", ""))
+        if subject_ndr and not _BOUNCE_SUBJECT_RE.search(subject_ndr):
+            continue  # sender is mailer-daemon but subject doesn't look like a bounce
+
+        body_data = msg.get("body", {}) or {}
+        body_type = str(body_data.get("contentType", "")).lower()
+        body_content = str(body_data.get("content", ""))
+        body_plain_ndr = body_content if body_type == "text" else _strip_html_tags(body_content)
+        body_html_ndr = body_content if body_type == "html" else ""
+
+        bounced_addr = _extract_bounced_recipient(body_plain_ndr, body_html_ndr)
+        if not bounced_addr:
+            continue
+
+        b_lead_res = await db.execute(
+            select(Lead).where(func.lower(Lead.email) == bounced_addr)
+        )
+        b_lead = b_lead_res.scalar_one_or_none()
+        if b_lead is None or b_lead.status in ("bounced", "unsubscribed"):
+            continue
+
+        log.info(
+            "O365 NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
+            b_lead.id, bounced_addr, inbox.id,
+        )
+        b_lead.status = "bounced"
+        b_cl_res = await db.execute(
+            select(CampaignLead.id).where(CampaignLead.lead_id == b_lead.id)
+        )
+        b_cl_ids = [r[0] for r in b_cl_res.all()]
+        if b_cl_ids:
+            await db.execute(
+                delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(b_cl_ids))
+            )
+        await db.flush()
+
+        b_camp_res = await db.execute(
+            select(CampaignLead.campaign_id).where(
+                CampaignLead.lead_id == b_lead.id
+            ).distinct()
+        )
+        for (b_camp_id,) in b_camp_res.all():
+            try:
+                from app.webhooks import fire_webhook_event as _fwe
+                await _fwe(db, "email.bounced", {
+                    "lead_id": b_lead.id,
+                    "lead_email": b_lead.email,
+                    "campaign_id": b_camp_id,
+                    "inbox_id": inbox.id,
+                    "error_type": "bounce",
+                    "error_message": subject_ndr[:300],
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+                await _fwe(db, "lead.status_changed", {
+                    "lead_id": b_lead.id,
+                    "lead_email": b_lead.email,
+                    "old_status": "active",
+                    "new_status": "bounced",
+                    "reason": f"NDR from {from_addr_ndr}",
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                })
+            except Exception:
+                log.exception("Failed to fire bounce webhook for lead_id=%s", b_lead.id)
 
 
 async def _detect_o365_sent_to_lead(

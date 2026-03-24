@@ -120,7 +120,7 @@ class Lead(Base):
     email = Column(String(255), nullable=False, index=True)
     name = Column(String(255), default="")
     custom_data = Column(JSON, default=dict)  # e.g. {"company": "...", "title": "..."}
-    status = Column(String(32), default="active")  # active, unsubscribed, bounced, replied
+    status = Column(String(32), default="active")  # active, unsubscribed, bounced, replied, invalid
     # Email verification: pending, valid, invalid, catch_all, unknown, risky, or null (not verified)
     email_verification_status = Column(String(32), nullable=True, default=None, index=True)
     # Raw JSON result from the verification provider

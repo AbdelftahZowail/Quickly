@@ -300,8 +300,8 @@ async def run_send_job():
 
                 if lead.status not in ("active",):
                     continue
-                # Skip leads with invalid/risky email verification
-                if getattr(lead, 'email_verification_status', None) in ("invalid", "risky"):
+                # Skip leads with invalid/risky/pending email verification
+                if getattr(lead, 'email_verification_status', None) in ("invalid", "risky", "pending"):
                     continue
                 # Skip leads whose sending is paused for this campaign
                 # (e.g. marked not_interested by the AI classifier).
@@ -907,7 +907,7 @@ async def send_slot_job(slot_id: int) -> None:
         if lead.status != "active":
             log.info("send_slot_job: lead %d status=%s, skipping slot %d", lead.id, lead.status, slot_id)
             return
-        if getattr(lead, "email_verification_status", None) in ("invalid", "risky"):
+        if getattr(lead, "email_verification_status", None) in ("invalid", "risky", "pending"):
             log.info("send_slot_job: lead %d verification=%s, skipping slot %d",
                      lead.id, lead.email_verification_status, slot_id)
             return

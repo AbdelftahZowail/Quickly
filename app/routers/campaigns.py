@@ -1537,11 +1537,25 @@ async def bulk_add_leads_to_campaign(
             if needs_detection:
                 await db.flush()
 
-        # Schedule all newly enrolled leads in one bulk call
-        new_cl_ids = [e[0] for e in new_enrollments]
-        await reserve_slots_for_new_leads_bulk(db, new_cl_ids, campaign_id)
+        # When email verification is requested, mark all newly added leads as
+        # "pending" and defer scheduling until _run_background_verification
+        # resolves them in batch (only valid leads get slots).
+        added_lead_ids = [e[1] for e in new_enrollments]
+        if verify_emails and added_lead_ids:
+            from app.email_verification import PENDING as _VER_PENDING
+            _pend_res = await db.execute(select(Lead).where(Lead.id.in_(added_lead_ids)))
+            for _pl in _pend_res.scalars().all():
+                _pl.email_verification_status = _VER_PENDING
+            await db.flush()
+            to_schedule_cl_ids: list[int] = []
+        else:
+            to_schedule_cl_ids = [e[0] for e in new_enrollments]
+
+        if to_schedule_cl_ids:
+            await reserve_slots_for_new_leads_bulk(db, to_schedule_cl_ids, campaign_id)
 
         # Count slots per lead and populate response
+        new_cl_ids = [e[0] for e in new_enrollments]
         slot_counts_result = await db.execute(
             select(QueueSlot.campaign_lead_id, func.count(QueueSlot.id))
             .where(QueueSlot.campaign_lead_id.in_(new_cl_ids))
@@ -1559,8 +1573,10 @@ async def bulk_add_leads_to_campaign(
                         r["lead_id"], campaign_id, r["slots_created"],
                     )
 
+    else:
+        added_lead_ids = []
+
     # Trigger background email verification if requested
-    added_lead_ids = [r["lead_id"] for r in results if r.get("status") == "added" and r.get("lead_id")]
     if verify_emails and added_lead_ids:
         import asyncio
         asyncio.create_task(_run_background_verification(added_lead_ids))
@@ -1608,8 +1624,16 @@ async def _detect_providers_background(lead_email_pairs: list[tuple[int, str]]) 
         await db.commit()
 
 
-async def _run_background_verification(lead_ids: list[int]):
-    """Verify emails for the given lead IDs in the background."""
+async def _run_background_verification(lead_ids: list[int], *, reverify: bool = False):
+    """Verify emails for the given lead IDs in the background.
+
+    When *reverify* is True, leads that already have a verification status are
+    re-checked, but only their status is updated when it actually changes.
+
+    Valid leads are scheduled in rolling 60-second batches so that early
+    finishers are not held up waiting for the full list to complete.
+    """
+    import asyncio as _asyncio
     from app.database import AsyncSessionLocal
     from app.app_settings import (
         get_setting,
@@ -1624,6 +1648,27 @@ async def _run_background_verification(lead_ids: list[int]):
     )
     from app.email_verification import verify_single, BLOCK_SEND_STATUSES, PENDING, CustomHttpProvider
     import json
+
+    _FLUSH_INTERVAL = 60  # seconds between rolling schedule flushes
+
+    async def _flush_valid(valid_ids: list[int], flush_db) -> None:
+        """Schedule a batch of newly-verified valid leads (grouped by campaign)."""
+        if not valid_ids:
+            return
+        from app.queue_logic import reserve_slots_for_new_leads_bulk as _rsfnlb
+        _cl_res = await flush_db.execute(
+            select(CampaignLead).where(CampaignLead.lead_id.in_(valid_ids))
+        )
+        _campaign_groups: dict[int, list[int]] = {}
+        for _cl in _cl_res.scalars().all():
+            _campaign_groups.setdefault(_cl.campaign_id, []).append(_cl.id)
+        for _cid, _cl_ids in _campaign_groups.items():
+            try:
+                await _rsfnlb(flush_db, _cl_ids, _cid)
+                log.info("Batch-scheduled %d verified leads for campaign %s", len(_cl_ids), _cid)
+            except Exception as _exc:
+                log.exception("Failed to schedule verified leads for campaign %s: %s", _cid, _exc)
+        await flush_db.commit()
 
     async with AsyncSessionLocal() as db:
         try:
@@ -1654,27 +1699,51 @@ async def _run_background_verification(lead_ids: list[int]):
                 async def _do_verify(email: str) -> "VerificationResult":  # type: ignore[name-defined]  # noqa: E731
                     return await verify_single(email, api_key, provider_name)
 
-            # Mark leads as pending
+            # Mark leads as pending (skip if we are only re-verifying – they may
+            # already have a status we want to compare against)
             result = await db.execute(select(Lead).where(Lead.id.in_(lead_ids)))
             leads = result.scalars().all()
-            for lead in leads:
-                lead.email_verification_status = PENDING
-            await db.commit()
+            if not reverify:
+                for lead in leads:
+                    lead.email_verification_status = PENDING
+                await db.commit()
 
-            # Verify each lead
+            # Rolling buffer: accumulated valid lead IDs waiting to be scheduled.
+            # We flush every _FLUSH_INTERVAL seconds so early-verified leads are
+            # scheduled without waiting for the entire batch to finish.
+            pending_valid: list[int] = []
+            last_flush_at = _asyncio.get_event_loop().time()
+
             for lead in leads:
                 try:
+                    old_verif = lead.email_verification_status
+                    old_status = lead.status
+
                     vr = await _do_verify(lead.email)
-                    # Re-fetch to avoid stale state
+
+                    # Re-fetch to avoid stale state from other writers
                     result = await db.execute(select(Lead).where(Lead.id == lead.id))
                     fresh_lead = result.scalar_one_or_none()
                     if fresh_lead:
-                        fresh_lead.email_verification_status = vr.status
+                        new_verif = vr.status
+                        new_status = fresh_lead.status  # may change below
+
+                        # In reverify mode skip update when nothing changed
+                        verif_changed = old_verif != new_verif
+                        if reverify and not verif_changed:
+                            log.info(
+                                "Reverify lead %s (%s): status unchanged (%s)",
+                                lead.id, lead.email, old_verif,
+                            )
+                            continue
+
+                        fresh_lead.email_verification_status = new_verif
                         fresh_lead.email_verification_result = vr.raw
-                        # If invalid or risky, mark lead as bounced to prevent sending
-                        if vr.status in BLOCK_SEND_STATUSES:
-                            fresh_lead.status = "bounced"
-                            # Also remove pending queue slots
+
+                        if new_verif in BLOCK_SEND_STATUSES:
+                            fresh_lead.status = "invalid"
+                            new_status = "invalid"
+                            # Remove any existing queue slots
                             cl_result = await db.execute(
                                 select(CampaignLead.id).where(CampaignLead.lead_id == lead.id)
                             )
@@ -1683,10 +1752,46 @@ async def _run_background_verification(lead_ids: list[int]):
                                 await db.execute(
                                     delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids))
                                 )
+                        else:
+                            pending_valid.append(lead.id)
+                            # Restore to active if it was previously flagged invalid
+                            if reverify and fresh_lead.status == "invalid":
+                                fresh_lead.status = "active"
+                                new_status = "active"
+
                         await db.commit()
+
+                        # Per-lead change notification (useful for real-time UI polling)
+                        if reverify and (verif_changed or old_status != new_status):
+                            try:
+                                from app.webhooks import fire_webhook_event as _fwe
+                                async with AsyncSessionLocal() as _ndb:
+                                    await _fwe(_ndb, "lead.verification_changed", {
+                                        "lead_id": lead.id,
+                                        "lead_email": lead.email,
+                                        "old_verification_status": old_verif,
+                                        "new_verification_status": new_verif,
+                                        "old_lead_status": old_status,
+                                        "new_lead_status": new_status,
+                                    })
+                            except Exception:
+                                pass
+
                     log.info("Verified lead %s (%s): %s - %s", lead.id, lead.email, vr.status, vr.message)
                 except Exception as exc:
                     log.exception("Failed to verify lead %s (%s): %s", lead.id, lead.email, exc)
+
+                # Rolling flush: schedule accumulated valid leads every minute
+                now = _asyncio.get_event_loop().time()
+                if pending_valid and (now - last_flush_at) >= _FLUSH_INTERVAL:
+                    await _flush_valid(pending_valid, db)
+                    pending_valid = []
+                    last_flush_at = _asyncio.get_event_loop().time()
+
+            # Final flush for any remaining valid leads
+            if pending_valid:
+                await _flush_valid(pending_valid, db)
+
         except Exception as exc:
             log.exception("Background verification failed: %s", exc)
             # Record failure for health monitoring and fire alert event
@@ -1710,28 +1815,64 @@ async def _run_background_verification(lead_ids: list[int]):
 @router.post("/{campaign_id}/leads/verify")
 async def trigger_verification_for_campaign(
     campaign_id: int,
+    reverify: bool = Query(False, description="Re-verify already-verified leads"),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger email verification for all unverified leads in a campaign."""
+    """Trigger email verification for leads in a campaign.
+
+    By default only leads with no verification status are queued.  Pass
+    ``?reverify=true`` to re-check leads that were already verified.
+    The response always includes a ``needs_reverify`` boolean so the UI
+    can prompt the user when there is nothing new to verify but verified
+    leads exist.
+    """
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Campaign not found")
 
-    result = await db.execute(
-        select(Lead.id)
+    # Count already-verified leads for the needs_reverify hint
+    verified_count_result = await db.execute(
+        select(func.count())
+        .select_from(Lead)
         .join(CampaignLead, CampaignLead.lead_id == Lead.id)
         .where(
             CampaignLead.campaign_id == campaign_id,
-            Lead.email_verification_status.is_(None),
+            Lead.email_verification_status.isnot(None),
         )
     )
+    total_verified = verified_count_result.scalar() or 0
+
+    if reverify:
+        # Re-verify ALL leads (unverified + already-verified)
+        result = await db.execute(
+            select(Lead.id)
+            .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+            .where(CampaignLead.campaign_id == campaign_id)
+        )
+    else:
+        # Normal mode: only leads with no status yet
+        result = await db.execute(
+            select(Lead.id)
+            .join(CampaignLead, CampaignLead.lead_id == Lead.id)
+            .where(
+                CampaignLead.campaign_id == campaign_id,
+                Lead.email_verification_status.is_(None),
+            )
+        )
     lead_ids = [r[0] for r in result.all()]
+
     if not lead_ids:
-        return {"ok": True, "message": "No unverified leads found", "queued": 0}
+        return {
+            "ok": True,
+            "message": "No unverified leads found",
+            "queued": 0,
+            "needs_reverify": total_verified > 0,
+            "total_verified": total_verified,
+        }
 
     import asyncio
-    asyncio.create_task(_run_background_verification(lead_ids))
-    return {"ok": True, "queued": len(lead_ids)}
+    asyncio.create_task(_run_background_verification(lead_ids, reverify=reverify))
+    return {"ok": True, "queued": len(lead_ids), "needs_reverify": False, "total_verified": total_verified}
 
 
 @router.get("/{campaign_id}/leads/verification-status")
@@ -1936,6 +2077,7 @@ async def import_campaign_leads(
             errors += 1
 
     # ── Detect providers then schedule all new enrollments ──────────────────
+    added_lead_ids_csv: list[int] = []
     if new_enrollments:
         if match_provider:
             # Providers must be known before queue slot assignment so the correct
@@ -1960,15 +2102,24 @@ async def import_campaign_leads(
             if needs_detection:
                 await db.flush()
 
-        # Schedule all newly enrolled leads in one bulk call
-        new_cl_ids = [e[0] for e in new_enrollments]
-        await reserve_slots_for_new_leads_bulk(db, new_cl_ids, campaign_id)
+        added_lead_ids_csv = [e[1] for e in new_enrollments]
+        if verify_emails and added_lead_ids_csv:
+            from app.email_verification import PENDING as _VER_PENDING_CSV
+            _pend_res2 = await db.execute(select(Lead).where(Lead.id.in_(added_lead_ids_csv)))
+            for _pl2 in _pend_res2.scalars().all():
+                _pl2.email_verification_status = _VER_PENDING_CSV
+            await db.flush()
+            to_schedule_cl_ids_csv: list[int] = []
+        else:
+            to_schedule_cl_ids_csv = [e[0] for e in new_enrollments]
+
+        if to_schedule_cl_ids_csv:
+            await reserve_slots_for_new_leads_bulk(db, to_schedule_cl_ids_csv, campaign_id)
 
     # Trigger background email verification if requested
-    added_lead_ids = [r["lead_id"] for r in results_list if r.get("status") == "added" and r.get("lead_id")]
-    if verify_emails and added_lead_ids:
+    if verify_emails and added_lead_ids_csv:
         import asyncio
-        asyncio.create_task(_run_background_verification(added_lead_ids))
+        asyncio.create_task(_run_background_verification(added_lead_ids_csv))
 
     # When provider matching is disabled, still detect providers in the background
     # for leads that don't have one yet (future use / analytics).
@@ -1986,7 +2137,7 @@ async def import_campaign_leads(
         "duplicates_in_batch": duplicates_in_batch,
         "errors": errors,
         "total_rows": added + already_enrolled + duplicates_in_batch + errors,
-        "verification_queued": verify_emails and bool(added_lead_ids),
+        "verification_queued": verify_emails and bool(added_lead_ids_csv),
     }
 
 
