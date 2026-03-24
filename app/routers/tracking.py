@@ -207,7 +207,7 @@ _UNSUBSCRIBE_HTML = """<!DOCTYPE html>
   <div class="card">
     <div class="icon">✓</div>
     <h1>You've been unsubscribed</h1>
-    <p>You will no longer receive emails from this campaign.<br>
+    <p>You will no longer receive emails from us.<br>
        If this was a mistake please contact the sender directly.</p>
   </div>
 </body>
@@ -217,8 +217,8 @@ _ALREADY_UNSUBSCRIBED_HTML = _UNSUBSCRIBE_HTML.replace(
     "You've been unsubscribed",
     "Already unsubscribed",
 ).replace(
-    "You will no longer receive emails from this campaign.<br>\n       If this was a mistake please contact the sender directly.",
-    "You are already unsubscribed from this campaign.",
+    "You will no longer receive emails from us.<br>If this was a mistake please contact the sender directly.",
+    "You are already unsubscribed and will not receive any more emails from us.",
 )
 
 

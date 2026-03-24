@@ -84,6 +84,40 @@ async function request(path, options = {}) {
   return data;
 }
 
+/** GET with auth + refresh; returns raw Response (for CSV, etc.). */
+async function downloadRequest(path) {
+  const headers = { ..._authHeaders() };
+  let res = await fetch(API_ROOT + path, { method: 'GET', headers, cache: 'no-store' });
+  if (res.status === 401) {
+    try {
+      const newToken = await _refreshAccessToken();
+      res = await fetch(API_ROOT + path, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${newToken}` },
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(text || res.statusText);
+        err.status = res.status;
+        throw err;
+      }
+      return res;
+    } catch (e) {
+      if (e.status) throw e;
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(text || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+
 export const api = {
   get: (path) => request(path, { method: 'GET' }),
   post: (path, data) => request(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }),
@@ -120,5 +154,5 @@ export const api = {
     }
     return res.json();
   },
-  download: (path) => fetch(API_ROOT + path, { method: 'GET', headers: _authHeaders() }),
+  download: (path) => downloadRequest(path),
 };

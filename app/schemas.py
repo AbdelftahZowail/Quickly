@@ -5,6 +5,18 @@ from datetime import datetime, time
 from app.models import WEBHOOK_EVENT_TYPES
 
 
+class LeadCampaignInfo(BaseModel):
+    """Minimal campaign enrollment info embedded in a LeadResponse."""
+    campaign_id: int
+    campaign_name: str
+    enrolled_at: datetime
+    interest_status: Optional[str] = None
+    sending_paused: bool = False
+
+    class Config:
+        from_attributes = True
+
+
 class LeadCreate(BaseModel):
     email: str
     name: str = ""
@@ -17,6 +29,19 @@ class LeadUpdate(BaseModel):
     status: Optional[str] = None  # active, unsubscribed, bounced, replied, invalid
 
 
+class LeadRecoverRequest(BaseModel):
+    """Fix a lead's email, set status to active, and re-enter the send flow.
+
+    When email verification is enabled and *verify_email* is True, the new
+    address is queued for verification; scheduling runs when verification
+    completes (same as adding leads to a campaign). Otherwise the global
+    queue is recalculated immediately.
+    """
+
+    email: str
+    verify_email: bool = True
+
+
 class LeadResponse(BaseModel):
     id: int
     email: str
@@ -24,10 +49,31 @@ class LeadResponse(BaseModel):
     custom_data: Dict[str, Any]
     status: str
     provider: Optional[str] = None
+    email_verification_status: Optional[str] = None
     created_at: datetime
+    campaigns: List["LeadCampaignInfo"] = []
 
     class Config:
         from_attributes = True
+
+
+class LeadBulkDeleteRequest(BaseModel):
+    lead_ids: List[int]
+
+
+class LeadBulkStatusRequest(BaseModel):
+    lead_ids: List[int]
+    status: str
+
+
+class LeadBulkRecoverItem(BaseModel):
+    lead_id: int
+    email: str
+
+
+class LeadBulkRecoverRequest(BaseModel):
+    items: List[LeadBulkRecoverItem]
+    verify_email: bool = True
 
 
 class InboxCreate(BaseModel):

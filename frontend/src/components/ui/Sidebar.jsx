@@ -11,6 +11,7 @@ import {
   RiSidebarFoldLine,
   RiInformationLine,
   RiHeartPulseLine,
+  RiContactsLine,
 } from 'react-icons/ri';
 import { useUniboxNotifications } from '../../context/UniboxNotificationsContext';
 import { useOnboarding } from '../../context/OnboardingContext';
@@ -20,6 +21,7 @@ import { useSystemHealth } from '../../context/SystemHealthContext';
 const links = [
   { to: '/analytics', label: 'Analytics', icon: <RiLineChartLine size={20} /> },
   { to: '/campaigns', label: 'Campaigns', icon: <RiSendPlaneLine size={20} /> },
+  { to: '/leads', label: 'Leads', icon: <RiContactsLine size={20} /> },
   { to: '/inboxes', label: 'Inboxes', icon: <RiMailLine size={20} /> },
   { to: '/unibox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
   { to: '/schedule', label: 'Schedule', icon: <RiCalendarScheduleLine size={20} /> },

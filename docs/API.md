@@ -451,41 +451,170 @@ Delete a variant. Existing email logs referencing the variant are preserved.
 
 ## Leads
 
-Leads represent contacts enrolled in campaigns. Creating standalone leads is not supported — always add leads through a campaign.
+Leads represent contacts. **Creating a lead without enrolling them in a campaign is not supported** — use `POST /api/campaigns/{id}/leads` (or CSV import on a campaign) to create and enroll. The global **`/api/leads`** routes below are for listing, exporting, updating, deleting, and recovering leads across all campaigns (used by the **Leads** page in the app).
 
-### `GET /api/leads`
+---
 
-List all leads. Supports optional query parameter `?status=active|unsubscribed|bounced|replied`.
+### Global lead operations (`/api/leads`)
 
-### `GET /api/leads/{id}`
+#### `GET /api/leads`
 
-Get a single lead.
+List leads with optional filters. Each item includes enrollments and verification state.
 
-### `PATCH /api/leads/{id}`
+**Query params:**
 
-Update lead fields. Status changes trigger full queue recalculation.
+| Param | Type | Description |
+|---|---|---|
+| `q` | string | Substring match on **email** or **name** (case-insensitive). |
+| `status` | string | Exact lead status: `active`, `unsubscribed`, `bounced`, `invalid`, `replied`, etc. Ignored when `bad_only` is true. |
+| `bad_only` | bool | When `true`, only leads with status **`bounced`** or **`invalid`** (for repair / re-enrollment workflows). Default `false`. |
+
+**Response:** Array of lead objects:
+
+| Field | Description |
+|---|---|
+| `id`, `email`, `name`, `status` | Core lead fields |
+| `custom_data` | Object of custom template fields |
+| `provider` | Detected email provider (e.g. Google / Microsoft), or `null` |
+| `email_verification_status` | Provider verification status, or `null` if not verified |
+| `created_at` | Creation timestamp |
+| `campaigns` | Array of `{ campaign_id, campaign_name, enrolled_at, interest_status, sending_paused }` for each enrollment |
+
+#### `GET /api/leads/export`
+
+Download leads as **CSV** (`text/csv`). Uses the **same filters** as `GET /api/leads` (`q`, `status`, `bad_only`).
+
+**Columns:** `id`, `email`, `name`, `status`, `email_verification_status`, `campaigns` (semicolon-separated names), `enrolled_earliest` (ISO date), then every **`custom_data` key** present in the result set (sorted alphabetically). Object/array values in `custom_data` are JSON-encoded in the cell.
+
+**Response:** File download (`Content-Disposition: attachment; filename="leads_export.csv"` or `leads_bounced_invalid.csv` when `bad_only=true`).
+
+#### `POST /api/leads/bulk-delete`
+
+Delete many leads in one request. Removes associated `EmailLog` and `LeadReply` rows per lead, then runs a **single** full queue recalculation if any lead was deleted.
+
+**Body:**
+
+```json
+{ "lead_ids": [1, 2, 3] }
+```
+
+**Response:** `{ "ok": true, "deleted": 3 }`
+
+#### `POST /api/leads/bulk-status`
+
+Set the same **status** on many leads. Triggers **one** full queue recalculation if at least one lead’s status actually changed.
+
+**Body:**
+
+```json
+{ "lead_ids": [1, 2, 3], "status": "active" }
+```
+
+**Response:** `{ "ok": true, "updated": 3 }` (`updated` counts leads that existed and whose status changed).
+
+#### `POST /api/leads/bulk-recover`
+
+Fix bounced/invalid (or any) leads: update **email**, set status to **`active`**, clear **provider** so it can be re-detected, then either queue **one** background verification batch for all recovered IDs (when verification is enabled and `verify_email` is true) or run **one** full queue recalculation.
+
+**Body:**
+
+```json
+{
+  "items": [
+    { "lead_id": 10, "email": "fixed@example.com" },
+    { "lead_id": 11, "email": "other@example.com" }
+  ],
+  "verify_email": true
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `items` | array | Each entry: `lead_id` (int), `email` (new address, normalized to lowercase). |
+| `verify_email` | bool | Default `true`. If the account has email verification enabled and this is `true`, recovered leads are marked pending and verified in the background; otherwise the queue is recalculated immediately. |
+
+**Response:**
+
+```json
+{
+  "recovered": 2,
+  "recovered_ids": [10, 11],
+  "errors": [
+    { "lead_id": 99, "detail": "not_found" }
+  ]
+}
+```
+
+`errors` entries may use `detail`: `not_found`, `empty_email`, or `duplicate_email` (new email already used by another lead).
+
+#### `POST /api/leads/recover-import`
+
+Same recovery rules as **`bulk-recover`**, but input is a **multipart** CSV upload.
+
+**Query params:**
+
+| Param | Default | Description |
+|---|---|---|
+| `verify_emails` | `true` | Passed through as bulk-recover’s `verify_email`. |
+
+**Form data:** `file` — CSV with a header row containing **`id`** (or **`lead_id`**) and **`email`**, or a headerless file whose **first two columns** are id and email. Extra columns are ignored.
+
+**Response:** Same JSON shape as **`POST /api/leads/bulk-recover`**.
+
+#### `POST /api/leads`
+
+Returns **`405`** — standalone lead creation is not allowed. Use **`POST /api/campaigns/{id}/leads`**.
+
+#### `POST /api/leads/mark-replied`
+
+Mark a lead as having replied to a specific campaign (stop-on-reply bookkeeping).
+
+**Body:** `{ "lead_id": 42, "campaign_id": 1 }`
+
+**Response:** `{ "ok": true }`
+
+#### `GET /api/leads/{id}`
+
+Get one lead with full **`campaigns`** array (same shape as list).
+
+#### `PATCH /api/leads/{id}`
+
+Update lead fields. **Status** changes trigger a full queue recalculation.
+
+**Body (all optional):**
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Lead name |
+| `custom_data` | object | Replaces custom data used in templates |
+| `status` | string | e.g. `active`, `unsubscribed`, `bounced`, `invalid`, `replied` |
+
+**Response:** Updated lead object (same shape as `GET`).
+
+#### `POST /api/leads/{id}/recover`
+
+Update this lead’s **email**, set **`active`**, clear **provider**, then verify-or-recalc (same semantics as one row in **`bulk-recover`**).
 
 **Body:**
 
 | Field | Type | Description |
 |---|---|---|
-| `name` | string | Lead name |
-| `custom_data` | object | Arbitrary key-value data for template substitution |
-| `status` | string | `active`, `unsubscribed`, `bounced`, or `replied` |
+| `email` | string | New email address |
+| `verify_email` | bool | Default `true` |
 
-### `DELETE /api/leads/{id}`
+**Errors:** `409` if the email is already used by another lead.
 
-Delete a lead and all associated logs and replies. Triggers recalculation.
+**Response:** Updated lead object.
 
-### `POST /api/leads/mark-replied`
+#### `DELETE /api/leads/{id}`
 
-Mark a lead as having replied to a specific campaign.
+Delete the lead and associated logs/replies; recalculates the queue if the lead was enrolled anywhere.
 
-**Body:** `{ "lead_id": 42, "campaign_id": 1 }`
+**Response:** `{ "ok": true }`
 
-### `GET /api/leads/{id}/history`
+#### `GET /api/leads/{id}/history`
 
-Email send history for a lead across all campaigns.
+Email send history for the lead across all campaigns.
 
 **Response:**
 
@@ -500,6 +629,26 @@ Email send history for a lead across all campaigns.
   }
 ]
 ```
+
+#### `GET /api/leads/{id}/replies`
+
+Reply **markers** per campaign (when a reply was recorded for stop-on-reply / Unibox). Full thread content lives in **Unibox**.
+
+**Response:**
+
+```json
+[
+  {
+    "campaign_id": 1,
+    "campaign_name": "Q1 Outreach",
+    "replied_at": "2026-01-15T11:00:00Z"
+  }
+]
+```
+
+---
+
+### Campaign-scoped lead operations
 
 ### `POST /api/campaigns/{id}/leads`
 
