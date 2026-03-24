@@ -26,8 +26,15 @@ on:
         default: false
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -50,20 +57,82 @@ jobs:
             echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build and push image
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          dockerfile: Dockerfile
+          platforms: ${{ matrix.platform }}
           push: ${{ github.event_name != 'workflow_dispatch' || inputs.push_image }}
-          tags: |
-            azowail/quickly:${{ steps.tagger.outputs.TAG }}
-            azowail/quickly:latest
-          cache-from: type=registry,ref=azowail/quickly:latest
-          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=azowail/quickly,push-by-digest=true,name-canonical=true
+          cache-from: type=registry,ref=azowail/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          cache-to: type=registry,ref=azowail/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: /tmp/digests/*
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-24.04
+    needs: build
+    if: github.event_name != 'workflow_dispatch' || inputs.push_image
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          merge-multiple: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Determine tag
+        id: tagger
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create and push manifest
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t azowail/quickly:${{ steps.tagger.outputs.TAG }} \
+            -t azowail/quickly:latest \
+            $(printf 'azowail/quickly@sha256:%s ' *)
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: merge
+    if: github.event_name != 'workflow_dispatch' || inputs.create_release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine tag
+        id: tagger
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Create GitHub Release with assets
-        if: github.event_name != 'workflow_dispatch' || inputs.create_release
         uses: ncipollo/release-action@v1
         with:
           tag: ${{ steps.tagger.outputs.TAG }}
