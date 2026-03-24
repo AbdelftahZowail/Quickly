@@ -11,6 +11,8 @@ import Analytics from './pages/Analytics';
 import Unibox from './pages/Unibox';
 import DeliverabilityTips from './pages/DeliverabilityTips';
 import SystemHealth from './pages/SystemHealth';
+import Leads from './pages/Leads';
+import LeadDetail from './pages/LeadDetail';
 import Login from './pages/Login';
 import { api } from './api';
 import { AuthProvider, useAuth } from './context/AuthContext';
@@ -56,6 +58,8 @@ function AppRoutes() {
               <Route path="/campaigns" element={<Campaigns />} />
               <Route path="/campaigns/add" element={<AddCampaign />} />
               <Route path="/campaigns/:id" element={<CampaignDetail />} />
+              <Route path="/leads" element={<Leads />} />
+              <Route path="/leads/:id" element={<LeadDetail />} />
               <Route path="/inboxes" element={<Inboxes />} />
               <Route path="/unibox" element={<Unibox />} />
               <Route path="/schedule" element={<Schedule />} />
