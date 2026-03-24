@@ -14,7 +14,7 @@ class LeadCreate(BaseModel):
 class LeadUpdate(BaseModel):
     name: Optional[str] = None
     custom_data: Optional[Dict[str, Any]] = None
-    status: Optional[str] = None  # active, unsubscribed, bounced, replied
+    status: Optional[str] = None  # active, unsubscribed, bounced, replied, invalid
 
 
 class LeadResponse(BaseModel):

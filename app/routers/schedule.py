@@ -2,7 +2,7 @@
 import logging
 from datetime import timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from pathlib import Path
@@ -451,6 +451,9 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
             CampaignLead.campaign_id.in_(active_campaign_ids),
             Lead.status == "active",
             CampaignLead.sending_paused == False,  # noqa: E712
+            # Exclude leads that are pending email verification — they have no
+            # queue slots yet and will be batch-scheduled once verification resolves.
+            or_(Lead.email_verification_status.is_(None), Lead.email_verification_status != "pending"),
         )
         .order_by(CampaignLead.campaign_id, CampaignLead.id)
     )

@@ -448,18 +448,76 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     }).catch(() => {});
   }, []);
 
-  // Verify all unverified leads
-  const verifyAllLeads = async () => {
+  // Interval ref so we can clear the poll on unmount or completion
+  const verifyPollRef = useRef(null);
+
+  // Verify all unverified leads (or re-verify when forceReverify=true)
+  const verifyAllLeads = async (forceReverify = false) => {
     setVerifying(true);
     try {
-      const res = await api.post(`/campaigns/${campaignId}/leads/verify`);
-      notify({ type: 'success', message: `Verification queued for ${res.queued} lead(s)` });
-      // Poll for completion
-      setTimeout(() => { refresh(); loadVerificationSummary(); }, 3000);
+      const url = `/campaigns/${campaignId}/leads/verify` + (forceReverify ? '?reverify=true' : '');
+      const res = await api.post(url);
+
+      // Nothing queued – ask the user if they want to re-verify existing ones
+      if (res.queued === 0 && res.needs_reverify && !forceReverify) {
+        const confirmed = window.confirm(
+          `All ${res.total_verified} lead(s) are already verified.\nRe-verify them all?`
+        );
+        setVerifying(false);
+        if (confirmed) verifyAllLeads(true);
+        return;
+      }
+
+      if (res.queued === 0) {
+        notify({ type: 'info', message: 'No leads to verify.' });
+        setVerifying(false);
+        return;
+      }
+
+      notify({ type: 'success', message: `Verifying ${res.queued} lead(s)…` });
+
+      // Poll verification-status every 5 s and show a toast per change
+      let prevStatuses = { ...(verificationSummary?.statuses || {}) };
+
+      verifyPollRef.current = setInterval(async () => {
+        try {
+          const newSummary = await api.get(`/campaigns/${campaignId}/leads/verification-status`);
+          setVerificationSummary(newSummary);
+          const ns = newSummary.statuses || {};
+
+          // Toast for any counts that increased
+          Object.entries(ns).forEach(([status, count]) => {
+            const delta = count - (prevStatuses[status] || 0);
+            if (delta > 0 && status !== 'pending') {
+              const isWarn = status === 'invalid' || status === 'risky';
+              notify({
+                type: isWarn ? 'warning' : 'success',
+                message: `${delta} lead(s) verified → ${status}`,
+              });
+            }
+          });
+
+          prevStatuses = { ...ns };
+
+          // Stop polling once no leads remain in pending state
+          if (!ns.pending || ns.pending === 0) {
+            clearInterval(verifyPollRef.current);
+            verifyPollRef.current = null;
+            setVerifying(false);
+            refresh();
+          }
+        } catch {
+          // ignore transient poll errors
+        }
+      }, 5000);
     } catch (e) {
       notify({ type: 'error', message: e.message });
-    } finally { setVerifying(false); }
+      setVerifying(false);
+    }
   };
+
+  // Clean up any running verification poll when the component unmounts
+  useEffect(() => () => { if (verifyPollRef.current) clearInterval(verifyPollRef.current); }, []);
 
   const startEdit = (leadId, field, val) => {
     setEditCell({ leadId, field });
