@@ -100,6 +100,8 @@ async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
         tracking_domain=td or None,
         ramp_up_enabled=data.ramp_up_enabled,
         ramp_up_period_days=data.ramp_up_period_days,
+        ramp_up_start=data.ramp_up_start,
+        ramp_up_started_at=datetime.utcnow() if data.ramp_up_enabled else None,
     )
     db.add(inbox)
     await db.flush()
@@ -165,10 +167,20 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
         if data.ramp_up_enabled != inbox.ramp_up_enabled:
             capacity_changed = True
         inbox.ramp_up_enabled = data.ramp_up_enabled
+        # Reset the start date whenever ramp-up is turned on
+        if data.ramp_up_enabled:
+            inbox.ramp_up_started_at = datetime.utcnow()
     if data.ramp_up_period_days is not None:
         if data.ramp_up_period_days != inbox.ramp_up_period_days:
             capacity_changed = True
         inbox.ramp_up_period_days = data.ramp_up_period_days
+    if data.ramp_up_start is not None:
+        if data.ramp_up_start != inbox.ramp_up_start:
+            capacity_changed = True
+            # Reset the clock when the starting number changes
+            if inbox.ramp_up_enabled:
+                inbox.ramp_up_started_at = datetime.utcnow()
+        inbox.ramp_up_start = data.ramp_up_start
     if data.paused is not None:
         inbox.paused = data.paused
     await db.flush()

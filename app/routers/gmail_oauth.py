@@ -210,6 +210,7 @@ async def google_authorize(
     display_name: str = "",
     max_per_day: int = 50,
     ramp_up_enabled: bool = False,
+    ramp_up_start: int = 1,
     db: AsyncSession = Depends(get_db),
 ):
     """Redirect user to Google consent screen."""
@@ -224,7 +225,7 @@ async def google_authorize(
     csrf_state = OAuthState(
         state_token=csrf_token,
         purpose="inbox_google",
-        metadata_json=json.dumps({"display_name": display_name, "max_per_day": max_per_day, "ramp_up_enabled": ramp_up_enabled}),
+        metadata_json=json.dumps({"display_name": display_name, "max_per_day": max_per_day, "ramp_up_enabled": ramp_up_enabled, "ramp_up_start": ramp_up_start}),
         expires_at=utcnow() + timedelta(minutes=10),
     )
     db.add(csrf_state)
@@ -235,6 +236,7 @@ async def google_authorize(
         "display_name": display_name,
         "max_per_day": max_per_day,
         "ramp_up_enabled": ramp_up_enabled,
+        "ramp_up_start": ramp_up_start,
         "_csrf": csrf_token,
     })
 
@@ -274,6 +276,7 @@ async def google_callback(
     display_name = state_data.get("display_name", "")
     max_per_day = state_data.get("max_per_day", 50)
     ramp_up_enabled = bool(state_data.get("ramp_up_enabled", False))
+    ramp_up_start = int(state_data.get("ramp_up_start", 1))
 
     # Validate CSRF nonce (single-use)
     csrf_token = state_data.get("_csrf", "")
@@ -363,6 +366,8 @@ async def google_callback(
             max_emails_per_day=max_per_day,
             provider="gmail",
             ramp_up_enabled=ramp_up_enabled,
+            ramp_up_start=ramp_up_start,
+            ramp_up_started_at=datetime.utcnow() if ramp_up_enabled else None,
         )
         db.add(inbox)
         await db.flush()

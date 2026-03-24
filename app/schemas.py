@@ -40,6 +40,7 @@ class InboxCreate(BaseModel):
     tracking_domain: Optional[str] = None  # custom hostname for tracking links
     ramp_up_enabled: bool = False
     ramp_up_period_days: int = 42
+    ramp_up_start: int = 1
 
 
 class InboxUpdate(BaseModel):
@@ -51,6 +52,7 @@ class InboxUpdate(BaseModel):
     tracking_domain: Optional[str] = None  # set to "" to clear
     ramp_up_enabled: Optional[bool] = None
     ramp_up_period_days: Optional[int] = None
+    ramp_up_start: Optional[int] = None
     paused: Optional[bool] = None
 
 class InboxResponse(BaseModel):
@@ -65,6 +67,8 @@ class InboxResponse(BaseModel):
     created_at: datetime
     ramp_up_enabled: bool = False
     ramp_up_period_days: int = 42
+    ramp_up_start: int = 1
+    ramp_up_started_at: Optional[datetime] = None
     paused: bool = False
     effective_max_per_day: int = 0  # computed; 0 means use max_emails_per_day directly
     # how many emails have been sent from this inbox **today** (UTC)
