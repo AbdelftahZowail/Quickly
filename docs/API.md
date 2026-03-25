@@ -4,6 +4,8 @@ Quickly exposes a JSON REST API over HTTP. **All endpoints require authenticatio
 
 All request/response bodies use `Content-Type: application/json`.
 
+**MCP (Model Context Protocol):** Quickly also serves a **Streamable HTTP** MCP endpoint at **`GET/POST /api/mcp`** for AI agents (leads tools). It uses the same API key or Bearer authentication as the REST API. See **[docs/MCP.md](MCP.md)** for client setup (`mcp-remote`, Cursor) and tool list.
+
 > **Base URL:** `http://localhost:8000` (or your configured domain)
 
 ### Authentication Header
@@ -31,6 +33,7 @@ The tracking endpoints (`/o/`, `/c/`, `/u/`) are **public** (no auth) — they a
 - [Inboxes](#inboxes)
 - [Schedule](#schedule)
 - [Settings](#settings)
+- [Model Context Protocol (MCP)](#model-context-protocol-mcp)
 - [Webhooks](#webhooks)
 - [Gmail OAuth](#gmail-oauth)
 - [Microsoft / Office 365 OAuth](#microsoft--office-365-oauth)
@@ -933,6 +936,51 @@ Get the server's base URL and CNAME target (used for custom tracking domain setu
 Verify that a custom tracking domain resolves correctly to this server.
 
 **Query param:** `?domain=mail.example.com`
+
+### `GET /api/settings/mcp-setup`
+
+Return the MCP HTTP URL and a **Cursor / mcp-remote** config fragment (authenticated).
+
+**Response:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `api_base_url` | string | Application base URL (`BASE_URL` or inferred from the request) |
+| `mcp_http_url` | string | Streamable MCP endpoint, e.g. `https://your-host.com/api/mcp` |
+| `cursor_mcp_fragment` | object | JSON suitable to merge under `mcpServers` — uses `npx -y mcp-remote`, `--transport http-only`, and `X-API-Key:${QUICKLY_MCP_API_KEY}` in `env` |
+
+The UI **Settings → MCP (AI agents)** loads this endpoint and offers a copy action.
+
+---
+
+## Model Context Protocol (MCP)
+
+Quickly embeds an MCP server (**FastMCP**, stateless Streamable HTTP) at **`/api/mcp`**. Clients such as Cursor typically connect via **[mcp-remote](https://www.npmjs.com/package/mcp-remote)** pointing at `https://<your-host>/api/mcp` with `--transport http-only`.
+
+### Authentication
+
+Every MCP HTTP request must include either:
+
+- **`X-API-Key: <raw key>`** (API keys from **Settings → API Keys**), or  
+- **`Authorization: Bearer <access_token>`** (same JWT as the REST API).
+
+Unauthenticated requests receive **401**. Tool execution forwards these headers to internal `httpx` calls against the existing REST routes, so authorization matches the logged-in user / key owner.
+
+### Tools
+
+| Tool | Maps to |
+|------|--------|
+| `list_leads` | `GET /api/leads` (optional `q`, `status`, `bad_only`) |
+| `get_lead` | `GET /api/leads/{id}` |
+| `update_lead` | `PATCH /api/leads/{id}` |
+| `delete_lead` | `DELETE /api/leads/{id}` |
+| `add_campaign_leads` | `POST /api/campaigns/{campaign_id}/leads` |
+
+For behaviour, query parameters, and bodies, see the **[Leads](#leads)** and **[Campaigns](#campaigns)** sections above.
+
+### Client setup
+
+Step-by-step instructions (Cursor, Bearer vs API key, local `--allow-http`, troubleshooting) are in **[docs/MCP.md](MCP.md)**.
 
 ---
 

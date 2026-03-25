@@ -9,7 +9,10 @@ import logging
 import os
 import secrets
 from datetime import timedelta
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from app.models import User
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -193,6 +196,59 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="User not found or disabled")
 
     return user
+
+
+async def try_resolve_user_for_mcp(
+    db: AsyncSession,
+    *,
+    x_api_key: str | None,
+    authorization: str | None,
+) -> Optional[User]:
+    """Like ``get_current_user`` but for MCP HTTP: header strings only, no raise.
+
+    Order matches API access: ``X-API-Key`` first, then ``Authorization: Bearer`` JWT.
+    """
+    from app.models import User, APIKey  # deferred to avoid circular import
+
+    if x_api_key and x_api_key.strip():
+        hashed = hash_api_key(x_api_key.strip())
+        now = utcnow()
+        result = await db.execute(
+            select(APIKey).where(
+                APIKey.key_hash == hashed,
+                APIKey.revoked == False,  # noqa: E712
+                (APIKey.expires_at == None) | (APIKey.expires_at > now),  # noqa: E711
+            )
+        )
+        ak = result.scalar_one_or_none()
+        if ak is None:
+            return None
+        ak.last_used_at = utcnow()
+        await db.flush()
+        user = await db.get(User, ak.user_id)
+        if user and user.is_active:
+            return user
+        return None
+
+    bearer: str | None = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer = authorization[7:].strip()
+    if not bearer:
+        return None
+
+    try:
+        payload = decode_token(bearer)
+    except HTTPException:
+        return None
+    if payload.get("type") != "access":
+        return None
+    user_id = payload.get("sub")
+    if not user_id:
+        return None
+    user = await db.get(User, int(user_id))
+    if user and user.is_active:
+        return user
+    return None
 
 
 async def require_admin(user=Depends(get_current_user)):

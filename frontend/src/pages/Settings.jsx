@@ -18,6 +18,7 @@ const SECTIONS = [
   { id: 'general',           label: 'General' },
   { id: 'account',           label: 'Account & Security' },
   { id: 'api-keys',          label: 'API Keys' },
+  { id: 'mcp',               label: 'MCP (AI agents)' },
   { id: 'webhooks',          label: 'Webhooks' },
   { id: 'notifications',     label: 'Notifications' },
   { id: 'ai',                label: 'AI Features' },
@@ -48,6 +49,9 @@ export default function Settings() {
   const [newKeyName, setNewKeyName] = useState('');
   const [newKeyExpiry, setNewKeyExpiry] = useState('');
   const [createdKey, setCreatedKey] = useState(null); // shown once after creation
+
+  // MCP (Cursor / AI agents)
+  const [mcpSetup, setMcpSetup] = useState(null);
 
   // Notifications
   const [notifConfig, setNotifConfig] = useState({ enabled: false, notification_email: '', events: [], rate_limit_per_hour: 10 });
@@ -96,7 +100,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -107,6 +111,7 @@ export default function Settings() {
         api.get('/auth/api-keys'),
         api.get('/notifications/config').catch(() => null),
         api.get('/settings/gmail-sync').catch(() => null),
+        api.get('/settings/mcp-setup').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
@@ -138,6 +143,7 @@ export default function Settings() {
         setGmailSync(snap);
         savedGmailSyncRef.current = snap;
       }
+      setMcpSetup(mcpData || null);
     } catch {}
   }, []);
 
@@ -631,6 +637,72 @@ export default function Settings() {
               ))}
             </div>
           )}
+        </section>
+
+        {/* ──────────────── MCP (AI agents) ──────────────── */}
+        <section id="mcp" className="mb-10">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">MCP (AI agents)</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Quickly exposes a remote MCP endpoint over HTTPS. Create an API key above, then point Cursor at it with
+            <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">npx mcp-remote</code>
+            (Node 18+). No Python install on your machine.
+          </p>
+          <Card className="mb-4 space-y-3">
+            <h3 className="text-sm font-semibold">1. Endpoint</h3>
+            <p className="text-xs text-gray-500">
+              Streamable HTTP MCP URL (same auth as the REST API):
+            </p>
+            {mcpSetup?.mcp_http_url ? (
+              <code className="block text-xs bg-gray-50 dark:bg-gray-800 border rounded-lg p-2 break-all font-mono">{mcpSetup.mcp_http_url}</code>
+            ) : (
+              <p className="text-xs text-amber-600">Could not load — use <code className="font-mono">{typeof window !== 'undefined' ? `${window.location.origin}/api/mcp` : '/api/mcp'}</code></p>
+            )}
+            <p className="text-xs text-gray-500">
+              For plain HTTP (local dev only), add
+              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">--allow-http</code>
+              to the <code className="text-[10px] font-mono">mcp-remote</code> args after the URL.
+            </p>
+            <h3 className="text-sm font-semibold pt-2">2. Tools exposed to the agent</h3>
+            <ul className="text-sm text-gray-600 dark:text-gray-400 list-disc pl-5 space-y-1">
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">list_leads</code> — search / filter (q, status, bad_only)</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">get_lead</code> — one lead by id</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">update_lead</code> — patch name, status, custom_data</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">delete_lead</code> — remove a lead</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">add_campaign_leads</code> — bulk add to a campaign</li>
+            </ul>
+            <h3 className="text-sm font-semibold pt-2">3. Cursor MCP config</h3>
+            <p className="text-xs text-gray-500">
+              Merge the JSON into your MCP settings. Replace
+              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">QUICKLY_MCP_API_KEY</code>
+              with a key from API Keys above. To use a JWT instead, use
+              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">--header</code>
+              <code className="text-[10px] font-mono">{'Authorization:${QUICKLY_MCP_AUTH}'}</code>
+              {' '}and set the env value to <code className="text-[10px] font-mono">Bearer …</code>
+              (same as REST). App base URL:
+              {mcpSetup?.api_base_url ? (
+                <span className="ml-1 font-mono text-[11px]">{mcpSetup.api_base_url}</span>
+              ) : (
+                <span className="ml-1 text-amber-600">(load failed)</span>
+              )}
+            </p>
+            {mcpSetup?.cursor_mcp_fragment && (
+              <div className="space-y-2">
+                <pre className="text-xs bg-gray-50 dark:bg-gray-800 border rounded-lg p-3 overflow-x-auto font-mono max-h-64">
+                  {JSON.stringify(mcpSetup.cursor_mcp_fragment, null, 2)}
+                </pre>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify(mcpSetup.cursor_mcp_fragment, null, 2));
+                    notify({ type: 'success', message: 'MCP fragment copied — merge into your mcp.json' });
+                  }}
+                >
+                  Copy MCP fragment
+                </Button>
+              </div>
+            )}
+          </Card>
         </section>
 
         {/* ──────────────── Webhooks ──────────────── */}
