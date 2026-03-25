@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
 
     from app.database import AsyncSessionLocal
     from app.app_settings import get_gmail_sync_config
+    from app.mcp_leads import leads_mcp_lifespan
 
     async with AsyncSessionLocal() as db:
         try:
@@ -56,82 +57,83 @@ async def lifespan(app: FastAPI):
             logging.getLogger("quickly").exception("Failed loading unibox sync config; using default interval")
             unibox_interval_minutes = 5
 
-    # Build the job store (Postgres when available, memory for SQLite/tests)
-    jobstores = scheduler_mod.build_jobstores(db_url)
-    schedule = AsyncIOScheduler(jobstores=jobstores)
+    async with leads_mcp_lifespan():
+        # Build the job store (Postgres when available, memory for SQLite/tests)
+        jobstores = scheduler_mod.build_jobstores(db_url)
+        schedule = AsyncIOScheduler(jobstores=jobstores)
 
-    # Register the scheduler singleton so routers can reach it.
-    scheduler_mod.set_scheduler(schedule)
-    app.state.schedule = schedule
+        # Register the scheduler singleton so routers can reach it.
+        scheduler_mod.set_scheduler(schedule)
+        app.state.schedule = schedule
 
-    # Maintenance jobs (not changed: these are not per-slot)
-    schedule.add_job(
-        run_unibox_sync_job,
-        "cron",
-        minute=f"*/{unibox_interval_minutes}",
-        second=10,
-        id="unibox_sync",
-        replace_existing=True,
-    )
-    schedule.add_job(
-        office365_webhook_router.renew_expiring_subscriptions,
-        "interval",
-        hours=6,
-        id="office365_graph_subscription_renewal",
-        replace_existing=True,
-    )
-    # Single periodic worker: every minute it looks ahead 60 seconds and spawns
-    # a lightweight asyncio.Task per slot timed to its exact scheduled_date.
-    # Already-overdue slots are dispatched immediately (delay=0).
-    # This keeps APScheduler cost flat (1 job regardless of queue size) while
-    # preserving second-level precision for each individual slot.
-    schedule.add_job(
-        run_slot_scan_job,
-        "interval",
-        minutes=1,
-        id="slot_scan",
-        replace_existing=True,
-        max_instances=1,
-    )
-    schedule.start()
+        # Maintenance jobs (not changed: these are not per-slot)
+        schedule.add_job(
+            run_unibox_sync_job,
+            "cron",
+            minute=f"*/{unibox_interval_minutes}",
+            second=10,
+            id="unibox_sync",
+            replace_existing=True,
+        )
+        schedule.add_job(
+            office365_webhook_router.renew_expiring_subscriptions,
+            "interval",
+            hours=6,
+            id="office365_graph_subscription_renewal",
+            replace_existing=True,
+        )
+        # Single periodic worker: every minute it looks ahead 60 seconds and spawns
+        # a lightweight asyncio.Task per slot timed to its exact scheduled_date.
+        # Already-overdue slots are dispatched immediately (delay=0).
+        # This keeps APScheduler cost flat (1 job regardless of queue size) while
+        # preserving second-level precision for each individual slot.
+        schedule.add_job(
+            run_slot_scan_job,
+            "interval",
+            minutes=1,
+            id="slot_scan",
+            replace_existing=True,
+            max_instances=1,
+        )
+        schedule.start()
 
-    # Perform a global recalculation on startup to ensure the queue reflects
-    # any configuration changes that may have occurred while the server was down.
-    # This also re-creates all slot jobs in APScheduler.
-    from httpx import AsyncClient, ASGITransport
+        # Perform a global recalculation on startup to ensure the queue reflects
+        # any configuration changes that may have occurred while the server was down.
+        # This also re-creates all slot jobs in APScheduler.
+        from httpx import AsyncClient, ASGITransport
 
-    async def kickoff():
-        await asyncio.sleep(1)
-        try:
-            transport = ASGITransport(app=app)
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.post("/api/schedule/recalculate-all")
-                resp.raise_for_status()
-        except Exception as e:
-            logging.getLogger("quickly.routes").error(
-                "startup recalculation failed: %s", e
-            )
-
-    # Track startup tasks so we can cancel them cleanly on shutdown.
-    # Without this, rapid reloads leave open DB transactions which cause
-    # "unexpected EOF on client connection with an open transaction" errors.
-    startup_tasks = [
-        asyncio.create_task(kickoff()),
-        asyncio.create_task(queue_sync_for_all_inboxes(reason="startup")),
-    ]
-
-    yield
-
-    # Cancel any still-running startup tasks before the event loop closes.
-    for task in startup_tasks:
-        if not task.done():
-            task.cancel()
+        async def kickoff():
+            await asyncio.sleep(1)
             try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+                transport = ASGITransport(app=app)
+                async with AsyncClient(transport=transport, base_url="http://test") as client:
+                    resp = await client.post("/api/schedule/recalculate-all")
+                    resp.raise_for_status()
+            except Exception as e:
+                logging.getLogger("quickly.routes").error(
+                    "startup recalculation failed: %s", e
+                )
 
-    schedule.shutdown()
+        # Track startup tasks so we can cancel them cleanly on shutdown.
+        # Without this, rapid reloads leave open DB transactions which cause
+        # "unexpected EOF on client connection with an open transaction" errors.
+        startup_tasks = [
+            asyncio.create_task(kickoff()),
+            asyncio.create_task(queue_sync_for_all_inboxes(reason="startup")),
+        ]
+
+        yield
+
+        # Cancel any still-running startup tasks before the event loop closes.
+        for task in startup_tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        schedule.shutdown()
 
 
 app = FastAPI(title="Quickly", lifespan=lifespan)
@@ -158,7 +160,13 @@ app.add_middleware(
     allow_credentials=True,
     # Explicit method list; add new HTTP methods here if needed in future routes.
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-API-Key",
+        "mcp-session-id",
+        "mcp-protocol-version",
+    ],
 )
 
 # ---------------------------------------------------------------------------
@@ -368,4 +376,22 @@ async def spa(request: Request, full_path: str):
     ):
         raise HTTPException(status_code=404)
     return FileResponse(str(BASE_DIR / "frontend" / "dist" / "index.html"))
+
+
+def _register_mcp_http_routes() -> None:
+    """Wire /api/mcp without Starlette Mount — Mount only matches /api/mcp/<extra>, not /api/mcp."""
+    from starlette.routing import Route
+
+    from app.mcp_leads import leads_mcp_http_asgi
+
+    routes = app.router.routes
+    for i, r in enumerate(routes):
+        if getattr(r, "path", None) == "/{full_path:path}":
+            routes.insert(i, Route("/api/mcp/{path:path}", endpoint=leads_mcp_http_asgi))
+            routes.insert(i, Route("/api/mcp", endpoint=leads_mcp_http_asgi))
+            return
+    raise RuntimeError("Could not find SPA catch-all route to insert MCP routes before")
+
+
+_register_mcp_http_routes()
 

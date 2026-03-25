@@ -462,6 +462,40 @@ async def set_scheduling_strategy_endpoint(
 # Server info (used by the frontend for DNS setup instructions)
 # ---------------------------------------------------------------------------
 
+@router.get("/mcp-setup")
+async def get_mcp_setup(request: Request):
+    """Return MCP HTTP URL and a Cursor config fragment using ``npx mcp-remote`` (no local Python)."""
+    req_base = str(request.base_url).rstrip("/")
+    app_base = settings.base_url.rstrip("/")
+    api_base_url = app_base or req_base
+    mcp_http_url = f"{api_base_url}/api/mcp"
+    # Cursor/Windows: avoid spaces in --header value; put secret in env (mcp-remote expands ${VAR}).
+    cursor_fragment = {
+        "mcpServers": {
+            "quickly-leads": {
+                "command": "npx",
+                "args": [
+                    "-y",
+                    "mcp-remote",
+                    mcp_http_url,
+                    "--header",
+                    "X-API-Key:${QUICKLY_MCP_API_KEY}",
+                    "--transport",
+                    "http-only",
+                ],
+                "env": {
+                    "QUICKLY_MCP_API_KEY": "__PASTE_API_KEY_FROM_SETTINGS__",
+                },
+            }
+        }
+    }
+    return {
+        "api_base_url": api_base_url,
+        "mcp_http_url": mcp_http_url,
+        "cursor_mcp_fragment": cursor_fragment,
+    }
+
+
 @router.get("/server-info")
 async def get_server_info():
     """Return the server's configured base URL and derived hostname.

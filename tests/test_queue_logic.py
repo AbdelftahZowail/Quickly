@@ -1,4 +1,4 @@
-﻿"""Comprehensive tests for app.queue_logic.
+"""Comprehensive tests for app.queue_logic.
 
 Covers:
   - Pure helper functions (_parse_time, _estimated_send_time, _time_to_minutes, next_business_date)
