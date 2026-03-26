@@ -133,7 +133,8 @@ export default function Schedule() {
   const [statusFilter, setStatusFilter] = useState('');
   const [searchFilter, setSearchFilter] = useState('');
 
-  const [pastExpanded, setPastExpanded] = useState(true);
+  const [pastExpanded, setPastExpanded] = useState(false);
+  const [scheduledExpanded, setScheduledExpanded] = useState(true);
   const [expandedId, setExpandedId] = useState(null);
   const [previewItem, setPreviewItem] = useState(null);
 
@@ -482,10 +483,10 @@ export default function Schedule() {
       const totalScheduled = stats.total_scheduled ?? filteredScheduled.length;
       parts.push(
         <div key="upcoming">
-          <div className="section-hdr" style={{cursor:'default'}}>
-            <span className="arrow open">&#9654;</span> Scheduled ({totalScheduled} email{totalScheduled!==1?'s':''})
+          <div className="section-hdr" onClick={() => setScheduledExpanded(se => !se)}>
+            <span className={`arrow ${scheduledExpanded ? 'open' : ''}`}>&#9654;</span> Scheduled ({totalScheduled} email{totalScheduled!==1?'s':''})
           </div>
-          {Object.entries(groupByDate(filteredScheduled,false)).map(([d,items]) => (
+          {scheduledExpanded && Object.entries(groupByDate(filteredScheduled,false)).map(([d,items]) => (
             <div key={d}>
               <div className="date-hdr">{d}{d===today && <span style={{color:'var(--success)',fontWeight:400,fontSize:'0.8rem',marginLeft:'0.5rem'}}>today</span>}</div>
               {items.sort((a,b)=>(a.scheduled_at||'').localeCompare(b.scheduled_at||'')||((a.position_in_day||0)-(b.position_in_day||0))).map(i=>renderRow(i,`sched-${i.slot_id}`))}
