@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import logo from '../assets/quickly_logo.svg';
 import {
   RiSendPlaneLine,
@@ -25,10 +25,11 @@ const links = [
   { to: '/inboxes', label: 'Inboxes', icon: <RiMailLine size={20} /> },
   { to: '/unibox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
   { to: '/schedule', label: 'Schedule', icon: <RiCalendarScheduleLine size={20} /> },
-  { to: '/settings', label: 'Settings', icon: <RiSettingsLine size={20} /> },
+  { to: '/settings#general', label: 'Settings', icon: <RiSettingsLine size={20} /> },
 ];
 
 export default function Sidebar() {
+  const location = useLocation();
   const [collapsed, setCollapsed] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [tipsOpen, setTipsOpen] = useState(false);
@@ -54,7 +55,7 @@ export default function Sidebar() {
   }, []);
 
   // width classes change depending on collapsed state
-  const containerClass = `bg-gray-900 text-gray-400 flex-shrink-0 h-full fixed top-0 left-0 flex flex-col transition-width duration-200 ${
+  const containerClass = `bg-gray-900 text-gray-400 flex-shrink-0 h-full fixed top-0 left-0 z-40 flex flex-col transition-width duration-200 ${
     collapsed ? 'w-16' : 'w-36'
   }`;
 
@@ -80,13 +81,14 @@ export default function Sidebar() {
               to={l.to}
               end
               title={l.label} // tooltip for hover
-              className={({ isActive }) =>
-                `flex items-center mb-3 font-medium whitespace-nowrap ${
-                  isActive
+              className={({ isActive }) => {
+                const onSettings = l.to.startsWith('/settings') && location.pathname === '/settings';
+                return `flex items-center mb-3 font-medium whitespace-nowrap ${
+                  isActive || onSettings
                     ? 'text-teal-400 font-semibold'
                     : 'hover:text-teal-300'
-                }`
-              }
+                }`;
+              }}
             >
               <span className="flex-shrink-0">{l.icon}</span>
               {!collapsed && <span className="ml-2">{l.label}</span>}
@@ -130,7 +132,7 @@ export default function Sidebar() {
           </button>
 
           {helpOpen && (
-            <div className="absolute bottom-full mb-2 left-2 w-52 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 overflow-hidden">
+            <div className="absolute bottom-full mb-2 left-2 w-52 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-[60] overflow-hidden">
 
               {/* Deliverability Tips */}
               <button

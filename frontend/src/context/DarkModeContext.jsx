@@ -1,60 +1,88 @@
-import { createContext, useState, useEffect, useContext } from 'react';
-import { enable, disable, isEnabled } from 'darkreader';
+import { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import { enable, disable } from 'darkreader';
+
+const STORAGE_KEY = 'darkreader';
 
 // central configuration for dark mode appearance
 const DARKREADER_SETTINGS = { brightness: 150, contrast: 100, sepia: 0 };
 
+/** @returns {'system' | 'dark' | 'light'} */
+function readDarkThemePreference() {
+  try {
+    const s = localStorage.getItem(STORAGE_KEY);
+    if (s === 'on' || s === 'dark') return 'dark';
+    if (s === 'off' || s === 'light') return 'light';
+    return 'system';
+  } catch {
+    return 'system';
+  }
+}
+
+function systemPrefersDark() {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches;
+}
+
+/** Effective dark state for a stored preference. */
+function effectiveDarkForPreference(pref) {
+  if (pref === 'dark') return true;
+  if (pref === 'light') return false;
+  return systemPrefersDark();
+}
+
 const DarkModeContext = createContext({
   darkMode: false,
-  toggleDarkMode: () => {}
+  themePreference: 'system',
+  setThemePreference: () => {}
 });
 
 export function DarkModeProvider({ children }) {
-  const [darkMode, setDarkMode] = useState(false);
+  const [themePreference, setThemePreferenceState] = useState(readDarkThemePreference);
+  const [darkMode, setDarkMode] = useState(() =>
+    typeof window !== 'undefined' ? effectiveDarkForPreference(readDarkThemePreference()) : false
+  );
 
-  // helper for applying the tailwind "dark" class to the document root
   const applyRootClass = on => {
     const root = document.documentElement;
     if (on) root.classList.add('dark');
     else root.classList.remove('dark');
   };
 
-  // run once on mount to apply stored preference
-  useEffect(() => {
-    const stored = localStorage.getItem('darkreader');
-    const currently = isEnabled();
-    if (stored === 'on' && !currently) {
-      // raise contrast and slightly dim brightness for readability
+  const applyEffectiveDark = useCallback(on => {
+    if (on) {
       enable(DARKREADER_SETTINGS);
-      setDarkMode(true);
       applyRootClass(true);
-    } else if (stored === 'off' && currently) {
-      disable();
-      setDarkMode(false);
-      applyRootClass(false);
     } else {
-      setDarkMode(currently);
-      applyRootClass(currently);
+      disable();
+      applyRootClass(false);
     }
+    setDarkMode(on);
   }, []);
 
-  const toggleDarkMode = () => {
-    if (darkMode) {
-      disable();
-      setDarkMode(false);
-      applyRootClass(false);
-      localStorage.setItem('darkreader', 'off');
-    } else {
-      // match the same contrast settings used on mount
-      enable(DARKREADER_SETTINGS);
-      setDarkMode(true);
-      applyRootClass(true);
-      localStorage.setItem('darkreader', 'on');
-    }
-  };
+  const setThemePreference = useCallback(pref => {
+    if (pref !== 'system' && pref !== 'dark' && pref !== 'light') return;
+    setThemePreferenceState(pref);
+    localStorage.setItem(
+      STORAGE_KEY,
+      pref === 'dark' ? 'dark' : pref === 'light' ? 'light' : 'system'
+    );
+  }, []);
+
+  useEffect(() => {
+    const on = effectiveDarkForPreference(themePreference);
+    applyEffectiveDark(on);
+
+    if (themePreference !== 'system') return undefined;
+
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => {
+      applyEffectiveDark(mq.matches);
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [themePreference, applyEffectiveDark]);
 
   return (
-    <DarkModeContext.Provider value={{ darkMode, toggleDarkMode }}>
+    <DarkModeContext.Provider value={{ darkMode, themePreference, setThemePreference }}>
       {children}
     </DarkModeContext.Provider>
   );

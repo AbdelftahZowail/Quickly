@@ -423,7 +423,7 @@ export default function SystemHealth() {
   }, [checks, muted, toggleMute]);
 
   return (
-    <div className="p-6 max-w-5xl mx-auto space-y-6">
+    <div className="mx-auto min-h-0 max-w-5xl flex-1 space-y-6 overflow-y-auto p-6">
       {/* Page title */}
       <div className="flex items-center justify-between">
         <div>

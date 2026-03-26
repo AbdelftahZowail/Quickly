@@ -478,7 +478,7 @@ export default function Inboxes() {
   };
 
   return (
-    <div className="p-8">
+    <div className="min-h-0 flex-1 overflow-y-auto p-8">
       {/* header with add button */}
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Inboxes</h1>

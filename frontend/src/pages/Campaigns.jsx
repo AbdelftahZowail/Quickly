@@ -105,12 +105,12 @@ export default function Campaigns() {
       <span>·</span>
       <span>Drag rows to reorder</span>
       <span>·</span>
-      <Link to="/settings" className="underline text-teal-500">Change strategy</Link>
+      <Link to="/settings#general" className="underline text-teal-500">Change strategy</Link>
     </div>
   ) : null;
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="min-h-0 flex-1 overflow-y-auto p-8 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold mb-4">Campaigns</h1>
         <Button as={Link} to="/analytics" variant="outline" size="sm">

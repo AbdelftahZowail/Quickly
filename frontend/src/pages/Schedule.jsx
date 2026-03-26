@@ -503,7 +503,7 @@ export default function Schedule() {
   };
 
   return (
-    <div className="p-8">
+    <div className="min-h-0 flex-1 overflow-y-auto p-8">
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-bold">Schedule</h1>
         <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5" title="Times are stored in UTC and displayed in your local timezone below">
@@ -546,7 +546,7 @@ export default function Schedule() {
             <span className="text-sm text-gray-500">Last Run Sent:</span> <span className="font-semibold">{serverStatus.last_send_job_sent_count??0}</span>
           </div>
           <div>
-            <span className="text-sm text-gray-500">Strategy:</span> <span className={strategy==='round_robin'?'text-teal-500':'text-gray-900'} style={{cursor:'pointer',textDecoration:'underline dotted',textUnderlineOffset:'3px'}} title="Change in Settings" onClick={()=>window.location='/settings'}>{strategy==='priority'?'Priority':'Round-Robin'}</span>
+            <span className="text-sm text-gray-500">Strategy:</span> <span className={strategy==='round_robin'?'text-teal-500':'text-gray-900'} style={{cursor:'pointer',textDecoration:'underline dotted',textUnderlineOffset:'3px'}} title="Change in Settings" onClick={() => { window.location = '/settings#general'; }}>{strategy==='priority'?'Priority':'Round-Robin'}</span>
           </div>
         </div>
         <div className="flex items-center gap-2">

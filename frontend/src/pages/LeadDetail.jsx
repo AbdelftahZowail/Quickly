@@ -39,7 +39,7 @@ export default function LeadDetail() {
 
   if (error && !lead) {
     return (
-      <div className="p-8 space-y-6">
+      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-8">
         <h1 className="text-2xl font-semibold mb-4">Lead</h1>
         <p className="text-red-600">{error}</p>
         <Button as={Link} to="/leads" variant="outline">Back to Leads</Button>
@@ -49,7 +49,7 @@ export default function LeadDetail() {
 
   if (!lead) {
     return (
-      <div className="p-8">
+      <div className="min-h-0 flex-1 overflow-y-auto p-8">
         <p className="text-gray-500">Loading…</p>
       </div>
     );
@@ -58,7 +58,7 @@ export default function LeadDetail() {
   const customEntries = Object.entries(lead.custom_data || {});
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="min-h-0 flex-1 space-y-6 overflow-y-auto p-8">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="text-sm text-gray-500 mb-1">

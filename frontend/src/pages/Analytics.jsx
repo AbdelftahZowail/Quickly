@@ -245,7 +245,7 @@ export default function Analytics() {
   };
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="min-h-0 flex-1 overflow-y-auto p-8 space-y-6">
       <h1 className="text-2xl font-semibold mb-4">Analytics</h1>
       {error && <div className="text-red-600">{error}</div>}
 
