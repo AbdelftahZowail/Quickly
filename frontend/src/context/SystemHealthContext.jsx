@@ -60,7 +60,7 @@ function buildChecks(d) {
         level: 'error',
         text: 'Google OAuth credentials are not configured, but Gmail inboxes exist.',
         fix: 'Open Settings and add your Google OAuth Client ID / Secret.',
-        action: { label: 'Open Settings', to: '/settings' },
+        action: { label: 'Open Settings', to: '/settings#general' },
       });
     }
     googleAccounts.forEach(acc => {
@@ -125,7 +125,7 @@ function buildChecks(d) {
         level: 'error',
         text: 'Microsoft OAuth credentials are not configured, but Office 365 inboxes exist.',
         fix: 'Open Settings and add your Azure AD App credentials.',
-        action: { label: 'Open Settings', to: '/settings' },
+        action: { label: 'Open Settings', to: '/settings#general' },
       });
     }
     o365Accounts.forEach(acc => {
@@ -233,8 +233,8 @@ function buildChecks(d) {
     uniboxIssues.push({
       level: 'warning',
       text: 'Gmail push notifications (Pub/Sub) are not configured. Email detection uses polling instead.',
-      fix: 'Set up a Google Cloud Pub/Sub topic in Settings → Gmail Sync for instant real-time email events.',
-      action: { label: 'Open Settings', to: '/settings' },
+      fix: 'Set up a Google Cloud Pub/Sub topic in Settings → Setup (Gmail sync) for instant real-time email events.',
+      action: { label: 'Open Settings', to: '/settings#setup' },
     });
   }
   if (unibox_sync?.initial_list_sync_in_progress) {
@@ -271,24 +271,24 @@ function buildChecks(d) {
       aiIssues.push({
         level: 'warning',
         text: `"${f.label}" is enabled but no API key is configured.`,
-        fix: 'Open Settings → AI Features to add an API key.',
-        action: { label: 'Open Settings', to: '/settings' },
+        fix: 'Open Settings → Features → AI features to add an API key.',
+        action: { label: 'Open Settings', to: '/settings#features' },
       });
     } else if (!f.connection_tested) {
       if (aiStatLvl === 'ok') aiStatLvl = 'warning';
       aiIssues.push({
         level: 'warning',
         text: `"${f.label}" is enabled but connection has not been verified.`,
-        fix: 'Open Settings → AI Features and click "Test Connection".',
-        action: { label: 'Open Settings', to: '/settings' },
+        fix: 'Open Settings → Features → AI features and click "Test Connection".',
+        action: { label: 'Open Settings', to: '/settings#features' },
       });
     } else if (f.last_error) {
       if (aiStatLvl !== 'error') aiStatLvl = 'error';
       aiIssues.push({
         level: 'error',
         text: `"${f.label}" failed during use: ${f.last_error}`,
-        fix: 'Check your API key and quota. Re-test connection in Settings → AI Features.',
-        action: { label: 'Open Settings', to: '/settings' },
+        fix: 'Check your API key and quota. Re-test connection in Settings → Features → AI features.',
+        action: { label: 'Open Settings', to: '/settings#features' },
       });
     }
   });
@@ -315,16 +315,16 @@ function buildChecks(d) {
       evIssues.push({
         level: 'warning',
         text: 'Email verification is enabled but the connection has not been tested.',
-        fix: 'Open Settings → Optional Features and run "Test Connection".',
-        action: { label: 'Open Settings', to: '/settings' },
+        fix: 'Open Settings → Features → Email verification and run "Test Connection".',
+        action: { label: 'Open Settings', to: '/settings#features' },
       });
     } else if (evData.enabled && evData.last_error) {
       evStatLvl = 'error';
       evIssues.push({
         level: 'error',
         text: `Email verification failed during use: ${evData.last_error}`,
-        fix: 'Check your API key and provider configuration in Settings → Optional Features.',
-        action: { label: 'Open Settings', to: '/settings' },
+        fix: 'Check your API key and provider configuration in Settings → Features → Email verification.',
+        action: { label: 'Open Settings', to: '/settings#features' },
       });
     }
   }
@@ -352,8 +352,8 @@ function buildChecks(d) {
     flagsIssues.push({
       level: 'warning',
       text: 'Test Mode is ON — emails will not be sent to real recipients.',
-      fix: 'Disable Test Mode in Settings when you are ready to send live emails.',
-      action: { label: 'Open Settings', to: '/settings' },
+      fix: 'Disable Test mode in Settings → Dev when you are ready to send live emails.',
+      action: { label: 'Open Settings', to: '/settings#dev' },
     });
   }
 

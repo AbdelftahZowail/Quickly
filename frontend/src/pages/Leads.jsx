@@ -306,7 +306,7 @@ export default function Leads() {
   };
 
   return (
-    <div className="p-8 space-y-6">
+    <div className="min-h-0 flex-1 overflow-y-auto p-8 space-y-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold mb-1">Leads</h1>

@@ -32,7 +32,7 @@ const sections = [
       },
       {
         title: 'Verify your contact list',
-        body: 'Always verify your list before launching a campaign. Go to Settings → Optional Features and enable Email Verification. You can connect MailTester Ninja — it\'s cheap (under $20) and gives you a very high verification limit — or set up a custom provider. Once enabled, new leads added to any campaign are verified automatically.',
+        body: 'Always verify your list before launching a campaign. Go to Settings → Features → Email verification and enable it. You can connect MailTester Ninja — it\'s cheap (under $20) and gives you a very high verification limit — or set up a custom provider. Once enabled, new leads added to any campaign are verified automatically.',
         tag: 'Recommended',
       },
     ],
@@ -199,7 +199,7 @@ export default function DeliverabilityTips() {
   });
 
   return (
-    <div className="p-8 max-w-5xl mx-auto space-y-8">
+    <div className="mx-auto min-h-0 max-w-5xl flex-1 space-y-8 overflow-y-auto p-8">
 
       {/* Page header */}
       <div>

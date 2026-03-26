@@ -14,7 +14,7 @@ function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
   const contentMargin = sidebarCollapsed ? 'ml-16' : 'ml-44';
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex h-[100dvh] min-h-0 w-full overflow-hidden">
       <Sidebar
         collapsed={sidebarCollapsed}
         onToggle={() => {
@@ -27,10 +27,13 @@ function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
           });
         }}
       />
-      <div className={`${contentMargin} flex-1 min-w-0 bg-gray-50 text-gray-900`}
+      <div
+        className={`${contentMargin} flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-gray-50 text-gray-900`}
       >
         {!isProduction && <TestModeBanner />}
-        {children}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          {children}
+        </div>
       </div>
     </div>
   );

@@ -1,42 +1,50 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import { api, apiCache } from '../api';
 import { useDarkMode } from '../context/DarkModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 import { useAppMode } from '../context/AppModeContext';
-import { useOnboarding } from '../context/OnboardingContext';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
 import EmailVerificationSettings from '../components/EmailVerificationSettings';
 
-/* ────────────────────────────────────────────────────────────────────────────
-   Section definitions — each object drives both the sidebar TOC and the
-   scroll-spy highlight.  `id` must match the element id in the JSX below.
-   ──────────────────────────────────────────────────────────────────────────── */
-const SECTIONS = [
-  { id: 'general',           label: 'General' },
-  { id: 'account',           label: 'Account & Security' },
-  { id: 'api-keys',          label: 'API Keys' },
-  { id: 'mcp',               label: 'MCP (AI agents)' },
-  { id: 'webhooks',          label: 'Webhooks' },
-  { id: 'notifications',     label: 'Notifications' },
-  { id: 'ai',                label: 'AI Features' },
-  { id: 'optional-features', label: 'Optional Features' },
-  { id: 'gmail-sync',        label: 'Gmail Sync' },
-  { id: 'scheduling',        label: 'Scheduling' },
-  { id: 'test-mode',         label: 'Test Mode' },
-  { id: 'utilities',         label: 'Utilities' },
+const SETTINGS_TABS = [
+  { id: 'general', label: 'General' },
+  { id: 'setup', label: 'Setup' },
+  { id: 'features', label: 'Features' },
+  { id: 'integrating', label: 'Integrating' },
+  { id: 'dev', label: 'Dev' },
 ];
+
+/** In-tab section anchors (DOM id = `settings-${id}`). */
+const SECTIONS_BY_TAB = {
+  general: [
+    { id: 'scheduling', label: 'Scheduling' },
+    { id: 'appearance', label: 'Appearance' },
+    { id: 'account', label: 'Account & Security' },
+    { id: 'known-ips', label: 'Known IPs' },
+  ],
+  setup: [{ id: 'gmail-sync', label: 'Gmail sync' }],
+  features: [
+    { id: 'ai', label: 'AI features' },
+    { id: 'other', label: 'Other' },
+  ],
+  integrating: [
+    { id: 'api-keys', label: 'API keys' },
+    { id: 'webhooks', label: 'Webhooks' },
+    { id: 'mcp', label: 'MCP' },
+  ],
+  dev: [{ id: 'test-mode', label: 'Test mode' }],
+};
 
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 export default function Settings() {
   const notify = useNotify();
-  const { darkMode, toggleDarkMode } = useDarkMode();
+  const { themePreference, setThemePreference } = useDarkMode();
   const confirm = useConfirm();
   const { isProduction } = useAppMode();
-  const { startOnboarding } = useOnboarding();
   const { user, logout } = useAuth();
 
   /* ── state ── */
@@ -93,9 +101,9 @@ export default function Settings() {
   const [currentIp, setCurrentIp] = useState('');
   const [newIpAddress, setNewIpAddress] = useState('');
 
-  // scroll-spy
-  const [activeSection, setActiveSection] = useState(SECTIONS[0].id);
-  const contentRef = useRef(null);
+  const [activeTab, setActiveTab] = useState('general');
+  const tabContentRef = useRef(null);
+  const [activeSectionDomId, setActiveSectionDomId] = useState('');
 
   /* ── load data ── */
   const loadAll = useCallback(async () => {
@@ -149,44 +157,85 @@ export default function Settings() {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
-  const visibleSections = isProduction
-    ? SECTIONS.filter(s => s.id !== 'test-mode' && s.id !== 'utilities')
-    : SECTIONS;
+  const visibleTabs = useMemo(
+    () => (isProduction ? SETTINGS_TABS.filter(t => t.id !== 'dev') : SETTINGS_TABS),
+    [isProduction],
+  );
 
-  /* ── scroll-spy ── */
+  const sectionNav = SECTIONS_BY_TAB[activeTab] || [];
+
   useEffect(() => {
-    const container = contentRef.current;
-    if (!container) return;
-    const handleScroll = () => {
-      const THRESHOLD = 120;
-      const offsets = visibleSections.map(s => {
-        const el = document.getElementById(s.id);
-        return el ? { id: s.id, top: el.getBoundingClientRect().top } : null;
-      }).filter(Boolean);
-      // Sections whose top edge has scrolled past the threshold are "active candidates"
-      const past = offsets.filter(s => s.top <= THRESHOLD);
-      if (past.length > 0) {
-        // Pick the one closest to (but still at or above) the threshold
-        const active = past.reduce((best, cur) => cur.top > best.top ? cur : best);
-        setActiveSection(active.id);
-      } else {
-        // Nothing past threshold yet — highlight the first section
-        setActiveSection(offsets[0]?.id ?? visibleSections[0].id);
+    const syncFromHash = () => {
+      let raw = (window.location.hash || '').replace(/^#/, '');
+      if (!raw) raw = 'general';
+      const id = visibleTabs.some(t => t.id === raw) ? raw : 'general';
+      setActiveTab(id);
+      if (window.location.hash !== `#${id}`) {
+        window.history.replaceState(null, '', `#${id}`);
       }
     };
-    container.addEventListener('scroll', handleScroll, { passive: true });
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => {
-      container.removeEventListener('scroll', handleScroll);
-      window.removeEventListener('scroll', handleScroll);
-    };
-  }, [isProduction]);
+    syncFromHash();
+    window.addEventListener('hashchange', syncFromHash);
+    return () => window.removeEventListener('hashchange', syncFromHash);
+  }, [visibleTabs]);
 
-  const scrollTo = id => {
-    setActiveSection(id);
-    const el = document.getElementById(id);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  useEffect(() => {
+    tabContentRef.current?.scrollTo(0, 0);
+  }, [activeTab]);
+
+  useEffect(() => {
+    const ids = (SECTIONS_BY_TAB[activeTab] || []).map(s => `settings-${s.id}`);
+    const root = tabContentRef.current;
+    setActiveSectionDomId(ids[0] || '');
+    if (!root || ids.length === 0) return;
+
+    let raf = 0;
+    const updateActiveFromScroll = () => {
+      const rootRect = root.getBoundingClientRect();
+      const margin = 20;
+      let current = ids[0];
+      for (const domId of ids) {
+        const el = document.getElementById(domId);
+        if (!el) continue;
+        const top = el.getBoundingClientRect().top - rootRect.top;
+        if (top <= margin) current = domId;
+      }
+      setActiveSectionDomId(prev => (prev === current ? prev : current));
+    };
+
+    const schedule = () => {
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        updateActiveFromScroll();
+      });
+    };
+
+    root.addEventListener('scroll', schedule, { passive: true });
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+    ro?.observe(root);
+    schedule();
+
+    return () => {
+      root.removeEventListener('scroll', schedule);
+      ro?.disconnect();
+      if (raf) cancelAnimationFrame(raf);
+    };
+  }, [activeTab]);
+
+  const selectTab = id => {
+    if (!visibleTabs.some(t => t.id === id)) return;
+    setActiveTab(id);
+    window.history.replaceState(null, '', `#${id}`);
   };
+
+  const scrollToSection = useCallback(sid => {
+    const domId = `settings-${sid}`;
+    setActiveSectionDomId(domId);
+    const el = document.getElementById(domId);
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
 
   /* ── scheduling strategy ── */
   const submitStrategy = async val => {
@@ -273,14 +322,6 @@ export default function Settings() {
     try {
       const updated = await api.patch(`/settings/webhooks/${id}`, { active: !current });
       setWebhooks(prev => prev.map(w => (w.id === id ? updated : w)));
-    } catch (e) { notify({ type: 'error', message: e.message }); }
-  };
-
-  /* ── utility ── */
-  const addOpensToAll = async () => {
-    try {
-      const resp = await api.post('/settings/add-opens');
-      notify({ type: 'success', message: `Added opens to ${resp.added} email(s)` });
     } catch (e) { notify({ type: 'error', message: e.message }); }
   };
 
@@ -513,49 +554,153 @@ export default function Settings() {
   /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
   return (
-    <div className="flex h-full">
-      {/* ── sidebar TOC ── */}
-      <nav className="hidden md:flex flex-col w-48 shrink-0 border-r border-gray-200 dark:border-gray-700 py-8 px-4 sticky top-0 h-screen overflow-y-auto">
-        <h2 className="text-xs uppercase tracking-wider text-gray-400 mb-4 font-semibold">Contents</h2>
-        {visibleSections.map(s => (
-          <button
-            key={s.id}
-            onClick={() => scrollTo(s.id)}
-            className={`text-left text-sm py-1.5 px-2 rounded transition-colors ${
-              activeSection === s.id
-                ? 'bg-primary/10 text-primary font-medium'
-                : 'text-gray-600 dark:text-gray-400 hover:text-primary'
-            }`}
-          >
-            {s.label}
-          </button>
-        ))}
-      </nav>
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <header className="shrink-0 px-6 lg:px-8 pt-6 lg:pt-8 pb-0 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-transparent">
+        <h1 className="text-2xl font-bold">Settings</h1>
+        <nav
+          className="mt-4 flex flex-wrap gap-x-1 gap-y-0 items-end"
+          aria-label="Settings sections"
+        >
+          {visibleTabs.map(t => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => selectTab(t.id)}
+              className={
+                'px-3 py-2 text-sm font-medium leading-none transition-colors border-b-2 -mb-px ' +
+                (activeTab === t.id
+                  ? 'border-teal-500 text-teal-600 dark:text-teal-400'
+                  : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:border-gray-300 dark:hover:border-gray-600')
+              }
+            >
+              {t.label}
+            </button>
+          ))}
+        </nav>
+      </header>
 
-      {/* ── main content ── */}
-      <div ref={contentRef} className="flex-1 overflow-y-auto p-8 max-w-3xl">
-        <h1 className="text-2xl font-bold mb-6">Settings</h1>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col lg:flex-row lg:items-stretch">
+        <aside
+          className="flex min-h-0 w-full shrink-0 flex-col border-b border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-900/60 lg:h-full lg:min-h-0 lg:w-44 lg:border-b-0 lg:border-r lg:bg-gray-100 lg:dark:bg-gray-900/50"
+          aria-label="On this page"
+        >
+          <div className="flex min-h-0 flex-1 flex-col px-4 py-3 lg:py-5 lg:pl-5 lg:pr-3">
+            <p className="mb-2 block shrink-0 text-[10px] font-semibold uppercase tracking-wider text-gray-700 dark:text-gray-300">
+              On this page
+            </p>
+            <nav className="flex min-h-0 flex-1 flex-row flex-wrap content-start gap-1 overflow-y-auto lg:flex-col lg:flex-nowrap">
+              {sectionNav.map(s => {
+                const domId = `settings-${s.id}`;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => scrollToSection(s.id)}
+                    className={
+                      'rounded-md px-2 py-1.5 text-left text-xs transition-colors lg:text-sm whitespace-nowrap lg:whitespace-normal ' +
+                      (activeSectionDomId === domId
+                        ? 'bg-primary/15 text-primary ring-1 ring-primary/30 dark:bg-primary/20 font-semibold'
+                        : 'text-gray-700 hover:bg-gray-200/80 hover:text-primary dark:text-gray-300 dark:hover:bg-gray-800/80')
+                    }
+                  >
+                    {s.label}
+                  </button>
+                );
+              })}
+            </nav>
+          </div>
+        </aside>
 
-        {/* ──────────────── General ──────────────── */}
-        <section id="general" className="mb-10">
-          <h2 className="text-lg font-semibold mb-3 border-b pb-2">General</h2>
-          <div className="flex items-center gap-4 flex-wrap">
-            <div className="flex items-center gap-2">
-              <Button size="sm" variant="outline" onClick={toggleDarkMode}>
-                {darkMode ? 'Light Mode' : 'Dark Mode'}
-              </Button>
-              <span className="text-sm text-gray-500">(UI preference only)</span>
-            </div>
+        <div
+          ref={tabContentRef}
+          className="min-h-0 min-w-0 flex-1 overflow-y-auto px-6 py-6 lg:px-8"
+        >
+
+        {activeTab === 'general' && (
+          <>
+        <section id="settings-scheduling" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">Scheduling</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">Controls how Recalculate All Campaigns distributes emails.</p>
+          <div className="space-y-3">
+            <label className="flex gap-2 items-start cursor-pointer">
+              <input type="radio" name="strategy" value="priority" checked={strategy === 'priority'} onChange={() => submitStrategy('priority')} />
+              <span>
+                <strong>Priority by campaign</strong><br />
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  Campaigns processed in ascending priority order.{' '}
+                  <a href="/campaigns" className="text-teal-500 underline">Reorder campaigns</a>
+                </span>
+              </span>
+            </label>
+            <label className="flex gap-2 items-start cursor-pointer">
+              <input type="radio" name="strategy" value="round_robin" checked={strategy === 'round_robin'} onChange={() => submitStrategy('round_robin')} />
+              <span>
+                <strong>Round-robin distribution</strong><br />
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  Inbox capacity divided evenly across active campaigns.
+                </span>
+              </span>
+            </label>
           </div>
         </section>
 
-        {/* ──────────────── Account & Security ──────────────── */}
-        <section id="account" className="mb-10">
-          <h2 className="text-lg font-semibold mb-3 border-b pb-2">Account &amp; Security</h2>
+        <section id="settings-appearance" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">Appearance</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">Theme follows your choice; System uses your device light/dark setting (default).</p>
+          <div className="space-y-3">
+            <label className="flex gap-2 items-start cursor-pointer">
+              <input
+                type="radio"
+                name="appearance"
+                value="system"
+                checked={themePreference === 'system'}
+                onChange={() => setThemePreference('system')}
+              />
+              <span>
+                <strong>System</strong>
+                <br />
+                <span className="text-xs text-gray-500 dark:text-gray-400">
+                  Match your OS or browser appearance automatically.
+                </span>
+              </span>
+            </label>
+            <label className="flex gap-2 items-start cursor-pointer">
+              <input
+                type="radio"
+                name="appearance"
+                value="light"
+                checked={themePreference === 'light'}
+                onChange={() => setThemePreference('light')}
+              />
+              <span>
+                <strong>Light</strong>
+                <br />
+                <span className="text-xs text-gray-500 dark:text-gray-400">Always use light theme.</span>
+              </span>
+            </label>
+            <label className="flex gap-2 items-start cursor-pointer">
+              <input
+                type="radio"
+                name="appearance"
+                value="dark"
+                checked={themePreference === 'dark'}
+                onChange={() => setThemePreference('dark')}
+              />
+              <span>
+                <strong>Dark</strong>
+                <br />
+                <span className="text-xs text-gray-500 dark:text-gray-400">Always use dark theme.</span>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section id="settings-account" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">Account &amp; Security</h2>
           {user && (
             <div className="space-y-4">
               <div className="text-sm">
-                <span className="text-gray-500">Logged in as </span>
+                <span className="text-gray-500 dark:text-gray-400">Logged in as </span>
                 <span className="font-medium">{user.username}</span>
                 <span className="ml-2 text-xs px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 uppercase">{user.role}</span>
               </div>
@@ -565,399 +710,115 @@ export default function Settings() {
           )}
         </section>
 
-        {/* ──────────────── API Keys ──────────────── */}
-        <section id="api-keys" className="mb-10">
-          <h2 className="text-lg font-semibold mb-1 border-b pb-2">API Keys</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Create keys to access the API programmatically. The full key is shown only once — copy it immediately.
+        <section id="settings-known-ips" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-2 border-b border-gray-200 dark:border-gray-700 pb-2">Known IPs</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            Opens and clicks from these IPs are ignored for self-open filtering.
           </p>
+          <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>
+            Manage Known IPs
+          </Button>
+        </section>
+          </>
+        )}
 
-          {/* One-time key display */}
-          {createdKey && (
-            <Card className="mb-4 border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20">
-              <h3 className="text-sm font-semibold mb-1 text-green-700 dark:text-green-400">New API Key Created</h3>
-              <p className="text-xs text-gray-500 mb-2">Copy this key now — you won't be able to see it again.</p>
-              <div className="flex items-center gap-2">
-                <code className="flex-1 text-xs bg-white dark:bg-gray-800 border rounded p-2 break-all select-all">{createdKey}</code>
-                <Button size="sm" variant="outline" onClick={() => { navigator.clipboard.writeText(createdKey); notify({ type: 'success', message: 'Copied!' }); }}>
-                  Copy
-                </Button>
-              </div>
-              <Button size="sm" variant="ghost" className="mt-2 text-xs" onClick={() => setCreatedKey(null)}>Dismiss</Button>
-            </Card>
-          )}
+        {activeTab === 'setup' && (
+          <>
+        {/* ──────────────── Gmail Sync ──────────────── */}
+        <section id="settings-gmail-sync" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Gmail Sync</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Configure how Quickly detects replies from Gmail inboxes. Optional — polling works
+            without these settings, but push notifications make reply detection instant.
+          </p>
+          <div className="space-y-4">
 
-          {/* Create key form */}
-          <Card className="mb-4">
-            <h3 className="text-sm font-semibold mb-3">Create API Key</h3>
-            <div className="flex gap-2 items-end">
-              <div className="flex-1">
-                <label className="text-xs text-gray-500">Name</label>
+            {/* Push Topic */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Google Pub/Sub Topic</label>
+              <input
+                type="text"
+                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                placeholder="projects/your-project/topics/gmail-replies"
+                value={gmailSync.push_topic}
+                onChange={e => setGmailSync(prev => ({ ...prev, push_topic: e.target.value }))}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Create a Pub/Sub topic in Google Cloud Console and enter its full resource name here.
+                Leave blank to use polling only.
+              </p>
+            </div>
+
+            {/* Webhook token */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Push Webhook Token</label>
+              <div className="flex gap-2">
                 <input
                   type="text"
-                  placeholder="e.g. CI/CD Pipeline"
-                  className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={newKeyName}
-                  onChange={e => setNewKeyName(e.target.value)}
+                  className="flex-1 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  placeholder="auto-generated on first startup"
+                  value={gmailSync.webhook_token}
+                  onChange={e => setGmailSync(prev => ({ ...prev, webhook_token: e.target.value }))}
                 />
-              </div>
-              <div className="w-32">
-                <label className="text-xs text-gray-500">Expires (days)</label>
-                <input
-                  type="number"
-                  placeholder="Never"
-                  min="1"
-                  className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={newKeyExpiry}
-                  onChange={e => setNewKeyExpiry(e.target.value)}
-                />
-              </div>
-              <Button size="sm" onClick={createApiKey} disabled={!newKeyName.trim()}>Create</Button>
-            </div>
-          </Card>
-
-          {/* Existing keys */}
-          {apiKeys.length === 0 && (
-            <p className="text-sm text-gray-400 italic">No API keys yet.</p>
-          )}
-          {apiKeys.length > 0 && (
-            <div className="space-y-2">
-              {apiKeys.map(k => (
-                <Card key={k.id} className="flex items-center justify-between">
-                  <div>
-                    <span className="text-sm font-medium">{k.name}</span>
-                    <span className="ml-2 text-xs text-gray-400">{k.prefix}•••</span>
-                    <span className="ml-2 text-xs text-gray-400">
-                      Created {new Date(k.created_at).toLocaleDateString()}
-                      {k.expires_at && <> · Expires {new Date(k.expires_at).toLocaleDateString()}</>}
-                    </span>
-                  </div>
-                  <Button size="sm" variant="danger" onClick={() => revokeApiKey(k.id)}>Revoke</Button>
-                </Card>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* ──────────────── MCP (AI agents) ──────────────── */}
-        <section id="mcp" className="mb-10">
-          <h2 className="text-lg font-semibold mb-1 border-b pb-2">MCP (AI agents)</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Quickly exposes a remote MCP endpoint over HTTPS. Create an API key above, then point Cursor at it with
-            <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">npx mcp-remote</code>
-            (Node 18+). No Python install on your machine.
-          </p>
-          <Card className="mb-4 space-y-3">
-            <h3 className="text-sm font-semibold">1. Endpoint</h3>
-            <p className="text-xs text-gray-500">
-              Streamable HTTP MCP URL (same auth as the REST API):
-            </p>
-            {mcpSetup?.mcp_http_url ? (
-              <code className="block text-xs bg-gray-50 dark:bg-gray-800 border rounded-lg p-2 break-all font-mono">{mcpSetup.mcp_http_url}</code>
-            ) : (
-              <p className="text-xs text-amber-600">Could not load — use <code className="font-mono">{typeof window !== 'undefined' ? `${window.location.origin}/api/mcp` : '/api/mcp'}</code></p>
-            )}
-            <p className="text-xs text-gray-500">
-              For plain HTTP (local dev only), add
-              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">--allow-http</code>
-              to the <code className="text-[10px] font-mono">mcp-remote</code> args after the URL.
-            </p>
-            <h3 className="text-sm font-semibold pt-2">2. Tools exposed to the agent</h3>
-            <ul className="text-sm text-gray-600 dark:text-gray-400 list-disc pl-5 space-y-1">
-              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">list_leads</code> — search / filter (q, status, bad_only)</li>
-              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">get_lead</code> — one lead by id</li>
-              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">update_lead</code> — patch name, status, custom_data</li>
-              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">delete_lead</code> — remove a lead</li>
-              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">add_campaign_leads</code> — bulk add to a campaign</li>
-            </ul>
-            <h3 className="text-sm font-semibold pt-2">3. Cursor MCP config</h3>
-            <p className="text-xs text-gray-500">
-              Merge the JSON into your MCP settings. Replace
-              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">QUICKLY_MCP_API_KEY</code>
-              with a key from API Keys above. To use a JWT instead, use
-              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">--header</code>
-              <code className="text-[10px] font-mono">{'Authorization:${QUICKLY_MCP_AUTH}'}</code>
-              {' '}and set the env value to <code className="text-[10px] font-mono">Bearer …</code>
-              (same as REST). App base URL:
-              {mcpSetup?.api_base_url ? (
-                <span className="ml-1 font-mono text-[11px]">{mcpSetup.api_base_url}</span>
-              ) : (
-                <span className="ml-1 text-amber-600">(load failed)</span>
-              )}
-            </p>
-            {mcpSetup?.cursor_mcp_fragment && (
-              <div className="space-y-2">
-                <pre className="text-xs bg-gray-50 dark:bg-gray-800 border rounded-lg p-3 overflow-x-auto font-mono max-h-64">
-                  {JSON.stringify(mcpSetup.cursor_mcp_fragment, null, 2)}
-                </pre>
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => {
-                    navigator.clipboard.writeText(JSON.stringify(mcpSetup.cursor_mcp_fragment, null, 2));
-                    notify({ type: 'success', message: 'MCP fragment copied — merge into your mcp.json' });
+                    navigator.clipboard.writeText(
+                      window.location.origin + '/api/unibox/gmail/push?token=' + gmailSync.webhook_token
+                    );
+                    notify({ type: 'success', message: 'Push URL copied!' });
                   }}
                 >
-                  Copy MCP fragment
+                  Copy URL
                 </Button>
               </div>
-            )}
-          </Card>
-        </section>
+              <p className="text-xs text-gray-400 mt-1">
+                Append this token to your Pub/Sub push endpoint:
+                {' '}<code className="bg-gray-100 dark:bg-gray-800 rounded px-1">/api/unibox/gmail/push?token=…</code>
+              </p>
+            </div>
 
-        {/* ──────────────── Webhooks ──────────────── */}
-        <section id="webhooks" className="mb-10">
-          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Webhooks</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Register one or more outbound webhook endpoints. Each webhook can subscribe to specific event types.
-            When an event occurs every matching active webhook receives a POST request.
-          </p>
-
-          {/* New webhook form */}
-          <Card className="mb-4">
-            <h3 className="text-sm font-semibold mb-3">Add Webhook</h3>
-            <div className="space-y-3">
+            {/* Sync interval */}
+            <div>
+              <label className="block text-sm font-medium mb-1">Polling Interval (minutes)</label>
               <input
-                type="text"
-                placeholder="https://your-endpoint.example.com/hook"
-                className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                value={newWh.url}
-                onChange={e => setNewWh(p => ({ ...p, url: e.target.value }))}
+                type="number"
+                min="1"
+                max="60"
+                className="w-28 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                value={gmailSync.sync_interval_minutes}
+                onChange={e => setGmailSync(prev => ({ ...prev, sync_interval_minutes: Math.max(1, parseInt(e.target.value) || 1) }))}
               />
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Bearer secret (optional)"
-                  className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={newWh.secret}
-                  onChange={e => setNewWh(p => ({ ...p, secret: e.target.value }))}
-                />
-                <input
-                  type="text"
-                  placeholder="Description (optional)"
-                  className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  value={newWh.description}
-                  onChange={e => setNewWh(p => ({ ...p, description: e.target.value }))}
-                />
-              </div>
-              <EventSelector
-                events={newWh.events}
-                onChange={evts => setNewWh(p => ({ ...p, events: evts }))}
-              />
-              <Button size="sm" onClick={createWebhook}>Add Webhook</Button>
+              <p className="text-xs text-gray-400 mt-1">How often to poll Gmail for new replies (fallback when push is not configured).</p>
             </div>
-          </Card>
 
-          {/* Existing webhooks */}
-          {webhooks.length === 0 && (
-            <p className="text-sm text-gray-400 italic">No webhooks configured yet.</p>
-          )}
-          {webhooks.map(wh => (
-            <Card key={wh.id} className="mb-3">
-              {editingId === wh.id ? (
-                /* editing mode */
-                <div className="space-y-3">
-                  <input
-                    type="text"
-                    className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                    value={editForm.url}
-                    onChange={e => setEditForm(p => ({ ...p, url: e.target.value }))}
-                  />
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      placeholder="Bearer secret"
-                      className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                      value={editForm.secret}
-                      onChange={e => setEditForm(p => ({ ...p, secret: e.target.value }))}
-                    />
-                    <input
-                      type="text"
-                      placeholder="Description"
-                      className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                      value={editForm.description}
-                      onChange={e => setEditForm(p => ({ ...p, description: e.target.value }))}
-                    />
-                  </div>
-                  <EventSelector
-                    events={editForm.events || []}
-                    onChange={evts => setEditForm(p => ({ ...p, events: evts }))}
-                  />
-                  <div className="flex gap-2">
-                    <Button size="sm" onClick={() => saveEdit(wh.id)}>Save</Button>
-                    <Button size="sm" variant="outline" onClick={cancelEdit}>Cancel</Button>
-                  </div>
-                </div>
-              ) : (
-                /* display mode */
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-block w-2 h-2 rounded-full ${wh.active ? 'bg-green-500' : 'bg-gray-300'}`}
-                        title={wh.active ? 'Active' : 'Inactive'}
-                      />
-                      <span className="text-sm font-medium truncate max-w-xs" title={wh.url}>{wh.url}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <Button size="sm" variant="ghost" onClick={() => toggleActive(wh.id, wh.active)}>
-                        Enable
-                      </Button>
-                      <Button size="sm" variant="ghost" onClick={() => startEdit(wh)}>Edit</Button>
-                      <Button size="sm" variant="ghost" onClick={() => testWebhook(wh.id)}>Test</Button>
-                      <Button size="sm" variant="ghost" onClick={() => { setTestEventWh(testEventWh === wh.id ? null : wh.id); setTestEventType(''); setTestEventResult(null); }}>
-                        Simulate Event
-                      </Button>
-                      <Button size="sm" variant="ghost" className="text-red-500" onClick={() => deleteWebhook(wh.id)}>Delete</Button>
-                    </div>
-                  </div>
-                  {wh.description && <p className="text-xs text-gray-500 mb-1">{wh.description}</p>}
-                  <div className="flex flex-wrap gap-1">
-                    {isAllEvents(wh.events || []) ? (
-                      <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 rounded-full px-2 py-0.5 font-medium">All Events</span>
-                    ) : (
-                      (wh.events || []).map(evt => (
-                        <span key={evt} className="text-[10px] bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border rounded px-1.5 py-0.5">{EVENT_LABELS[evt] || evt}</span>
-                      ))
-                    )}
-                  </div>
-                  {/* Simulate event panel */}
-                  {testEventWh === wh.id && (
-                    <div className="mt-3 p-3 bg-gray-50 dark:bg-gray-800 border rounded-lg space-y-2">
-                      <p className="text-xs font-semibold text-gray-600">Simulate a specific event to see the exact payload:</p>
-                      <div className="flex items-center gap-2">
-                        <select
-                          className="border rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-300 flex-1"
-                          value={testEventType}
-                          onChange={e => { setTestEventType(e.target.value); setTestEventResult(null); }}
-                        >
-                          <option value="">— Select event type —</option>
-                          {eventTypes.map(evt => (
-                            <option key={evt} value={evt}>{EVENT_LABELS[evt] || evt}</option>
-                          ))}
-                        </select>
-                        <Button size="sm" onClick={() => testWebhookEvent(wh.id, testEventType)}>
-                          Send
-                        </Button>
-                      </div>
-                      {testEventResult && (
-                        <div className="mt-2">
-                          <p className="text-xs font-medium text-gray-500 mb-1">Payload sent:</p>
-                          <pre className="text-xs bg-white dark:bg-gray-900 border rounded p-2 overflow-auto max-h-48 font-mono">
-                            {JSON.stringify(testEventResult, null, 2)}
-                          </pre>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
-            </Card>
-          ))}
-        </section>
-
-        {/* ──────────────── Notifications ──────────────── */}
-        <section id="notifications" className="mb-10">
-          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Email Notifications</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Receive email notifications for campaign events instead of (or in addition to) webhooks.
-            Notifications are sent from your own OAuth login account.
-          </p>
-          <Card>
-            {/* ── Collapsed header ── */}
-            <div
-              className="flex items-center justify-between cursor-pointer select-none"
-              onClick={() => setNotifOpen(v => !v)}
-            >
-              <div className="flex items-center gap-3 min-w-0">
-                <span className={`text-gray-400 transition-transform text-xs ${notifOpen ? 'rotate-90' : ''}`}>▶</span>
-                <h3 className="text-sm font-semibold text-gray-800 dark:text-gray-100 truncate">Notification settings</h3>
-                {notifConfig.enabled
-                  ? <span className="text-[10px] bg-green-100 text-green-700 border border-green-200 rounded-full px-2 py-0.5 font-medium shrink-0">Enabled</span>
-                  : <span className="text-[10px] bg-gray-100 text-gray-500 border rounded-full px-2 py-0.5 font-medium shrink-0">Disabled</span>
+            <Button
+              size="sm"
+              disabled={gmailSyncSaving}
+              onClick={async () => {
+                setGmailSyncSaving(true);
+                try {
+                  await api.post('/settings/gmail-sync', gmailSync);
+                  savedGmailSyncRef.current = { ...gmailSync };
+                  notify({ type: 'success', message: 'Gmail sync settings saved' });
+                } catch (e) {
+                  notify({ type: 'error', message: e.message });
+                } finally {
+                  setGmailSyncSaving(false);
                 }
-              </div>
-              <label
-                className="flex items-center gap-1.5 cursor-pointer shrink-0 ml-4"
-                onClick={e => e.stopPropagation()}
-              >
-                <input
-                  type="checkbox"
-                  checked={notifConfig.enabled}
-                  className="rounded"
-                  onChange={async e => {
-                    const next = { ...notifConfig, enabled: e.target.checked };
-                    setNotifConfig(next);
-                    try {
-                      await api.put('/notifications/config', next);
-                      notify({ type: 'success', message: `Notifications ${next.enabled ? 'enabled' : 'disabled'}` });
-                    } catch (err) { notify({ type: 'error', message: err.message }); }
-                  }}
-                />
-                <span className="text-xs font-medium text-gray-600 whitespace-nowrap">Enable</span>
-              </label>
-            </div>
-
-            {/* ── Expanded body ── */}
-            <div className={`grid transition-[grid-template-rows] duration-200 ease-in-out ${notifOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-              <div className={`min-h-0 ${notifOpen ? 'overflow-visible' : 'overflow-hidden'}`}>
-                <div className="mt-4 space-y-4 border-t pt-4">
-                  {/* Notification email */}
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Notification email address</label>
-                    <input
-                      type="email"
-                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="you@example.com"
-                      value={notifConfig.notification_email}
-                      onChange={e => { setNotifConfig(prev => ({ ...prev, notification_email: e.target.value })); }}
-                    />
-                    <p className="text-[11px] text-gray-400 mt-1">Where notification emails will be sent to.</p>
-                  </div>
-
-                  {/* Rate limit */}
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Rate limit (emails per hour)</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={100}
-                      className="w-24 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      value={notifConfig.rate_limit_per_hour}
-                      onChange={e => { setNotifConfig(prev => ({ ...prev, rate_limit_per_hour: Math.max(1, Math.min(100, parseInt(e.target.value) || 1)) })); }}
-                    />
-                  </div>
-
-                  {/* Event selector — reuse same pattern */}
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Events</label>
-                    <EventSelector
-                      events={notifConfig.events}
-                      onChange={evts => { setNotifConfig(prev => ({ ...prev, events: evts })); }}
-                    />
-                  </div>
-
-                  {/* Save */}
-                  <div className="pt-2 space-y-2">
-                    {savedNotifRef.current != null && (
-                      notifConfig.notification_email !== savedNotifRef.current.notification_email ||
-                      notifConfig.rate_limit_per_hour !== savedNotifRef.current.rate_limit_per_hour ||
-                      [...notifConfig.events].sort().join(',') !== [...(savedNotifRef.current.events || [])].sort().join(',')
-                    ) && (
-                      <p className="text-xs text-amber-600 font-medium">⚠ Unsaved changes — click Save to apply</p>
-                    )}
-                    <Button onClick={saveNotifConfig} disabled={notifSaving} size="sm">
-                      {notifSaving ? 'Saving…' : 'Save Notification Settings'}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </Card>
+              }}
+            >
+              {gmailSyncSaving ? 'Saving…' : 'Save'}
+            </Button>
+          </div>
         </section>
+          </>
+        )}
 
-        {/* ──────────────── AI Features ──────────────── */}
-        <section id="ai" className="mb-10">
+        {activeTab === 'features' && (
+          <>
+        <section id="settings-ai" className="mb-10 scroll-mt-6">
           <h2 className="text-lg font-semibold mb-1 border-b pb-2">AI Features</h2>
           <p className="text-xs text-gray-500 mb-4">
             Each AI feature can use a different provider and model. Configure the provider and
@@ -1189,141 +1050,415 @@ export default function Settings() {
 
         </section>
 
-        {/* ──────────────── Optional Features ──────────────── */}
-        <section id="optional-features" className="mb-10">
-          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Optional Features</h2>
-          <p className="text-xs text-gray-500 mb-4">
-            Additional integrations that enhance lead processing.
+        <section id="settings-other" className="mb-10 scroll-mt-6">
+          <h2 className="mb-1 border-b border-gray-200 pb-2 text-lg font-semibold dark:border-gray-700">Other</h2>
+          <p className="mb-6 text-xs text-gray-500 dark:text-gray-400">
+            Email notifications and lead verification — optional additions to your workflow.
           </p>
 
-          {/* ── Email Verification ── */}
-          <EmailVerificationSettings />
+          <div className="mb-8">
+            <h3 className="mb-2 text-base font-semibold text-gray-800 dark:text-gray-100">Email notifications</h3>
+            <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+              Receive email notifications for campaign events instead of (or in addition to) webhooks.
+              Notifications are sent from your own OAuth login account.
+            </p>
+            <Card>
+              <div
+                className="flex cursor-pointer select-none items-center justify-between"
+                onClick={() => setNotifOpen(v => !v)}
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className={`text-xs text-gray-400 transition-transform ${notifOpen ? 'rotate-90' : ''}`}>▶</span>
+                  <h4 className="truncate text-sm font-semibold text-gray-800 dark:text-gray-100">Notification settings</h4>
+                  {notifConfig.enabled
+                    ? <span className="shrink-0 rounded-full border border-green-200 bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">Enabled</span>
+                    : <span className="shrink-0 rounded-full border bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">Disabled</span>
+                  }
+                </div>
+                <label
+                  className="ml-4 flex shrink-0 cursor-pointer items-center gap-1.5"
+                  onClick={e => e.stopPropagation()}
+                >
+                  <input
+                    type="checkbox"
+                    checked={notifConfig.enabled}
+                    className="rounded"
+                    onChange={async e => {
+                      const next = { ...notifConfig, enabled: e.target.checked };
+                      setNotifConfig(next);
+                      try {
+                        await api.put('/notifications/config', next);
+                        notify({ type: 'success', message: `Notifications ${next.enabled ? 'enabled' : 'disabled'}` });
+                      } catch (err) { notify({ type: 'error', message: err.message }); }
+                    }}
+                  />
+                  <span className="whitespace-nowrap text-xs font-medium text-gray-600">Enable</span>
+                </label>
+              </div>
 
+              <div className={`grid transition-[grid-template-rows] duration-200 ease-in-out ${notifOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
+                <div className={`min-h-0 ${notifOpen ? 'overflow-visible' : 'overflow-hidden'}`}>
+                  <div className="mt-4 space-y-4 border-t pt-4">
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-gray-600">Notification email address</label>
+                      <input
+                        type="email"
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="you@example.com"
+                        value={notifConfig.notification_email}
+                        onChange={e => { setNotifConfig(prev => ({ ...prev, notification_email: e.target.value })); }}
+                      />
+                      <p className="mt-1 text-[11px] text-gray-400">Where notification emails will be sent to.</p>
+                    </div>
 
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-gray-600">Rate limit (emails per hour)</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        value={notifConfig.rate_limit_per_hour}
+                        onChange={e => { setNotifConfig(prev => ({ ...prev, rate_limit_per_hour: Math.max(1, Math.min(100, parseInt(e.target.value) || 1)) })); }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="mb-1 block text-xs font-medium text-gray-600">Events</label>
+                      <EventSelector
+                        events={notifConfig.events}
+                        onChange={evts => { setNotifConfig(prev => ({ ...prev, events: evts })); }}
+                      />
+                    </div>
+
+                    <div className="space-y-2 pt-2">
+                      {savedNotifRef.current != null && (
+                        notifConfig.notification_email !== savedNotifRef.current.notification_email ||
+                        notifConfig.rate_limit_per_hour !== savedNotifRef.current.rate_limit_per_hour ||
+                        [...notifConfig.events].sort().join(',') !== [...(savedNotifRef.current.events || [])].sort().join(',')
+                      ) && (
+                        <p className="text-xs font-medium text-amber-600">⚠ Unsaved changes — click Save to apply</p>
+                      )}
+                      <Button onClick={saveNotifConfig} disabled={notifSaving} size="sm">
+                        {notifSaving ? 'Saving…' : 'Save notification settings'}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          </div>
+
+          <div>
+            <h3 className="mb-2 text-base font-semibold text-gray-800 dark:text-gray-100">Email verification</h3>
+            <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+              Verify new leads automatically when they are added to a campaign.
+            </p>
+            <EmailVerificationSettings />
+          </div>
+        </section>
+          </>
+        )}
+
+        {activeTab === 'integrating' && (
+          <>
+        {/* ──────────────── API Keys ──────────────── */}
+        <section id="settings-api-keys" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">API Keys</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Create keys to access the API programmatically. The full key is shown only once — copy it immediately.
+          </p>
+
+          {/* One-time key display */}
+          {createdKey && (
+            <Card className="mb-4 border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20">
+              <h3 className="text-sm font-semibold mb-1 text-green-700 dark:text-green-400">New API Key Created</h3>
+              <p className="text-xs text-gray-500 mb-2">Copy this key now — you won't be able to see it again.</p>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs bg-white dark:bg-gray-800 border rounded p-2 break-all select-all">{createdKey}</code>
+                <Button size="sm" variant="outline" onClick={() => { navigator.clipboard.writeText(createdKey); notify({ type: 'success', message: 'Copied!' }); }}>
+                  Copy
+                </Button>
+              </div>
+              <Button size="sm" variant="ghost" className="mt-2 text-xs" onClick={() => setCreatedKey(null)}>Dismiss</Button>
+            </Card>
+          )}
+
+          {/* Create key form */}
+          <Card className="mb-4">
+            <h3 className="text-sm font-semibold mb-3">Create API Key</h3>
+            <div className="flex gap-2 items-end">
+              <div className="flex-1">
+                <label className="text-xs text-gray-500">Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. CI/CD Pipeline"
+                  className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={newKeyName}
+                  onChange={e => setNewKeyName(e.target.value)}
+                />
+              </div>
+              <div className="w-32">
+                <label className="text-xs text-gray-500">Expires (days)</label>
+                <input
+                  type="number"
+                  placeholder="Never"
+                  min="1"
+                  className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={newKeyExpiry}
+                  onChange={e => setNewKeyExpiry(e.target.value)}
+                />
+              </div>
+              <Button size="sm" onClick={createApiKey} disabled={!newKeyName.trim()}>Create</Button>
+            </div>
+          </Card>
+
+          {/* Existing keys */}
+          {apiKeys.length === 0 && (
+            <p className="text-sm text-gray-400 italic">No API keys yet.</p>
+          )}
+          {apiKeys.length > 0 && (
+            <div className="space-y-2">
+              {apiKeys.map(k => (
+                <Card key={k.id} className="flex items-center justify-between">
+                  <div>
+                    <span className="text-sm font-medium">{k.name}</span>
+                    <span className="ml-2 text-xs text-gray-400">{k.prefix}•••</span>
+                    <span className="ml-2 text-xs text-gray-400">
+                      Created {new Date(k.created_at).toLocaleDateString()}
+                      {k.expires_at && <> · Expires {new Date(k.expires_at).toLocaleDateString()}</>}
+                    </span>
+                  </div>
+                  <Button size="sm" variant="danger" onClick={() => revokeApiKey(k.id)}>Revoke</Button>
+                </Card>
+              ))}
+            </div>
+          )}
         </section>
 
-        {/* ──────────────── Gmail Sync ──────────────── */}
-        <section id="gmail-sync" className="mb-10">
-          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Gmail Sync</h2>
+        {/* ──────────────── Webhooks ──────────────── */}
+        <section id="settings-webhooks" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Webhooks</h2>
           <p className="text-xs text-gray-500 mb-4">
-            Configure how Quickly detects replies from Gmail inboxes. Optional — polling works
-            without these settings, but push notifications make reply detection instant.
+            Register one or more outbound webhook endpoints. Each webhook can subscribe to specific event types.
+            When an event occurs every matching active webhook receives a POST request.
           </p>
-          <div className="space-y-4">
 
-            {/* Push Topic */}
-            <div>
-              <label className="block text-sm font-medium mb-1">Google Pub/Sub Topic</label>
+          {/* New webhook form */}
+          <Card className="mb-4">
+            <h3 className="text-sm font-semibold mb-3">Add Webhook</h3>
+            <div className="space-y-3">
               <input
                 type="text"
-                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                placeholder="projects/your-project/topics/gmail-replies"
-                value={gmailSync.push_topic}
-                onChange={e => setGmailSync(prev => ({ ...prev, push_topic: e.target.value }))}
+                placeholder="https://your-endpoint.example.com/hook"
+                className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                value={newWh.url}
+                onChange={e => setNewWh(p => ({ ...p, url: e.target.value }))}
               />
-              <p className="text-xs text-gray-400 mt-1">
-                Create a Pub/Sub topic in Google Cloud Console and enter its full resource name here.
-                Leave blank to use polling only.
-              </p>
-            </div>
-
-            {/* Webhook token */}
-            <div>
-              <label className="block text-sm font-medium mb-1">Push Webhook Token</label>
               <div className="flex gap-2">
                 <input
                   type="text"
-                  className="flex-1 border rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-teal-300"
-                  placeholder="auto-generated on first startup"
-                  value={gmailSync.webhook_token}
-                  onChange={e => setGmailSync(prev => ({ ...prev, webhook_token: e.target.value }))}
+                  placeholder="Bearer secret (optional)"
+                  className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={newWh.secret}
+                  onChange={e => setNewWh(p => ({ ...p, secret: e.target.value }))}
                 />
+                <input
+                  type="text"
+                  placeholder="Description (optional)"
+                  className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={newWh.description}
+                  onChange={e => setNewWh(p => ({ ...p, description: e.target.value }))}
+                />
+              </div>
+              <EventSelector
+                events={newWh.events}
+                onChange={evts => setNewWh(p => ({ ...p, events: evts }))}
+              />
+              <Button size="sm" onClick={createWebhook}>Add Webhook</Button>
+            </div>
+          </Card>
+
+          {/* Existing webhooks */}
+          {webhooks.length === 0 && (
+            <p className="text-sm text-gray-400 italic">No webhooks configured yet.</p>
+          )}
+          {webhooks.map(wh => (
+            <Card key={wh.id} className="mb-3">
+              {editingId === wh.id ? (
+                /* editing mode */
+                <div className="space-y-3">
+                  <input
+                    type="text"
+                    className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                    value={editForm.url}
+                    onChange={e => setEditForm(p => ({ ...p, url: e.target.value }))}
+                  />
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Bearer secret"
+                      className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                      value={editForm.secret}
+                      onChange={e => setEditForm(p => ({ ...p, secret: e.target.value }))}
+                    />
+                    <input
+                      type="text"
+                      placeholder="Description"
+                      className="flex-1 border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                      value={editForm.description}
+                      onChange={e => setEditForm(p => ({ ...p, description: e.target.value }))}
+                    />
+                  </div>
+                  <EventSelector
+                    events={editForm.events || []}
+                    onChange={evts => setEditForm(p => ({ ...p, events: evts }))}
+                  />
+                  <div className="flex gap-2">
+                    <Button size="sm" onClick={() => saveEdit(wh.id)}>Save</Button>
+                    <Button size="sm" variant="outline" onClick={cancelEdit}>Cancel</Button>
+                  </div>
+                </div>
+              ) : (
+                /* display mode */
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-block w-2 h-2 rounded-full ${wh.active ? 'bg-green-500' : 'bg-gray-300'}`}
+                        title={wh.active ? 'Active' : 'Inactive'}
+                      />
+                      <span className="text-sm font-medium truncate max-w-xs" title={wh.url}>{wh.url}</span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      <Button size="sm" variant="ghost" onClick={() => toggleActive(wh.id, wh.active)}>
+                        Enable
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => startEdit(wh)}>Edit</Button>
+                      <Button size="sm" variant="ghost" onClick={() => testWebhook(wh.id)}>Test</Button>
+                      <Button size="sm" variant="ghost" onClick={() => { setTestEventWh(testEventWh === wh.id ? null : wh.id); setTestEventType(''); setTestEventResult(null); }}>
+                        Simulate Event
+                      </Button>
+                      <Button size="sm" variant="ghost" className="text-red-500" onClick={() => deleteWebhook(wh.id)}>Delete</Button>
+                    </div>
+                  </div>
+                  {wh.description && <p className="text-xs text-gray-500 mb-1">{wh.description}</p>}
+                  <div className="flex flex-wrap gap-1">
+                    {isAllEvents(wh.events || []) ? (
+                      <span className="text-xs bg-teal-50 text-teal-700 border border-teal-200 rounded-full px-2 py-0.5 font-medium">All Events</span>
+                    ) : (
+                      (wh.events || []).map(evt => (
+                        <span key={evt} className="text-[10px] bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300 border rounded px-1.5 py-0.5">{EVENT_LABELS[evt] || evt}</span>
+                      ))
+                    )}
+                  </div>
+                  {/* Simulate event panel */}
+                  {testEventWh === wh.id && (
+                    <div className="mt-3 p-3 bg-gray-50 dark:bg-gray-800 border rounded-lg space-y-2">
+                      <p className="text-xs font-semibold text-gray-600">Simulate a specific event to see the exact payload:</p>
+                      <div className="flex items-center gap-2">
+                        <select
+                          className="border rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-teal-300 flex-1"
+                          value={testEventType}
+                          onChange={e => { setTestEventType(e.target.value); setTestEventResult(null); }}
+                        >
+                          <option value="">— Select event type —</option>
+                          {eventTypes.map(evt => (
+                            <option key={evt} value={evt}>{EVENT_LABELS[evt] || evt}</option>
+                          ))}
+                        </select>
+                        <Button size="sm" onClick={() => testWebhookEvent(wh.id, testEventType)}>
+                          Send
+                        </Button>
+                      </div>
+                      {testEventResult && (
+                        <div className="mt-2">
+                          <p className="text-xs font-medium text-gray-500 mb-1">Payload sent:</p>
+                          <pre className="text-xs bg-white dark:bg-gray-900 border rounded p-2 overflow-auto max-h-48 font-mono">
+                            {JSON.stringify(testEventResult, null, 2)}
+                          </pre>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </Card>
+          ))}
+        </section>
+
+        {/* ──────────────── MCP (AI agents) ──────────────── */}
+        <section id="settings-mcp" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">MCP (AI agents)</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Quickly exposes a remote MCP endpoint over HTTPS. Create an API key under API keys, then point Cursor at it with
+            <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">npx mcp-remote</code>
+            (Node 18+). No Python install on your machine.
+          </p>
+          <Card className="mb-4 space-y-3">
+            <h3 className="text-sm font-semibold">1. Endpoint</h3>
+            <p className="text-xs text-gray-500">
+              Streamable HTTP MCP URL (same auth as the REST API):
+            </p>
+            {mcpSetup?.mcp_http_url ? (
+              <code className="block text-xs bg-gray-50 dark:bg-gray-800 border rounded-lg p-2 break-all font-mono">{mcpSetup.mcp_http_url}</code>
+            ) : (
+              <p className="text-xs text-amber-600">Could not load — use <code className="font-mono">{typeof window !== 'undefined' ? `${window.location.origin}/api/mcp` : '/api/mcp'}</code></p>
+            )}
+            <p className="text-xs text-gray-500">
+              For plain HTTP (local dev only), add
+              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">--allow-http</code>
+              to the <code className="text-[10px] font-mono">mcp-remote</code> args after the URL.
+            </p>
+            <h3 className="text-sm font-semibold pt-2">2. Tools exposed to the agent</h3>
+            <ul className="text-sm text-gray-600 dark:text-gray-400 list-disc pl-5 space-y-1">
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">list_leads</code> — search / filter (q, status, bad_only)</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">get_lead</code> — one lead by id</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">update_lead</code> — patch name, status, custom_data</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">delete_lead</code> — remove a lead</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">add_campaign_leads</code> — bulk add to a campaign</li>
+            </ul>
+            <h3 className="text-sm font-semibold pt-2">3. Cursor MCP config</h3>
+            <p className="text-xs text-gray-500">
+              Merge the JSON into your MCP settings. Replace
+              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">QUICKLY_MCP_API_KEY</code>
+              with a key from the API keys section. To use a JWT instead, use
+              <code className="mx-1 text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">--header</code>
+              <code className="text-[10px] font-mono">{'Authorization:${QUICKLY_MCP_AUTH}'}</code>
+              {' '}and set the env value to <code className="text-[10px] font-mono">Bearer …</code>
+              (same as REST). App base URL:
+              {mcpSetup?.api_base_url ? (
+                <span className="ml-1 font-mono text-[11px]">{mcpSetup.api_base_url}</span>
+              ) : (
+                <span className="ml-1 text-amber-600">(load failed)</span>
+              )}
+            </p>
+            {mcpSetup?.cursor_mcp_fragment && (
+              <div className="space-y-2">
+                <pre className="text-xs bg-gray-50 dark:bg-gray-800 border rounded-lg p-3 overflow-x-auto font-mono max-h-64">
+                  {JSON.stringify(mcpSetup.cursor_mcp_fragment, null, 2)}
+                </pre>
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => {
-                    navigator.clipboard.writeText(
-                      window.location.origin + '/api/unibox/gmail/push?token=' + gmailSync.webhook_token
-                    );
-                    notify({ type: 'success', message: 'Push URL copied!' });
+                    navigator.clipboard.writeText(JSON.stringify(mcpSetup.cursor_mcp_fragment, null, 2));
+                    notify({ type: 'success', message: 'MCP fragment copied — merge into your mcp.json' });
                   }}
                 >
-                  Copy URL
+                  Copy MCP fragment
                 </Button>
               </div>
-              <p className="text-xs text-gray-400 mt-1">
-                Append this token to your Pub/Sub push endpoint:
-                {' '}<code className="bg-gray-100 dark:bg-gray-800 rounded px-1">/api/unibox/gmail/push?token=…</code>
-              </p>
-            </div>
-
-            {/* Sync interval */}
-            <div>
-              <label className="block text-sm font-medium mb-1">Polling Interval (minutes)</label>
-              <input
-                type="number"
-                min="1"
-                max="60"
-                className="w-28 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
-                value={gmailSync.sync_interval_minutes}
-                onChange={e => setGmailSync(prev => ({ ...prev, sync_interval_minutes: Math.max(1, parseInt(e.target.value) || 1) }))}
-              />
-              <p className="text-xs text-gray-400 mt-1">How often to poll Gmail for new replies (fallback when push is not configured).</p>
-            </div>
-
-            <Button
-              size="sm"
-              disabled={gmailSyncSaving}
-              onClick={async () => {
-                setGmailSyncSaving(true);
-                try {
-                  await api.post('/settings/gmail-sync', gmailSync);
-                  savedGmailSyncRef.current = { ...gmailSync };
-                  notify({ type: 'success', message: 'Gmail sync settings saved' });
-                } catch (e) {
-                  notify({ type: 'error', message: e.message });
-                } finally {
-                  setGmailSyncSaving(false);
-                }
-              }}
-            >
-              {gmailSyncSaving ? 'Saving…' : 'Save'}
-            </Button>
-          </div>
+            )}
+          </Card>
         </section>
+          </>
+        )}
 
-        {/* ──────────────── Scheduling ──────────────── */}
-        <section id="scheduling" className="mb-10">
-          <h2 className="text-lg font-semibold mb-3 border-b pb-2">Scheduling Strategy</h2>
-          <p className="text-xs text-gray-500 mb-3">Controls how Recalculate All Campaigns distributes emails.</p>
-          <div className="space-y-3">
-            <label className="flex gap-2 items-start cursor-pointer">
-              <input type="radio" name="strategy" value="priority" checked={strategy === 'priority'} onChange={() => submitStrategy('priority')} />
-              <span>
-                <strong>Priority by campaign</strong><br />
-                <span className="text-xs text-gray-500">
-                  Campaigns processed in ascending priority order.{' '}
-                  <a href="/campaigns" className="text-teal-500 underline">Reorder campaigns</a>
-                </span>
-              </span>
-            </label>
-            <label className="flex gap-2 items-start cursor-pointer">
-              <input type="radio" name="strategy" value="round_robin" checked={strategy === 'round_robin'} onChange={() => submitStrategy('round_robin')} />
-              <span>
-                <strong>Round-robin distribution</strong><br />
-                <span className="text-xs text-gray-500">
-                  Inbox capacity divided evenly across active campaigns.
-                </span>
-              </span>
-            </label>
-          </div>
-        </section>
-
-        {/* ──────────────── Test Mode ──────────────── */}
-        {!isProduction && (
-          <section id="test-mode" className="mb-10">
-            <h2 className="text-lg font-semibold mb-3 border-b pb-2">Test Mode</h2>
-            <p className="text-xs text-gray-500 mb-2">
+        {activeTab === 'dev' && !isProduction && (
+          <section id="settings-test-mode" className="mb-10 scroll-mt-6">
+            <h2 className="text-lg font-semibold mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">Test mode</h2>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
               When enabled emails are simulated — no real messages are sent.
             </p>
             <label className="flex items-center gap-2">
@@ -1332,30 +1467,7 @@ export default function Settings() {
             </label>
           </section>
         )}
-
-        {/* ──────────────── Utilities ──────────────── */}
-        {!isProduction && (
-          <section id="utilities" className="mb-10">
-            <h2 className="text-lg font-semibold mb-3 border-b pb-2">Utilities</h2>
-            <p className="text-xs text-gray-500 mb-2">
-              Developer / test helper functions.
-            </p>
-            <Button size="sm" onClick={addOpensToAll}>
-              Add open event to all sent emails
-            </Button>
-          </section>
-        )}
-
-        {/* ──────────────── Known IPs ──────────────── */}
-        <section className="mb-10">
-          <h2 className="text-lg font-semibold mb-2 border-b pb-2">Known IPs</h2>
-          <p className="text-xs text-gray-500 mb-3">
-            Opens and clicks from these IPs are ignored for self-open filtering.
-          </p>
-          <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>
-            Manage Known IPs
-          </Button>
-        </section>
+        </div>
       </div>
 
       {/* ──────────────── Known IPs Dialog ──────────────── */}

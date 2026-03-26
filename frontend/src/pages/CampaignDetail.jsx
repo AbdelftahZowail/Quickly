@@ -233,11 +233,11 @@ export default function CampaignDetail() {
     }
   }
 
-  if (error)            return <div className="p-8 text-red-600">{error}</div>;
-  if (loading||!campaign) return <div className="p-8 text-gray-400">Loading…</div>;
+  if (error)            return <div className="min-h-0 flex-1 overflow-y-auto p-8 text-red-600">{error}</div>;
+  if (loading||!campaign) return <div className="min-h-0 flex-1 overflow-y-auto p-8 text-gray-400">Loading…</div>;
 
   return (
-    <div className="p-6 min-w-0 max-w-full">
+    <div className="max-w-full min-h-0 min-w-0 flex-1 overflow-y-auto p-6">
       {/* header */}
       <div className="flex items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold flex-1 truncate">{campaign.name}</h1>

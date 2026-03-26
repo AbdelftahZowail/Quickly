@@ -496,7 +496,7 @@ export default function Unibox() {
   const { count: unreadCount } = useUniboxNotifications();
 
   return (
-    <div className="p-8 h-screen overflow-hidden flex flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden p-8">
       <div className="flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-semibold">Unibox</h1>

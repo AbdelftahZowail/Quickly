@@ -139,7 +139,7 @@ const steps = [
       'AI Features — classify lead interest with AI providers',
     ],
     color: 'from-indigo-500 to-blue-500',
-    tip: 'Enable Test Mode in Settings to safely try the full workflow before going live.',
+    tip: 'Enable Test mode in Settings → Dev to safely try the full workflow before going live.',
   },
 ];
 

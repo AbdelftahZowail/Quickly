@@ -86,7 +86,7 @@ export default function AddCampaign() {
   }
 
   return (
-    <div className="p-8 max-w-xl">
+    <div className="min-h-0 max-w-xl flex-1 overflow-y-auto p-8">
       <h1 className="text-2xl font-bold mb-4">Create campaign</h1>
       {message && (
         <div className={message.type === 'error' ? 'text-red-600' : 'text-green-600'}>

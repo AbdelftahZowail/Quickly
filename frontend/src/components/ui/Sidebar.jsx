@@ -25,7 +25,7 @@ const links = [
   { to: '/inboxes', label: 'Inboxes', icon: <RiMailLine size={20} /> },
   { to: '/unibox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
   { to: '/schedule', label: 'Schedule', icon: <RiCalendarScheduleLine size={20} /> },
-  { to: '/settings', label: 'Settings', icon: <RiSettingsLine size={20} /> },
+  { to: '/settings#general', label: 'Settings', icon: <RiSettingsLine size={20} /> },
 ];
 
 const APP_VERSION = '0.1.0';
@@ -121,7 +121,7 @@ export default function Sidebar({ collapsed, onToggle }) {
 
   return (
     <nav
-      className={`fixed top-0 left-0 h-full bg-gray-800 text-gray-300 flex flex-col p-3 transition-width duration-200 ${
+      className={`fixed top-0 left-0 z-40 h-full bg-gray-800 text-gray-300 flex flex-col p-3 transition-width duration-200 ${
         widthClass
       }`}
     >
@@ -146,7 +146,8 @@ export default function Sidebar({ collapsed, onToggle }) {
               className={({ isActive }) => {
                 const active =
                   isActive ||
-                  (l.to === '/analytics' && location.pathname === '/');
+                  (l.to === '/analytics' && location.pathname === '/') ||
+                  (l.to.startsWith('/settings') && location.pathname === '/settings');
                 return `flex items-center py-2 rounded px-2 transition-colors transition-transform transform-gpu active:scale-95 hover:scale-102 duration-150 whitespace-nowrap !no-underline !hover:no-underline ${
                   active
                     ? 'text-primary font-semibold bg-gray-700'
@@ -221,7 +222,7 @@ export default function Sidebar({ collapsed, onToggle }) {
           )}
 
           {helpOpen && (
-            <div className="absolute bottom-0 left-full ml-2 w-52 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-50 overflow-hidden">
+            <div className="absolute bottom-0 left-full ml-2 w-52 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-[60] overflow-hidden">
 
               {/* Deliverability Tips — navigates to full page */}
               <button
