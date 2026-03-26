@@ -329,16 +329,17 @@ export default function CampaignDetail() {
 // ─── Status badges ────────────────────────────────────────────────────────────
 const BADGE_STYLES = {
   active:         'bg-emerald-100 text-emerald-700',
+  contacted:      'bg-teal-100 text-teal-800',
   completed:      'bg-blue-100 text-blue-700',
   unsubscribed:   'bg-gray-200 text-gray-600',
   bounced:        'bg-red-100 text-red-700',
+  wrong_person:   'bg-purple-100 text-purple-700',
   replied:        'bg-violet-100 text-violet-700',
   opened:         'bg-amber-100 text-amber-700',
   clicked:        'bg-orange-100 text-orange-700',
   interested:     'bg-green-100 text-green-700',
   not_interested: 'bg-rose-100 text-rose-700',
   out_of_office:  'bg-sky-100 text-sky-700',
-  wrong_person:   'bg-purple-100 text-purple-700',
   auto_reply:     'bg-slate-100 text-slate-600',
   paused:         'bg-yellow-100 text-yellow-700',
   // Email verification statuses
@@ -360,15 +361,15 @@ function StatusBadge({ label }) {
 
 function deriveStatuses(lead) {
   const badges = [];
-  if (lead.status === 'unsubscribed') badges.push('unsubscribed');
-  else if (lead.status === 'bounced')  badges.push('bounced');
-  else if (lead.stage  === 'Complete') badges.push('completed');
-  else                                 badges.push('active');
+  badges.push(lead.status || 'active');
   if (lead.replied) badges.push('replied');
-  if (lead.opened)  badges.push('opened');
+  if (lead.opened) badges.push('opened');
   if (lead.clicked) badges.push('clicked');
-  if (lead.interest_status === 'interested') badges.push('interested');
-  if (lead.interest_status === 'not_interested') badges.push('not_interested');
+  const intr = lead.interest ?? lead.interest_status;
+  if (intr === 'interested') badges.push('interested');
+  if (intr === 'not_interested') badges.push('not_interested');
+  if (intr === 'out_of_office') badges.push('out_of_office');
+  if (intr === 'auto_reply') badges.push('auto_reply');
   if (lead.sending_paused) badges.push('paused');
   if (lead.email_verification_status) badges.push(lead.email_verification_status);
   return badges;
@@ -412,9 +413,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     return leads.filter(l => {
       if (filters.status !== 'all') {
         if (filters.status === 'active' && l.status !== 'active') return false;
+        if (filters.status === 'contacted' && l.status !== 'contacted') return false;
         if (filters.status === 'bounced' && l.status !== 'bounced') return false;
         if (filters.status === 'unsubscribed' && l.status !== 'unsubscribed') return false;
-        if (filters.status === 'completed' && l.stage !== 'Complete') return false;
+        if (filters.status === 'wrong_person' && l.status !== 'wrong_person') return false;
+        if (filters.status === 'completed' && l.status !== 'completed') return false;
       }
       if (filters.opened === 'yes' && !l.opened) return false;
       if (filters.opened === 'no' && l.opened) return false;
@@ -826,7 +829,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         {/* Status */}
         <div className="flex items-center gap-1.5">
           <span className="font-medium text-gray-500 whitespace-nowrap">Status:</span>
-          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsubscribed'},{v:'completed',l:'Completed'}].map(o => (
+          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'contacted',l:'Contacted'},{v:'completed',l:'Completed'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsub'},{v:'wrong_person',l:'Wrong person'}].map(o => (
             <button key={o.v} onClick={() => setFilter('status', o.v)}
               className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
                 filters.status === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
@@ -975,28 +978,24 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                         {l.sending_paused ? 'Paused' : 'Active'}
                       </button>
                       <select
-                        className={`text-[10px] font-medium rounded px-1.5 py-0.5 border cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-300 ${BADGE_STYLES[l.interest_status] || 'bg-gray-50 text-gray-500 border-gray-200'}`}
-                        value={l.interest_status || ''}
-                        title="AI classification — click to change or remove"
+                        className={`text-[10px] font-medium rounded px-1.5 py-0.5 border cursor-pointer focus:outline-none focus:ring-1 focus:ring-teal-300 ${BADGE_STYLES[l.interest || l.interest_status] || 'bg-gray-50 text-gray-500 border-gray-200'}`}
+                        value={l.interest || l.interest_status || ''}
+                        title="Reply intent (per campaign) — click to change or remove"
                         onChange={async (e) => {
                           const newStatus = e.target.value;
-                          const pauseStatuses = new Set(['not_interested', 'wrong_person', 'out_of_office']);
-                          const newPaused = pauseStatuses.has(newStatus) ? true : undefined;
                           try {
                             await api.patch(`/campaigns/${campaignId}/leads/${l.lead_id}`, {
-                              interest_status: newStatus,
-                              ...(newPaused !== undefined && { sending_paused: newPaused }),
+                              interest: newStatus,
                             });
-                            notify({ type: 'success', message: newStatus ? `Marked as ${newStatus.replace(/_/g, ' ')}` : 'Status cleared' });
+                            notify({ type: 'success', message: newStatus ? `Marked as ${newStatus.replace(/_/g, ' ')}` : 'Cleared' });
                             refresh();
                           } catch (err) { notify({ type: 'error', message: err.message }); }
                         }}
                       >
-                        <option value="">— no status —</option>
+                        <option value="">— no interest —</option>
                         <option value="interested">Interested</option>
                         <option value="not_interested">Not Interested</option>
                         <option value="out_of_office">Out of Office</option>
-                        <option value="wrong_person">Wrong Person</option>
                         <option value="auto_reply">Auto Reply</option>
                       </select>
                     </div>
@@ -1512,7 +1511,7 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
       case 'opened':      return sentData.filter(e => e.opened);
       case 'clicked':     return sentData.filter(e => e.clicked);
       case 'replied':     return sentData.filter(e => e.replied);
-      case 'interested':  return sentData.filter(e => e.interest_status === 'interested');
+      case 'interested':  return sentData.filter(e => (e.interest || e.interest_status) === 'interested');
       case 'not_opened':  return sentData.filter(e => !e.opened);
       case 'bounced':     return sentData.filter(e => e.lead_status === 'bounced');
       case 'unsubscribed':return sentData.filter(e => e.lead_status === 'unsubscribed');
@@ -1597,8 +1596,8 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
                       {e.lead_status && e.lead_status !== 'active' && (
                         <StatusBadge label={e.lead_status} />
                       )}
-                      {e.interest_status && (
-                        <StatusBadge label={e.interest_status} />
+                      {(e.interest || e.interest_status) && (
+                        <StatusBadge label={e.interest || e.interest_status} />
                       )}
                     </div>
                   </td>

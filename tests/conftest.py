@@ -17,6 +17,8 @@ os.environ.setdefault("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:?cache=s
 # ``settings.database_url`` will be used.  The previous SQLite-specific
 # helpers have been removed.
 
+import contextlib
+
 import pytest
 import pytest_asyncio
 from datetime import datetime
@@ -29,6 +31,24 @@ from app.models import (
     AppSetting, LeadUnsubscribeToken,
 )
 
+
+@pytest.fixture(autouse=True)
+def quickly_test_logs_dir(tmp_path, monkeypatch):
+    """Route schedule debug output away from repo ``logs/`` (often not writable in CI)."""
+    d = tmp_path / "logs"
+    d.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("QUICKLY_TEST_LOGS_DIR", str(d))
+
+
+@contextlib.asynccontextmanager
+async def _noop_mcp_lifespan():
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_mcp_lifespan_repeat_app_starts(monkeypatch):
+    """FastMCP's session_manager.run() is single-use; TestClient restarts the app per test."""
+    monkeypatch.setattr("app.mcp_leads.leads_mcp_lifespan", _noop_mcp_lifespan)
 
 
 @pytest_asyncio.fixture

@@ -11,11 +11,14 @@ import { cn } from '../utils/cn';
 
 const STATUS_OPTIONS = [
   { value: 'all', label: 'All statuses' },
-  { value: 'active', label: 'Active' },
-  { value: 'bounced', label: 'Bounced' },
-  { value: 'invalid', label: 'Invalid' },
-  { value: 'unsubscribed', label: 'Unsubscribed' },
-  { value: 'replied', label: 'Replied' },
+  { value: 'active', label: 'Enrollment: active' },
+  { value: 'contacted', label: 'Enrollment: contacted' },
+  { value: 'completed', label: 'Enrollment: completed' },
+  { value: 'bounced', label: 'Enrollment: bounced' },
+  { value: 'unsubscribed', label: 'Enrollment: unsubscribed' },
+  { value: 'wrong_person', label: 'Enrollment: wrong_person' },
+  { value: 'invalid', label: 'Verify: invalid' },
+  { value: 'replied', label: 'Has reply' },
 ];
 
 const TAB_ALL = 'all';
@@ -32,10 +35,12 @@ function formatEnrolled(campaigns) {
 function statusPillClass(status) {
   switch (status) {
     case 'active':
+    case 'contacted':
       return 'bg-green-100 text-green-800';
-    case 'replied':
+    case 'completed':
       return 'bg-blue-100 text-blue-800';
     case 'unsubscribed':
+    case 'wrong_person':
       return 'bg-gray-200 text-gray-700';
     case 'bounced':
     case 'invalid':
@@ -43,6 +48,13 @@ function statusPillClass(status) {
     default:
       return 'bg-gray-100 text-gray-700';
   }
+}
+
+function leadRowSummary(lead) {
+  const camps = lead.campaigns || [];
+  if (!camps.length) return '—';
+  const bits = camps.map((c) => `${c.campaign_name?.slice(0, 12) || c.campaign_id}:${c.status || 'active'}`);
+  return bits.slice(0, 3).join(' · ') + (bits.length > 3 ? '…' : '');
 }
 
 function buildLeadsQueryParams({ tab, debouncedSearch, statusFilter }) {
@@ -72,7 +84,7 @@ export default function Leads() {
   const [statusFilter, setStatusFilter] = useState('all');
   const [selected, setSelected] = useState(() => new Set());
   const [emailDrafts, setEmailDrafts] = useState({});
-  const [bulkStatus, setBulkStatus] = useState('active');
+  const [bulkEnrollmentStatus, setBulkEnrollmentStatus] = useState('active');
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
   const notify = useNotify();
@@ -152,12 +164,12 @@ export default function Leads() {
   const handleBulkStatus = async () => {
     if (!selected.size) return;
     const ok = await confirm(
-      `Set ${selected.size} lead(s) to “${bulkStatus}”? The send queue will be recalculated.`,
+      `Set enrollment to “${bulkEnrollmentStatus}” on every campaign for ${selected.size} lead(s)? The send queue will be recalculated.`,
     );
     if (!ok) return;
     loading.start();
     try {
-      await api.post('/leads/bulk-status', { lead_ids: [...selected], status: bulkStatus });
+      await api.post('/leads/bulk-status', { lead_ids: [...selected], enrollment_status: bulkEnrollmentStatus });
       notify({ type: 'success', message: 'Status updated.' });
       await loadLeads();
     } catch (e) {
@@ -172,7 +184,11 @@ export default function Leads() {
     const targets = ids
       .map((id) => leads.find((l) => l.id === id))
       .filter(Boolean)
-      .filter((l) => l.status === 'bounced' || l.status === 'invalid');
+      .filter(
+        (l) =>
+          l.email_verification_status === 'invalid' ||
+          (l.campaigns || []).some((c) => c.status === 'bounced'),
+      );
     if (!targets.length) {
       notify({ type: 'info', message: 'Select bounced or invalid leads to re-enroll with a corrected email.' });
       return;
@@ -229,8 +245,8 @@ export default function Leads() {
   const markActiveOne = async (lead) => {
     loading.start();
     try {
-      await api.patch(`/leads/${lead.id}`, { status: 'active' });
-      notify({ type: 'success', message: 'Lead set to active; queue recalculated.' });
+      await api.patch(`/leads/${lead.id}`, { enrollment_status: 'active' });
+      notify({ type: 'success', message: 'All enrollments set to active; queue recalculated.' });
       await loadLeads();
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Update failed' });
@@ -400,17 +416,18 @@ export default function Leads() {
           <div className="flex flex-wrap items-center gap-2">
             <select
               className="rounded-md border-gray-300 text-sm shadow-sm focus:ring-2 focus:ring-teal-300"
-              value={bulkStatus}
-              onChange={(e) => setBulkStatus(e.target.value)}
+              value={bulkEnrollmentStatus}
+              onChange={(e) => setBulkEnrollmentStatus(e.target.value)}
             >
               <option value="active">active</option>
-              <option value="unsubscribed">unsubscribed</option>
+              <option value="contacted">contacted</option>
+              <option value="completed">completed</option>
               <option value="bounced">bounced</option>
-              <option value="invalid">invalid</option>
-              <option value="replied">replied</option>
+              <option value="unsubscribed">unsubscribed</option>
+              <option value="wrong_person">wrong_person</option>
             </select>
             <Button type="button" variant="outline" size="sm" onClick={handleBulkStatus}>
-              Apply status
+              Apply enrollment
             </Button>
           </div>
           {(tab === TAB_BOUNCED || tab === TAB_ALL) && (
@@ -440,7 +457,7 @@ export default function Leads() {
               </th>
               <th className="p-2">Email</th>
               <th className="p-2">Name</th>
-              <th className="p-2">Status</th>
+              <th className="p-2">Verify / enrollments</th>
               <th className="p-2">Campaigns</th>
               <th className="p-2">Enrolled</th>
               {tab === TAB_BOUNCED && <th className="p-2 min-w-[200px]">New email</th>}
@@ -474,13 +491,30 @@ export default function Leads() {
                   <td className="p-2 align-top">{l.name || '—'}</td>
                   <td className="p-2 align-top">
                     <div className="flex flex-wrap gap-1">
-                      <span className={cn('rounded-full px-2 py-0.5 text-xs font-medium', statusPillClass(l.status))}>
-                        {l.status}
-                      </span>
                       {l.email_verification_status && (
-                        <span className="bg-gray-200 rounded-full px-2 py-0.5 text-xs text-gray-700">
-                          {l.email_verification_status}
+                        <span
+                          className={cn(
+                            'rounded-full px-2 py-0.5 text-xs font-medium',
+                            statusPillClass(l.email_verification_status),
+                          )}
+                        >
+                          verify: {l.email_verification_status}
                         </span>
+                      )}
+                      {(l.campaigns || []).slice(0, 3).map((c) => (
+                        <span
+                          key={c.campaign_id}
+                          className={cn('rounded-full px-2 py-0.5 text-xs font-medium', statusPillClass(c.status))}
+                          title={`${c.campaign_name}: ${c.status}${c.interest ? ` · ${c.interest}` : ''}`}
+                        >
+                          {c.status}
+                        </span>
+                      ))}
+                      {(l.campaigns || []).length > 3 && (
+                        <span className="text-xs text-gray-500">+{l.campaigns.length - 3}</span>
+                      )}
+                      {!(l.campaigns || []).length && !l.email_verification_status && (
+                        <span className="text-gray-400 text-xs">—</span>
                       )}
                     </div>
                   </td>

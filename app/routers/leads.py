@@ -8,12 +8,21 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.campaign_lead_status import normalize_enrollment_status, normalize_interest
 from app.database import get_db
-from app.models import Campaign, CampaignLead, EmailLog, Lead, LeadReply
+from app.models import (
+    Campaign,
+    CampaignLead,
+    EmailLog,
+    GmailMessage,
+    Lead,
+    LeadReply,
+    Office365Message,
+)
 from app.schemas import (
     LeadBulkDeleteRequest,
     LeadBulkRecoverItem,
@@ -32,19 +41,70 @@ log = logging.getLogger("quickly.routes")
 router = APIRouter(prefix="/api/leads", tags=["leads"])
 
 
-def _lead_to_response(lead: Lead) -> LeadResponse:
-    d = LeadResponse.model_validate(lead)
-    d.campaigns = [
-        LeadCampaignInfo(
-            campaign_id=cl.campaign_id,
-            campaign_name=cl.campaign.name,
-            enrolled_at=cl.enrolled_at,
-            interest_status=cl.interest_status,
-            sending_paused=cl.sending_paused,
+async def _engagement_pair_sets(
+    db: AsyncSession, lead_ids: list[int]
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]], set[tuple[int, int]]]:
+    """(lead_id, campaign_id) sets for opened, clicked, replied."""
+    if not lead_ids:
+        return set(), set(), set()
+    o_res = await db.execute(
+        select(EmailLog.lead_id, EmailLog.campaign_id)
+        .where(EmailLog.lead_id.in_(lead_ids), EmailLog.opened == True)  # noqa: E712
+        .distinct()
+    )
+    opened = {(r[0], r[1]) for r in o_res.all()}
+    c_res = await db.execute(
+        select(EmailLog.lead_id, EmailLog.campaign_id)
+        .where(EmailLog.lead_id.in_(lead_ids), EmailLog.clicked == True)  # noqa: E712
+        .distinct()
+    )
+    clicked = {(r[0], r[1]) for r in c_res.all()}
+    r_res = await db.execute(
+        select(LeadReply.lead_id, LeadReply.campaign_id)
+        .where(LeadReply.lead_id.in_(lead_ids))
+        .distinct()
+    )
+    replied = {(r[0], r[1]) for r in r_res.all()}
+    return opened, clicked, replied
+
+
+def _lead_to_response(
+    lead: Lead,
+    opened: set[tuple[int, int]],
+    clicked: set[tuple[int, int]],
+    replied: set[tuple[int, int]],
+    *,
+    interactions: list[dict] | None = None,
+) -> LeadResponse:
+    camps = []
+    for cl in lead.campaign_leads:
+        c = cl.campaign
+        pair = (lead.id, cl.campaign_id)
+        camps.append(
+            LeadCampaignInfo(
+                campaign_id=cl.campaign_id,
+                campaign_public_id=c.public_id if c else "",
+                campaign_name=c.name if c else "",
+                enrolled_at=cl.enrolled_at,
+                status=getattr(cl, "enrollment_status", None) or "active",
+                interest=cl.interest_status,
+                opened=pair in opened,
+                clicked=pair in clicked,
+                replied=pair in replied,
+                sending_paused=cl.sending_paused,
+            )
         )
-        for cl in lead.campaign_leads
-    ]
-    return d
+    return LeadResponse(
+        id=lead.id,
+        email=lead.email,
+        name=lead.name or "",
+        custom_data=lead.custom_data if isinstance(lead.custom_data, dict) else {},
+        provider=lead.provider,
+        email_verification_status=lead.email_verification_status,
+        created_at=lead.created_at,
+        campaigns=camps,
+        interactions=interactions or [],
+    )
 
 
 def _lead_query_with_campaigns():
@@ -61,13 +121,163 @@ def _build_leads_stmt(
 ):
     stmt = _lead_query_with_campaigns().order_by(Lead.id)
     if bad_only:
-        stmt = stmt.where(Lead.status.in_(["bounced", "invalid"]))
+        bounced_enrollment = exists(
+            select(1).select_from(CampaignLead).where(
+                CampaignLead.lead_id == Lead.id,
+                CampaignLead.enrollment_status == "bounced",
+            )
+        )
+        stmt = stmt.where(
+            or_(
+                Lead.email_verification_status.in_(("invalid", "risky")),
+                Lead.status.in_(("invalid", "bounced")),
+                bounced_enrollment,
+            )
+        )
     elif status:
-        stmt = stmt.where(Lead.status == status)
+        st = status.strip().lower()
+        if st == "invalid":
+            stmt = stmt.where(
+                or_(
+                    Lead.email_verification_status == "invalid",
+                    Lead.status == "invalid",
+                )
+            )
+        elif st == "replied":
+            stmt = stmt.where(
+                exists(select(1).select_from(LeadReply).where(LeadReply.lead_id == Lead.id))
+            )
+        else:
+            stmt = stmt.where(
+                exists(
+                    select(1).select_from(CampaignLead).where(
+                        CampaignLead.lead_id == Lead.id,
+                        CampaignLead.enrollment_status == st,
+                    )
+                )
+            )
     if q and q.strip():
         pat = f"%{q.strip()}%"
         stmt = stmt.where(or_(Lead.email.ilike(pat), Lead.name.ilike(pat)))
     return stmt
+
+
+async def _reset_all_enrollments_for_lead(db: AsyncSession, lead_id: int) -> None:
+    res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lead_id))
+    for cl in res.scalars().all():
+        cl.enrollment_status = "active"
+        cl.interest_status = None
+        cl.sending_paused = False
+
+
+async def _fetch_lead_interactions(db: AsyncSession, lead_id: int) -> list[dict]:
+    """Merge outbound EmailLog rows with inbound mirrored messages (Gmail / O365)."""
+    res = await db.execute(select(Lead).where(Lead.id == lead_id))
+    lead = res.scalar_one_or_none()
+    if not lead:
+        return []
+
+    events: list[dict] = []
+
+    log_rows = await db.execute(
+        select(EmailLog, Campaign.name, Campaign.public_id)
+        .join(Campaign, EmailLog.campaign_id == Campaign.id)
+        .where(EmailLog.lead_id == lead_id)
+        .order_by(EmailLog.sent_at.asc())
+    )
+    for el, cname, pub in log_rows.all():
+        events.append(
+            {
+                "direction": "outbound",
+                "kind": "sent",
+                "at": el.sent_at.isoformat(),
+                "campaign_id": el.campaign_id,
+                "campaign_name": cname,
+                "campaign_public_id": pub,
+                "subject": el.subject or "",
+                "sequence_index": el.sequence_index,
+            }
+        )
+
+    th_rows = await db.execute(
+        select(EmailLog.thread_id)
+        .where(
+            EmailLog.lead_id == lead_id,
+            EmailLog.thread_id.isnot(None),
+            EmailLog.thread_id != "",
+        )
+        .distinct()
+    )
+    thread_ids = [r[0] for r in th_rows.all()]
+    lead_em = (lead.email or "").strip().lower()
+
+    if thread_ids and lead_em:
+        from app.unibox import _extract_email_only, _header_value
+
+        gm_res = await db.execute(
+            select(GmailMessage).where(GmailMessage.thread_id.in_(thread_ids))
+        )
+        for msg in gm_res.scalars().all():
+            try:
+                from_a = _extract_email_only(_header_value(msg.headers_json or "[]", "From"))
+            except Exception:
+                from_a = ""
+            if (from_a or "").strip().lower() != lead_em:
+                continue
+            subj = _header_value(msg.headers_json or "[]", "Subject") or ""
+            ts = None
+            if msg.internal_date is not None:
+                ts = datetime.utcfromtimestamp(int(msg.internal_date) / 1000.0).isoformat() + "Z"
+            events.append(
+                {
+                    "direction": "inbound",
+                    "kind": "received",
+                    "channel": "gmail",
+                    "at": ts or (msg.updated_at.isoformat() if msg.updated_at else None),
+                    "thread_id": msg.thread_id,
+                    "subject": subj,
+                    "snippet": (msg.snippet or "")[:500],
+                }
+            )
+
+        o365_res = await db.execute(
+            select(Office365Message).where(Office365Message.conversation_id.in_(thread_ids))
+        )
+        for msg in o365_res.scalars().all():
+            if (msg.from_address or "").strip().lower() != lead_em:
+                continue
+            events.append(
+                {
+                    "direction": "inbound",
+                    "kind": "received",
+                    "channel": "office365",
+                    "at": msg.received_at.isoformat() if msg.received_at else None,
+                    "thread_id": msg.conversation_id,
+                    "subject": msg.subject or "",
+                    "snippet": (msg.body_plain or msg.body_html or "")[:500],
+                }
+            )
+
+    lr_rows = await db.execute(
+        select(LeadReply, Campaign.name, Campaign.public_id)
+        .join(Campaign, LeadReply.campaign_id == Campaign.id)
+        .where(LeadReply.lead_id == lead_id)
+        .order_by(LeadReply.replied_at.asc())
+    )
+    for lr, cname, pub in lr_rows.all():
+        events.append(
+            {
+                "direction": "inbound",
+                "kind": "reply_marker",
+                "at": lr.replied_at.isoformat(),
+                "campaign_id": lr.campaign_id,
+                "campaign_name": cname,
+                "campaign_public_id": pub,
+            }
+        )
+
+    events.sort(key=lambda e: (e.get("at") or "", e.get("direction", "")))
+    return events
 
 
 def _enrolled_earliest_iso(lead: Lead) -> str:
@@ -92,6 +302,10 @@ async def _mutate_lead_recover(lead: Lead, norm: str, verify: bool) -> None:
         lead.email_verification_status = PENDING
     else:
         lead.email_verification_status = None
+
+
+async def _after_lead_recovered(db: AsyncSession, lead_id: int) -> None:
+    await _reset_all_enrollments_for_lead(db, lead_id)
 
 
 async def _finalize_lead_recovery(db: AsyncSession, lead_ids: list[int], verify: bool) -> None:
@@ -120,7 +334,9 @@ async def list_leads(
     stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only)
     result = await db.execute(stmt)
     leads = result.scalars().all()
-    return [_lead_to_response(lead) for lead in leads]
+    ids = [x.id for x in leads]
+    opened, clicked, replied = await _engagement_pair_sets(db, ids)
+    return [_lead_to_response(x, opened, clicked, replied) for x in leads]
 
 
 @router.get("/export")
@@ -134,6 +350,8 @@ async def export_leads_csv(
     stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only)
     result = await db.execute(stmt)
     leads = list(result.scalars().all())
+    ids = [x.id for x in leads]
+    opened, clicked, replied = await _engagement_pair_sets(db, ids)
 
     custom_keys: set[str] = set()
     for lead in leads:
@@ -148,9 +366,9 @@ async def export_leads_csv(
         "id",
         "email",
         "name",
-        "status",
         "email_verification_status",
         "campaigns",
+        "enrollments_json",
         "enrolled_earliest",
         *sorted_custom,
     ]
@@ -158,13 +376,30 @@ async def export_leads_csv(
 
     for lead in leads:
         camps = "; ".join(cl.campaign.name for cl in lead.campaign_leads if cl.campaign)
+        enc_payload = []
+        for cl in lead.campaign_leads:
+            c = cl.campaign
+            pair = (lead.id, cl.campaign_id)
+            enc_payload.append(
+                {
+                    "campaign_id": cl.campaign_id,
+                    "campaign_public_id": c.public_id if c else "",
+                    "campaign_name": c.name if c else "",
+                    "status": getattr(cl, "enrollment_status", None) or "active",
+                    "interest": cl.interest_status,
+                    "opened": pair in opened,
+                    "clicked": pair in clicked,
+                    "replied": pair in replied,
+                    "sending_paused": cl.sending_paused,
+                }
+            )
         row = [
             lead.id,
             lead.email or "",
             lead.name or "",
-            lead.status or "",
             lead.email_verification_status or "",
             camps,
+            json.dumps(enc_payload, ensure_ascii=False),
             _enrolled_earliest_iso(lead),
         ]
         cd = lead.custom_data if isinstance(lead.custom_data, dict) else {}
@@ -229,17 +464,16 @@ async def bulk_update_lead_status(
 ):
     if not body.lead_ids:
         return {"ok": True, "updated": 0}
+    target = normalize_enrollment_status(body.enrollment_status)
     changed = False
     updated = 0
     for lead_id in body.lead_ids:
-        res = await db.execute(select(Lead).where(Lead.id == lead_id))
-        lead = res.scalar_one_or_none()
-        if not lead:
-            continue
-        if lead.status != body.status:
-            lead.status = body.status
-            changed = True
-            updated += 1
+        res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lead_id))
+        for cl in res.scalars().all():
+            if cl.enrollment_status != target:
+                cl.enrollment_status = target
+                changed = True
+                updated += 1
     await db.flush()
     if changed:
         from app.routers.schedule import recalculate_all_campaigns
@@ -289,6 +523,7 @@ async def bulk_recover_leads(
             errors.append({"lead_id": lead_id, "detail": "duplicate_email"})
             continue
         await _mutate_lead_recover(lead, norm, verify)
+        await _after_lead_recovered(db, lead_id)
         recovered_ids.append(lead_id)
 
     await db.flush()
@@ -384,7 +619,9 @@ async def get_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
     lead = result.scalar_one_or_none()
     if not lead:
         raise HTTPException(404, "Lead not found")
-    return _lead_to_response(lead)
+    opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
+    interactions = await _fetch_lead_interactions(db, lead_id)
+    return _lead_to_response(lead, opened, clicked, replied, interactions=interactions)
 
 
 @router.patch("/{lead_id}", response_model=LeadResponse)
@@ -397,21 +634,22 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
         lead.name = data.name
     if data.custom_data is not None:
         lead.custom_data = data.custom_data
-    status_changed = False
-    if data.status is not None and data.status != lead.status:
-        old_status = lead.status
-        lead.status = data.status
-        status_changed = True
+    enrollment_changed = False
+    if data.enrollment_status is not None:
+        target = normalize_enrollment_status(data.enrollment_status)
+        cl_res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lead_id))
+        for cl in cl_res.scalars().all():
+            if cl.enrollment_status != target:
+                cl.enrollment_status = target
+                enrollment_changed = True
     await db.flush()
 
-    if status_changed:
+    if enrollment_changed:
         from app.routers.schedule import recalculate_all_campaigns
 
         log.info(
-            "Lead %s status changed (%s -> %s); triggering full recalculation",
+            "Lead %s enrollment_status bulk-updated; triggering full recalculation",
             lead_id,
-            old_status,
-            data.status,
         )
         await recalculate_all_campaigns(db)
 
@@ -419,7 +657,8 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
         _lead_query_with_campaigns().where(Lead.id == lead_id),
     )
     lead_loaded = result2.scalar_one()
-    return _lead_to_response(lead_loaded)
+    opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
+    return _lead_to_response(lead_loaded, opened, clicked, replied)
 
 
 @router.post("/{lead_id}/recover", response_model=LeadResponse)
@@ -455,6 +694,7 @@ async def recover_lead(
     verify = body.verify_email and enabled
 
     await _mutate_lead_recover(lead, norm, verify)
+    await _after_lead_recovered(db, lead_id)
     await db.flush()
     await _finalize_lead_recovery(db, [lead_id], verify)
 
@@ -462,7 +702,8 @@ async def recover_lead(
         _lead_query_with_campaigns().where(Lead.id == lead_id),
     )
     lead_out = result3.scalar_one()
-    return _lead_to_response(lead_out)
+    opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
+    return _lead_to_response(lead_out, opened, clicked, replied)
 
 
 @router.delete("/{lead_id}")

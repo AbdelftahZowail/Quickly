@@ -1,13 +1,15 @@
 """Global schedule API — all sent + scheduled emails across all campaigns."""
 import logging
+import os
 from datetime import timedelta
 from fastapi import APIRouter, Depends, Query, HTTPException
-from sqlalchemy import select, func, delete, or_
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from pathlib import Path
 
 from app.database import get_db
+from app.campaign_lead_status import campaign_lead_schedule_eligibility_clause
 from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
     EmailOpen, EmailClick,
@@ -31,7 +33,14 @@ def _utc_iso(dt) -> "str | None":
     return dt.isoformat() + "Z"
 
 
-def _serialize_sent(el, lead, campaign, seq, inbox, include_body: bool, include_events: bool) -> dict:
+def _serialize_sent(
+    el, lead, campaign, seq, inbox, campaign_lead, include_body: bool, include_events: bool
+) -> dict:
+    enr = (
+        (getattr(campaign_lead, "enrollment_status", None) or "active")
+        if campaign_lead is not None
+        else (lead.status or "active")
+    )
     return {
         "type": "sent",
         "log_id": el.id,
@@ -47,7 +56,7 @@ def _serialize_sent(el, lead, campaign, seq, inbox, include_body: bool, include_
         "lead_id": lead.id,
         "lead_email": lead.email,
         "lead_name": lead.name or "",
-        "lead_status": lead.status,
+        "lead_status": enr,
         "campaign_id": campaign.id,
         "campaign_name": campaign.name,
         "campaign_sending_days": campaign.sending_days or [],
@@ -72,7 +81,8 @@ def _serialize_sent(el, lead, campaign, seq, inbox, include_body: bool, include_
     }
 
 
-def _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body: bool) -> dict:
+def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, include_body: bool) -> dict:
+    enr = getattr(campaign_lead, "enrollment_status", None) or "active"
     return {
         "type": "scheduled",
         "slot_id": slot.id,
@@ -93,7 +103,7 @@ def _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body: bool) -
         "lead_id": lead.id,
         "lead_email": lead.email,
         "lead_name": lead.name or "",
-        "lead_status": lead.status,
+        "lead_status": enr,
         "campaign_id": campaign.id,
         "campaign_name": campaign.name,
         "campaign_sending_days": campaign.sending_days or [],
@@ -117,10 +127,16 @@ async def global_sent(
     # We need: EmailLog + Lead + Campaign + Sequence (matched by campaign_id & sequence_index)
     SeqAlias = aliased(Sequence)
     InboxAlias = aliased(Inbox)
+    ClAlias = aliased(CampaignLead)
     query = (
-        select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias)
+        select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias, ClAlias)
         .join(Lead, EmailLog.lead_id == Lead.id)
         .join(Campaign, EmailLog.campaign_id == Campaign.id)
+        .outerjoin(
+            ClAlias,
+            (ClAlias.lead_id == EmailLog.lead_id)
+            & (ClAlias.campaign_id == EmailLog.campaign_id),
+        )
         .outerjoin(
             SeqAlias,
             (SeqAlias.campaign_id == Campaign.id)
@@ -144,8 +160,8 @@ async def global_sent(
     rows = result.all()
 
     return [
-        _serialize_sent(el, lead, campaign, seq, inbox, include_body, include_events)
-        for el, lead, campaign, seq, inbox in rows
+        _serialize_sent(el, lead, campaign, seq, inbox, cl, include_body, include_events)
+        for el, lead, campaign, seq, inbox, cl in rows
     ]
 
 
@@ -170,7 +186,10 @@ async def global_scheduled(
             (SeqAlias.campaign_id == Campaign.id)
             & (SeqAlias.position == QueueSlot.sequence_index),
         )
-        .where(CampaignLead.sending_paused == False)  # noqa: E712
+        .where(
+            CampaignLead.sending_paused == False,  # noqa: E712
+            CampaignLead.enrollment_status.in_(["active", "contacted"]),
+        )
         .order_by(QueueSlot.scheduled_date.asc(), QueueSlot.position_in_day)
         .limit(limit)
         .offset(offset)
@@ -186,7 +205,7 @@ async def global_scheduled(
     rows = result.all()
 
     return [
-        _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body)
+        _serialize_scheduled(slot, cl, lead, campaign, inbox, seq, include_body)
         for slot, cl, campaign, lead, inbox, seq in rows
     ]
 
@@ -196,14 +215,20 @@ async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
     """Fetch a single sent email with full sequence body and events."""
     SeqAlias = aliased(Sequence)
     InboxAlias = aliased(Inbox)
+    ClAlias = aliased(CampaignLead)
     result = await db.execute(
-        select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias)
+        select(EmailLog, Lead, Campaign, SeqAlias, InboxAlias, ClAlias)
         .options(
             selectinload(EmailLog.opens),
             selectinload(EmailLog.clicks),
         )
         .join(Lead, EmailLog.lead_id == Lead.id)
         .join(Campaign, EmailLog.campaign_id == Campaign.id)
+        .outerjoin(
+            ClAlias,
+            (ClAlias.lead_id == EmailLog.lead_id)
+            & (ClAlias.campaign_id == EmailLog.campaign_id),
+        )
         .outerjoin(
             SeqAlias,
             (SeqAlias.campaign_id == Campaign.id)
@@ -215,8 +240,8 @@ async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Sent email not found")
-    el, lead, campaign, seq, inbox = row
-    return _serialize_sent(el, lead, campaign, seq, inbox, include_body=True, include_events=True)
+    el, lead, campaign, seq, inbox, cl = row
+    return _serialize_sent(el, lead, campaign, seq, inbox, cl, include_body=True, include_events=True)
 
 
 @router.get("/scheduled/{slot_id}")
@@ -385,8 +410,12 @@ async def order_campaign_leads_prioritizing_partials(
     #   <lead_email>\t<campaign_id>
     #   # AFTER
     #   <lead_email>\t<campaign_id>
-    project_root = Path(__file__).resolve().parents[2]
-    logs_dir = project_root / "logs"
+    _logs_override = os.environ.get("QUICKLY_TEST_LOGS_DIR")
+    if _logs_override:
+        logs_dir = Path(_logs_override)
+    else:
+        project_root = Path(__file__).resolve().parents[2]
+        logs_dir = project_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     out_path = logs_dir / "partial.txt"
     with out_path.open("w", encoding="utf-8") as fh:
@@ -443,17 +472,14 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
     # round-robin path (recalculate_queue_round_robin) has no per-campaign
     # paused check and would otherwise re-create slots for paused campaigns.
     active_campaign_ids = [c.id for c in campaigns if not getattr(c, "paused", False)]
-    from app.models import Lead
+    _sched_eligible = campaign_lead_schedule_eligibility_clause()
     cl_result = await db.execute(
         select(CampaignLead)
         .join(Lead, CampaignLead.lead_id == Lead.id)
+        .join(Campaign, Campaign.id == CampaignLead.campaign_id)
         .where(
             CampaignLead.campaign_id.in_(active_campaign_ids),
-            Lead.status == "active",
-            CampaignLead.sending_paused == False,  # noqa: E712
-            # Exclude leads that are pending email verification — they have no
-            # queue slots yet and will be batch-scheduled once verification resolves.
-            or_(Lead.email_verification_status.is_(None), Lead.email_verification_status != "pending"),
+            _sched_eligible,
         )
         .order_by(CampaignLead.campaign_id, CampaignLead.id)
     )

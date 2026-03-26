@@ -1,0 +1,43 @@
+version: "3.9"
+
+# Same layout as docker-compose-not-host.dev.yml but production image (no bind
+# mounts, no frontend dev server). Shares the same Postgres data volume as
+# docker-compose-not-host.dev.yml (quickly_pgdata). No in-compose Caddy; use
+# host reverse proxy (e.g. → 127.0.0.1:5050).
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: quickly
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: azowail/quickly:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"   # direct access
+***REMOVED***
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+
+# Same volume as docker-compose-not-host.dev.yml (existing production data).
+volumes:
+  pgdata:
+    external: true
+    name: quickly_pgdata

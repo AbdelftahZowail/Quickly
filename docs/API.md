@@ -469,25 +469,26 @@ List leads with optional filters. Each item includes enrollments and verificatio
 | Param | Type | Description |
 |---|---|---|
 | `q` | string | Substring match on **email** or **name** (case-insensitive). |
-| `status` | string | Exact lead status: `active`, `unsubscribed`, `bounced`, `invalid`, `replied`, etc. Ignored when `bad_only` is true. |
-| `bad_only` | bool | When `true`, only leads with status **`bounced`** or **`invalid`** (for repair / re-enrollment workflows). Default `false`. |
+| `status` | string | Filter leads that have **any** enrollment with this **enrollment** status: `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person`. Use `invalid` for `email_verification_status == invalid`, `replied` for leads with any `LeadReply`. Ignored when `bad_only` is true. |
+| `bad_only` | bool | When `true`, leads with **invalid/risky** verification **or** **any** enrollment with status **`bounced`**. Default `false`. |
 
 **Response:** Array of lead objects:
 
 | Field | Description |
 |---|---|
-| `id`, `email`, `name`, `status` | Core lead fields |
+| `id`, `email`, `name` | Core lead fields |
 | `custom_data` | Object of custom template fields |
 | `provider` | Detected email provider (e.g. Google / Microsoft), or `null` |
-| `email_verification_status` | Provider verification status, or `null` if not verified |
+| `email_verification_status` | Typically `valid`, `invalid`, `pending`, or `null` (other provider values may appear) |
 | `created_at` | Creation timestamp |
-| `campaigns` | Array of `{ campaign_id, campaign_name, enrolled_at, interest_status, sending_paused }` for each enrollment |
+| `campaigns` | Per enrollment: `campaign_id`, `campaign_public_id`, `campaign_name`, `enrolled_at`, **`status`** (enrollment), **`interest`** (reply intent), **`opened`**, **`clicked`**, **`replied`** (booleans for that campaign), `sending_paused` |
+| `interactions` | On **`GET /api/leads/{id}`** only: merged timeline of outbound sends and inbound mirrored messages / reply markers (see below). Empty on list. |
 
 #### `GET /api/leads/export`
 
 Download leads as **CSV** (`text/csv`). Uses the **same filters** as `GET /api/leads` (`q`, `status`, `bad_only`).
 
-**Columns:** `id`, `email`, `name`, `status`, `email_verification_status`, `campaigns` (semicolon-separated names), `enrolled_earliest` (ISO date), then every **`custom_data` key** present in the result set (sorted alphabetically). Object/array values in `custom_data` are JSON-encoded in the cell.
+**Columns:** `id`, `email`, `name`, `email_verification_status`, `campaigns` (semicolon-separated names), **`enrollments_json`** (JSON array of per-campaign enrollment slices: `campaign_id`, `campaign_public_id`, `campaign_name`, `status`, `interest`, `opened`, `clicked`, `replied`, `sending_paused`), `enrolled_earliest` (ISO date), then every **`custom_data` key** (sorted alphabetically). Object/array values in `custom_data` are JSON-encoded in the cell.
 
 **Response:** File download (`Content-Disposition: attachment; filename="leads_export.csv"` or `leads_bounced_invalid.csv` when `bad_only=true`).
 
@@ -505,19 +506,19 @@ Delete many leads in one request. Removes associated `EmailLog` and `LeadReply` 
 
 #### `POST /api/leads/bulk-status`
 
-Set the same **status** on many leads. Triggers **one** full queue recalculation if at least one lead’s status actually changed.
+Set the same **enrollment status** on **every** `CampaignLead` row for each given lead. Triggers **one** full queue recalculation if anything changed.
 
 **Body:**
 
 ```json
-{ "lead_ids": [1, 2, 3], "status": "active" }
+{ "lead_ids": [1, 2, 3], "enrollment_status": "active" }
 ```
 
-**Response:** `{ "ok": true, "updated": 3 }` (`updated` counts leads that existed and whose status changed).
+**Response:** `{ "ok": true, "updated": 3 }` (`updated` counts enrollment rows updated).
 
 #### `POST /api/leads/bulk-recover`
 
-Fix bounced/invalid (or any) leads: update **email**, set status to **`active`**, clear **provider** so it can be re-detected, then either queue **one** background verification batch for all recovered IDs (when verification is enabled and `verify_email` is true) or run **one** full queue recalculation.
+Fix bounced/invalid (or any) leads: update **email**, set legacy lead row to **`active`**, **reset every enrollment** to `active` (clear interest, un-pause), clear **provider** so it can be re-detected, then either queue **one** background verification batch for all recovered IDs (when verification is enabled and `verify_email` is true) or run **one** full queue recalculation.
 
 **Body:**
 
@@ -578,11 +579,11 @@ Mark a lead as having replied to a specific campaign (stop-on-reply bookkeeping)
 
 #### `GET /api/leads/{id}`
 
-Get one lead with full **`campaigns`** array (same shape as list).
+Get one lead with full **`campaigns`** array (same shape as list) plus **`interactions`**: chronologically sorted events with `direction` (`outbound` \| `inbound`), `kind` (`sent` \| `received` \| `reply_marker`), `at` (ISO time), and campaign / subject / snippet fields when available.
 
 #### `PATCH /api/leads/{id}`
 
-Update lead fields. **Status** changes trigger a full queue recalculation.
+Update lead fields. Setting **`enrollment_status`** applies to **all** enrollments for this lead and triggers a full queue recalculation.
 
 **Body (all optional):**
 
@@ -590,7 +591,7 @@ Update lead fields. **Status** changes trigger a full queue recalculation.
 |---|---|---|
 | `name` | string | Lead name |
 | `custom_data` | object | Replaces custom data used in templates |
-| `status` | string | e.g. `active`, `unsubscribed`, `bounced`, `invalid`, `replied` |
+| `enrollment_status` | string | `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person` — applied to every campaign enrollment |
 
 **Response:** Updated lead object (same shape as `GET`).
 
@@ -669,9 +670,11 @@ Bulk add leads to a campaign. Creates leads that don't exist yet and schedules q
 ```json
 [
   { "email": "alice@example.com", "name": "Alice", "custom_data": { "company": "Acme" } },
-  { "email": "bob@example.com", "name": "Bob" }
+  { "email": "bob@example.com", "name": "Bob", "status": "active", "interest": null, "email_verification_status": "valid" }
 ]
 ```
+
+Optional per-row fields: **`status`** (enrollment: `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person`), **`interest`** (`interested`, `not_interested`, `out_of_office`, `auto_reply`, or omitted), **`email_verification_status`** (`valid`, `invalid`, `pending`, or clear with empty / `null`). Rows that are not sendable (e.g. unsubscribed) do not receive queue slots.
 
 **Response:**
 
@@ -702,15 +705,15 @@ List leads enrolled in a campaign with progress info.
 | `lead_id` | Lead ID |
 | `email` | Lead email |
 | `name` | Lead name |
-| `status` | Lead status (`active`, `unsubscribed`, `bounced`, `replied`) |
+| `status` | **Enrollment** status for this campaign: `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person` |
+| `interest` | Reply intent: `interested`, `not_interested`, `out_of_office`, `auto_reply`, or `null` |
 | `custom_data` | Key-value custom fields |
 | `enrolled_at` | Enrollment timestamp |
 | `stage` | Current step label (e.g. "Step 2", "Complete") |
 | `opened` | Whether this lead opened any email in this campaign |
 | `clicked` | Whether this lead clicked any link |
 | `replied` | Whether this lead replied |
-| `interest_status` | AI classification: `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `null` |
-| `sending_paused` | Whether sending is paused for this lead in this campaign |
+| `sending_paused` | Manual pause for this enrollment |
 | `email_verification_status` | Verification status or `null` if unverified |
 
 ### `DELETE /api/campaigns/{id}/leads/{lead_id}`
@@ -751,13 +754,13 @@ Return a summary count of leads grouped by their `email_verification_status`.
 
 Export the campaign's leads as a CSV file.
 
-**Query params:** `verification_status` (filter), `status` (filter)
+**Query params:** `verification_status` (filter), `status` (filter on **enrollment** status for this campaign)
 
-**Response:** `text/csv` download with columns: `email`, `name`, `status`, `email_verification_status`, and any `custom_data` keys.
+**Response:** `text/csv` with columns: `email`, `name`, **`status`** (enrollment), **`interest`**, `email_verification_status`, **`opened`**, **`clicked`**, **`replied`** (`0`/`1`), then any `custom_data` keys.
 
 ### `POST /api/campaigns/{id}/leads/import`
 
-Import leads from a CSV file. Expects an `email` column; `name` and any extra columns become `custom_data`.
+Import leads from a CSV file. Expects an `email` column; `name` and any extra columns become `custom_data`. Reserved columns (not merged into `custom_data`): **`status`**, **`interest`**, **`email_verification_status`** (same semantics as bulk add).
 
 **Query params:** `skip_duplicates` (default `true`), `verify_emails` (default `false`)
 
@@ -1466,16 +1469,17 @@ Fetch available models for a provider. Pass `?api_key=<key>` to use an unsaved k
 
 ### `PATCH /api/campaigns/{id}/leads/{lead_id}`
 
-Update AI classification and sending state for a specific campaign-lead enrollment.
+Update **enrollment status**, **interest**, and/or **sending_paused** for this campaign. Moving into a terminal enrollment (`bounced`, `unsubscribed`, `wrong_person`, `completed`) or setting interest to `not_interested` / `out_of_office` **clears queue slots**; clearing those (and unpausing) can **re-schedule** via `reserve_slots_for_new_leads_bulk`.
 
 **Body:**
 
 | Field | Type | Description |
 |---|---|---|
-| `interest_status` | string\|null | `"interested"`, `"not_interested"`, `"out_of_office"`, `"wrong_person"`, `"auto_reply"`, `"unsubscribed"`, or `""` to clear |
-| `sending_paused` | bool\|null | Pause or resume sending for this lead |
+| `status` | string | Enrollment: `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person` |
+| `interest` | string\|null | Same as `interest_status` (alias): `interested`, `not_interested`, `out_of_office`, `auto_reply`, or `""` to clear |
+| `sending_paused` | bool\|null | Manual pause |
 
-**Response:** `{"ok": true, "interest_status": "interested", "sending_paused": false}`
+**Response:** `{"ok": true, "status": "active", "interest": "interested", "sending_paused": false}`
 
 ---
 

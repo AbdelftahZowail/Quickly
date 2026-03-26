@@ -1355,7 +1355,7 @@ class TestApiRecalculationTriggers:
         assert cnt.scalar() == 1
 
         # change status to unsubscribed
-        await update_lead(lead.id, LeadUpdate(status="unsubscribed"), db=session)
+        await update_lead(lead.id, LeadUpdate(enrollment_status="unsubscribed"), db=session)
         cnt2 = await session.execute(
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
         )
@@ -1529,7 +1529,9 @@ class TestCampaignStats:
         from app.routers.campaigns import list_campaigns, get_campaign
         from app.models import LeadReply
 
-        camp = await make_campaign(session, name="stats-camp")
+        # stop_on_reply=False so a LeadReply does not remove a lead from total_leads
+        # (this test only checks aggregation wiring, not stop-on-reply eligibility).
+        camp = await make_campaign(session, name="stats-camp", stop_on_reply=False)
         inbox = await make_inbox(session)
         await make_campaign_inbox(session, camp.id, inbox.id)
         # two sequences so expected emails = leads * 2
@@ -1611,8 +1613,7 @@ class TestCampaignStats:
         assert before.emails_sent == 1
         assert before.scheduled == 1
 
-        # now simulate reply: mark lead replied, record LeadReply, delete slots
-        lead.status = "replied"
+        # now simulate reply: record LeadReply, delete slots (per-campaign; excludes from stats when stop_on_reply)
         session.add(LeadReply(lead_id=lead.id, campaign_id=camp.id))
         await session.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl_id))
         await session.flush()
@@ -1709,8 +1710,11 @@ class TestOrderCampaignLeadsPrioritizingPartials:
 
         # Verify the on-disk `logs/partial.txt` uses lead email (and includes
         # an EMAIL_LOGS section that contains the lead_id + lead_email).
+        import os
         from pathlib import Path
-        out_path = Path(__file__).resolve().parents[1] / "logs" / "partial.txt"
+
+        logs_dir = os.environ["QUICKLY_TEST_LOGS_DIR"]
+        out_path = Path(logs_dir) / "partial.txt"
         txt = out_path.read_text(encoding="utf-8")
         assert txt.splitlines()[0] == "# EMAIL_LOGS"
         assert f"{lead_sent.id}\t{lead_sent.email}\t{campaign_a.id}" in txt

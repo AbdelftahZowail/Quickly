@@ -37,8 +37,21 @@ from app.webhooks import fire_webhook_event
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
+from app.campaign_lead_status import campaign_lead_may_receive_sends
 
 log = logging.getLogger(__name__)
+
+
+async def _update_enrollment_after_send(session: AsyncSession, cl: CampaignLead, campaign: Campaign, sequence: Sequence) -> None:
+    n_seq = (
+        await session.execute(
+            select(func.count(Sequence.id)).where(Sequence.campaign_id == campaign.id)
+        )
+    ).scalar() or 0
+    if getattr(cl, "enrollment_status", None) == "active":
+        cl.enrollment_status = "contacted"
+    if n_seq > 0 and sequence.position >= n_seq - 1:
+        cl.enrollment_status = "completed"
 
 # Updated each time run_send_job finishes (for /api/status)
 last_send_job_run: datetime | None = None
@@ -298,14 +311,8 @@ async def run_send_job():
                 if not _in_sending_window(now, campaign):
                     break
 
-                if lead.status not in ("active",):
-                    continue
-                # Skip leads with invalid/risky/pending email verification
-                if getattr(lead, 'email_verification_status', None) in ("invalid", "risky", "pending"):
-                    continue
-                # Skip leads whose sending is paused for this campaign
-                # (e.g. marked not_interested by the AI classifier).
-                if getattr(cl, 'sending_paused', False):
+                if not campaign_lead_may_receive_sends(cl, lead):
+                    await session.delete(slot)
                     continue
                 if campaign.stop_on_reply:
                     reply_check = await session.execute(
@@ -315,6 +322,7 @@ async def run_send_job():
                         )
                     )
                     if reply_check.scalar_one_or_none():
+                        await session.delete(slot)
                         continue
 
                 reply_to_msg_id = None
@@ -674,7 +682,8 @@ async def run_send_job():
 
                     # Mark lead as bounced and delete remaining queue slots
                     if result.error_type in ("bounce", "invalid_recipient"):
-                        lead.status = "bounced"
+                        prev_enr = getattr(cl, "enrollment_status", None) or "active"
+                        cl.enrollment_status = "bounced"
                         # Delete ALL remaining queue slots for this lead+campaign
                         from sqlalchemy import delete as sql_delete
                         await session.execute(
@@ -694,8 +703,9 @@ async def run_send_job():
                         await fire_webhook_event(session, "lead.status_changed", {
                             "lead_id": lead.id,
                             "lead_email": lead.email,
-                            "old_status": "active",
-                            "new_status": "bounced",
+                            "campaign_id": campaign.id,
+                            "old_enrollment_status": prev_enr,
+                            "new_enrollment_status": "bounced",
                             "reason": result.message,
                             "timestamp": time_provider.utcnow().isoformat() + "Z",
                         })
@@ -718,6 +728,7 @@ async def run_send_job():
                 email_log_entry.message_id = result.message_id
                 email_log_entry.thread_id = result.thread_id or prev_thread_id
                 await session.delete(slot)
+                await _update_enrollment_after_send(session, cl, campaign, sequence)
                 sent_this_inbox += 1
                 total_sent += 1
                 quota_remaining -= 1
@@ -904,15 +915,13 @@ async def send_slot_job(slot_id: int) -> None:
         if getattr(campaign, "paused", False):
             log.info("send_slot_job: campaign %d paused, skipping slot %d", campaign.id, slot_id)
             return
-        if lead.status != "active":
-            log.info("send_slot_job: lead %d status=%s, skipping slot %d", lead.id, lead.status, slot_id)
-            return
-        if getattr(lead, "email_verification_status", None) in ("invalid", "risky", "pending"):
-            log.info("send_slot_job: lead %d verification=%s, skipping slot %d",
-                     lead.id, lead.email_verification_status, slot_id)
-            return
-        if getattr(cl, "sending_paused", False):
-            log.info("send_slot_job: sending paused for cl %d, skipping slot %d", cl.id, slot_id)
+        if not campaign_lead_may_receive_sends(cl, lead):
+            log.info(
+                "send_slot_job: lead %d not sendable for campaign_lead %d, dropping slot %d",
+                lead.id, cl.id, slot_id,
+            )
+            await session.delete(slot)
+            await session.commit()
             return
         if not _in_sending_window(now, campaign):
             log.info("send_slot_job: outside sending window for campaign %d, skipping slot %d",
@@ -977,9 +986,11 @@ async def send_slot_job(slot_id: int) -> None:
             )
             if reply_check.scalar_one_or_none():
                 log.info(
-                    "send_slot_job: lead %d already replied to campaign %d, skipping slot %d",
+                    "send_slot_job: lead %d already replied to campaign %d, dropping slot %d",
                     lead.id, campaign.id, slot_id,
                 )
+                await session.delete(slot)
+                await session.commit()
                 return
 
         # ── OAuth credentials ────────────────────────────────────────────
@@ -1319,7 +1330,8 @@ async def send_slot_job(slot_id: int) -> None:
             )
             await session.delete(email_log_entry)
             if result.error_type in ("bounce", "invalid_recipient"):
-                lead.status = "bounced"
+                prev_enr = getattr(cl, "enrollment_status", None) or "active"
+                cl.enrollment_status = "bounced"
                 from sqlalchemy import delete as _sql_delete
                 await session.execute(
                     _sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
@@ -1332,7 +1344,8 @@ async def send_slot_job(slot_id: int) -> None:
                 })
                 await fire_webhook_event(session, "lead.status_changed", {
                     "lead_id": lead.id, "lead_email": lead.email,
-                    "old_status": "active", "new_status": "bounced",
+                    "campaign_id": campaign.id,
+                    "old_enrollment_status": prev_enr, "new_enrollment_status": "bounced",
                     "reason": result.message,
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })
@@ -1354,6 +1367,7 @@ async def send_slot_job(slot_id: int) -> None:
         email_log_entry.message_id = result.message_id
         email_log_entry.thread_id = result.thread_id or prev_thread_id
         await session.delete(slot)
+        await _update_enrollment_after_send(session, cl, campaign, sequence)
 
         if inbox.provider != "office365" and email_log_entry.thread_id:
             try:

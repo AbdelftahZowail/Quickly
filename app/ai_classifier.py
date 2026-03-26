@@ -37,9 +37,10 @@ FEATURES: dict[str, dict] = {
         "description": (
             "Classifies lead replies as 'interested', 'not_interested', 'unsubscribed', "
             "'out_of_office', 'wrong_person', or 'auto_reply' based on "
-            "the original email sent and the lead's reply.  Not-interested leads are "
-            "automatically paused; unsubscribed leads are marked as unsubscribed and removed "
-            "from sending."
+            "the original email sent and the lead's reply. Unsubscribe and wrong-person "
+            "results set per-campaign enrollment and clear remaining queue slots; "
+            "not_interested and out_of_office set interest and clear slots; auto_reply "
+            "only sets interest."
         ),
     },
 }

@@ -69,20 +69,81 @@ async def get_db():
 async def _run_migrations(conn) -> None:
     """Apply incremental schema changes to existing databases.
 
-    Each statement is idempotent — safe to run on every startup.
-    New columns are added with ADD COLUMN IF NOT EXISTS so they are
-    skipped silently when they already exist.
+    DDL is idempotent (IF NOT EXISTS, etc.). One-time data backfills are
+    gated via ``_app_schema_migrations`` so they do not overwrite newer state
+    on every startup.
     """
     from sqlalchemy import text
 
-    migrations = [
+    # Postgres-only: ADD COLUMN IF NOT EXISTS is not valid on SQLite builds used in CI;
+    # tests use create_all() from models (schema already current).
+    if conn.dialect.name != "postgresql":
+        return
+
+    pg_alters = [
         # 2026-03-24: ramp-up starting number (default 1 preserves old behaviour)
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_start INTEGER NOT NULL DEFAULT 1",
         # 2026-03-24: track when ramp-up was last enabled (NULL = use created_at as fallback)
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_started_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        # 2026-03-25: per-campaign enrollment status (lead.status is no longer used for this)
+        "ALTER TABLE campaign_lead ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(32) NOT NULL DEFAULT 'active'",
     ]
-    for stmt in migrations:
+    for stmt in pg_alters:
         await conn.execute(text(stmt))
+    await conn.execute(
+        text(
+            "CREATE TABLE IF NOT EXISTS _app_schema_migrations (id VARCHAR(128) PRIMARY KEY)"
+        )
+    )
+
+    # Backfill enrollment from legacy lead.status + interest.
+    # Sync from lead.status must run once only: enrollment is authoritative afterward; API updates cl only.
+    once = await conn.execute(
+        text(
+            """
+            INSERT INTO _app_schema_migrations (id)
+            VALUES ('20260325_backfill_enrollment_from_lead_legacy_status')
+            ON CONFLICT (id) DO NOTHING
+            RETURNING id
+            """
+        )
+    )
+    if once.fetchone() is not None:
+        await conn.execute(
+            text(
+                """
+                UPDATE campaign_lead AS cl
+                SET enrollment_status = CASE
+                    WHEN l.status = 'unsubscribed' THEN 'unsubscribed'
+                    WHEN l.status = 'bounced' THEN 'bounced'
+                    ELSE cl.enrollment_status
+                END
+                FROM lead AS l
+                WHERE l.id = cl.lead_id
+                  AND l.status IN ('unsubscribed', 'bounced')
+                """
+            )
+        )
+    await conn.execute(
+        text(
+            """
+            UPDATE campaign_lead
+            SET enrollment_status = 'wrong_person',
+                interest_status = NULL
+            WHERE interest_status = 'wrong_person'
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            """
+            UPDATE campaign_lead
+            SET enrollment_status = 'unsubscribed',
+                interest_status = NULL
+            WHERE interest_status = 'unsubscribed'
+            """
+        )
+    )
 
 
 async def init_db():

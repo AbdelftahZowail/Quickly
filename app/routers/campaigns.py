@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, func
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 from datetime import date
 from typing import List
@@ -26,11 +26,20 @@ from app.models import (
     CampaignInbox,
     LeadReply,
 )
+from app.campaign_lead_status import (
+    ENROLLMENT_STATUSES,
+    LEAD_INTERESTS,
+    campaign_lead_may_receive_sends,
+    campaign_lead_schedule_eligibility_clause,
+    normalize_enrollment_status,
+    normalize_interest,
+)
 from app.schemas import (
     CampaignCreate,
     CampaignUpdate,
     CampaignResponse,
     CampaignLeadAdd,
+    CampaignLeadEnrollmentPatch,
     SequenceCreate,
     SequenceUpdate,
     SequenceResponse,
@@ -38,11 +47,24 @@ from app.schemas import (
     SequenceVariantUpdate,
     SequenceVariantResponse,
 )
-from app.queue_logic import reserve_slots_for_new_leads_bulk, recalculate_queue_after_sequence_change_for_leads
+from app.queue_logic import reserve_slots_for_new_leads_bulk
 
 log = logging.getLogger("quickly.routes")
 
 router = APIRouter(prefix="/api/campaigns", tags=["campaigns"])
+
+
+def _apply_campaign_lead_add_options(cl: CampaignLead, lead: Lead, entry: CampaignLeadAdd) -> None:
+    if entry.status:
+        cl.enrollment_status = normalize_enrollment_status(entry.status)
+    if entry.interest is not None:
+        cl.interest_status = normalize_interest(entry.interest)
+    if entry.email_verification_status is not None:
+        raw = (entry.email_verification_status or "").strip().lower()
+        if raw in ("", "null", "none"):
+            lead.email_verification_status = None
+        elif raw in ("valid", "invalid", "pending"):
+            lead.email_verification_status = raw
 
 
 def _campaign_to_response(
@@ -108,14 +130,12 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         # frontend progress bar.  (``CampaignLead`` rows are not deleted so we
         # can still reference the historical total if needed elsewhere, but
         # analytics should focus on remaining work.)
-        from app.models import Lead
+        _eligible_cl = campaign_lead_schedule_eligibility_clause()
         res = await db.execute(
             select(CampaignLead.campaign_id, func.count())
             .join(Lead, CampaignLead.lead_id == Lead.id)
-            .where(
-                CampaignLead.campaign_id.in_(campaign_ids),
-                Lead.status == "active",
-            )
+            .join(Campaign, Campaign.id == CampaignLead.campaign_id)
+            .where(CampaignLead.campaign_id.in_(campaign_ids), _eligible_cl)
             .group_by(CampaignLead.campaign_id)
         )
         for cid, cnt in res.all():
@@ -134,13 +154,9 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         res = await db.execute(
             select(CampaignLead.campaign_id, func.count(QueueSlot.id))
             .join(QueueSlot, QueueSlot.campaign_lead_id == CampaignLead.id)
-            # only slots for active leads contribute; slots for replied/unsubscribed
-            # leads should already have been removed but keep the filter for safety.
             .join(Lead, CampaignLead.lead_id == Lead.id)
-            .where(
-                CampaignLead.campaign_id.in_(campaign_ids),
-                Lead.status == "active",
-            )
+            .join(Campaign, Campaign.id == CampaignLead.campaign_id)
+            .where(CampaignLead.campaign_id.in_(campaign_ids), _eligible_cl)
             .group_by(CampaignLead.campaign_id)
         )
         for cid, cnt in res.all():
@@ -178,26 +194,23 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["sequences"] = cnt
 
-        # bounced lead counts per campaign
+        # bounced / unsubscribed enrollments per campaign
         res = await db.execute(
             select(CampaignLead.campaign_id, func.count())
-            .join(Lead, CampaignLead.lead_id == Lead.id)
             .where(
                 CampaignLead.campaign_id.in_(campaign_ids),
-                Lead.status == "bounced",
+                CampaignLead.enrollment_status == "bounced",
             )
             .group_by(CampaignLead.campaign_id)
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["bounced"] = cnt
 
-        # unsubscribed lead counts per campaign
         res = await db.execute(
             select(CampaignLead.campaign_id, func.count())
-            .join(Lead, CampaignLead.lead_id == Lead.id)
             .where(
                 CampaignLead.campaign_id.in_(campaign_ids),
-                Lead.status == "unsubscribed",
+                CampaignLead.enrollment_status == "unsubscribed",
             )
             .group_by(CampaignLead.campaign_id)
         )
@@ -320,16 +333,13 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
     # compute stats for single campaign
     stats: dict = {}
-    # lead count – only active leads contribute to progress
-    from app.models import Lead
+    _one_eligible = campaign_lead_schedule_eligibility_clause()
     res = await db.execute(
         select(func.count())
         .select_from(CampaignLead)
         .join(Lead, CampaignLead.lead_id == Lead.id)
-        .where(
-            CampaignLead.campaign_id == campaign_id,
-            Lead.status == "active",
-        )
+        .join(Campaign, Campaign.id == CampaignLead.campaign_id)
+        .where(CampaignLead.campaign_id == campaign_id, _one_eligible)
     )
     stats["total_leads"] = res.scalar() or 0
     # emails
@@ -345,10 +355,8 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         .select_from(QueueSlot)
         .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
         .join(Lead, CampaignLead.lead_id == Lead.id)
-        .where(
-            CampaignLead.campaign_id == campaign_id,
-            Lead.status == "active",
-        )
+        .join(Campaign, Campaign.id == CampaignLead.campaign_id)
+        .where(CampaignLead.campaign_id == campaign_id, _one_eligible)
     )
     stats["scheduled"] = res.scalar() or 0
     # replies
@@ -915,14 +923,14 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "lead_id": lead.id,
             "email": lead.email,
             "name": lead.name,
-            "status": lead.status,
+            "status": getattr(cl, "enrollment_status", None) or "active",
+            "interest": cl.interest_status,
             "custom_data": lead.custom_data or {},
             "enrolled_at": cl.enrolled_at.isoformat(),
             "stage": stage_label(lead.id),
             "opened": lead.id in opened_set,
             "clicked": lead.id in clicked_set,
             "replied": lead.id in replied_set,
-            "interest_status": cl.interest_status,
             "sending_paused": cl.sending_paused,
             "email_verification_status": lead.email_verification_status,
             "provider": lead.provider,
@@ -931,24 +939,14 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
     ]
 
 
-class _CampaignLeadPatch(BaseModel):
-    interest_status: str | None = None    # "interested", "not_interested", or null to clear
-    sending_paused: bool | None = None
-
-
 @router.patch("/{campaign_id}/leads/{lead_id}")
 async def patch_campaign_lead(
     campaign_id: int,
     lead_id: int,
-    payload: _CampaignLeadPatch,
+    payload: CampaignLeadEnrollmentPatch,
     db: AsyncSession = Depends(get_db),
 ):
-    """Update interest_status and/or sending_paused for a campaign-lead pair.
-
-    Used by the frontend to let users override the AI classification — e.g.
-    re-enable sending for a lead that was marked not_interested, or manually
-    mark a lead as interested/not_interested.
-    """
+    """Update enrollment status, interest, and/or sending_paused for this campaign."""
     result = await db.execute(
         select(CampaignLead).where(
             CampaignLead.campaign_id == campaign_id,
@@ -959,23 +957,43 @@ async def patch_campaign_lead(
     if not cl:
         raise HTTPException(404, "Campaign-lead enrolment not found")
 
-    VALID_INTEREST_STATUSES = {"interested", "not_interested", "out_of_office", "wrong_person", "auto_reply", "unsubscribed", ""}
-    if payload.interest_status is not None:
-        if payload.interest_status not in VALID_INTEREST_STATUSES:
-            raise HTTPException(400, f"interest_status must be one of: {', '.join(sorted(VALID_INTEREST_STATUSES - {''}))}, or empty string to clear")
-        cl.interest_status = payload.interest_status if payload.interest_status else None
+    if payload.status is not None:
+        st = (payload.status or "").strip().lower()
+        if st not in ENROLLMENT_STATUSES:
+            raise HTTPException(
+                400,
+                f"status must be one of: {', '.join(sorted(ENROLLMENT_STATUSES))}",
+            )
+        cl.enrollment_status = st
+
+    if payload.interest is not None:
+        raw = payload.interest
+        if isinstance(raw, str) and raw.strip() == "":
+            cl.interest_status = None
+        else:
+            norm = normalize_interest(str(raw) if raw is not None else "")
+            if norm is None and raw not in (None, "", "null"):
+                raise HTTPException(
+                    400,
+                    f"interest must be one of: {', '.join(sorted(LEAD_INTERESTS))} or empty to clear",
+                )
+            cl.interest_status = norm
 
     if payload.sending_paused is not None:
         cl.sending_paused = payload.sending_paused
-        # If re-enabling sending, re-create queue slots for this lead
-        if not payload.sending_paused:
-            from app.queue_logic import reserve_slots_for_new_leads_bulk
-            campaign = await db.get(Campaign, campaign_id)
-            if campaign:
-                await reserve_slots_for_new_leads_bulk(db, campaign, [cl])
 
+    await db.flush()
+    # Full global recalculation: schedule must mirror what the send job will deliver.
+    from app.routers.schedule import recalculate_all_campaigns
+
+    await recalculate_all_campaigns(db)
     await db.commit()
-    return {"ok": True, "interest_status": cl.interest_status, "sending_paused": cl.sending_paused}
+    return {
+        "ok": True,
+        "status": cl.enrollment_status,
+        "interest": cl.interest_status,
+        "sending_paused": cl.sending_paused,
+    }
 
 
 class PreviewRequest(BaseModel):
@@ -1368,7 +1386,8 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
             "lead_id": el.lead_id,
             "lead_email": lead.email,
             "lead_name": lead.name or "",
-            "lead_status": lead.status,
+            "lead_status": (getattr(cl, "enrollment_status", None) or "active") if cl else None,
+            "interest": cl.interest_status if cl else None,
             "interest_status": cl.interest_status if cl else None,
             "opened": el.opened,
             "clicked": el.clicked,
@@ -1398,6 +1417,9 @@ async def remove_lead_from_campaign(
     await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
     await db.delete(cl)
     await db.flush()
+    from app.routers.schedule import recalculate_all_campaigns
+
+    await recalculate_all_campaigns(db)
     log.info("remove_lead: campaign=%s lead=%s", campaign_id, lead_id)
     return {"ok": True}
 
@@ -1413,8 +1435,9 @@ async def bulk_add_leads_to_campaign(
     """
     Add one or more leads to a campaign.
     For each entry: find existing lead by email (or create), then enroll if not already enrolled.
-    Queues slots for each newly enrolled lead using the bulk schedule
-    (accepts a single id as well; does NOT perform a full recalculate).    """
+    Queues slots for each newly enrolled lead using the bulk scheduler only
+    (does not run a global recalculate). Eligibility matches the send job
+    (verification, interest, enrollment, ``stop_on_reply``, etc.).    """
     campaign_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     campaign_obj = campaign_result.scalar_one_or_none()
     if not campaign_obj:
@@ -1441,7 +1464,7 @@ async def bulk_add_leads_to_campaign(
     errors = 0
     duplicate_leads: list[str] = []
     # Track new enrollments for bulk scheduling after provider detection
-    new_enrollments: list[tuple[int, int, str, bool]] = []  # (cl.id, lead.id, email, already_has_provider)
+    new_enrollments: list[tuple[int, int, str, bool, bool]] = []  # cl.id, lead.id, email, has_prov, can_send
 
     for entry in leads_data:
         email = entry.email.strip().lower()
@@ -1503,7 +1526,10 @@ async def bulk_add_leads_to_campaign(
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)
             await db.flush()
-            new_enrollments.append((cl.id, lead.id, email, bool(lead.provider)))
+            _apply_campaign_lead_add_options(cl, lead, entry)
+            await db.flush()
+            can_send = campaign_lead_may_receive_sends(cl, lead)
+            new_enrollments.append((cl.id, lead.id, email, bool(lead.provider), can_send))
             results.append({"email": email, "status": "added", "lead_id": lead.id, "slots_created": 0})
             added += 1
 
@@ -1514,13 +1540,24 @@ async def bulk_add_leads_to_campaign(
 
     # ── Detect providers then schedule all new enrollments ──────────────────
     if new_enrollments:
+        replied_lead_ids: set[int] = set()
+        if getattr(campaign_obj, "stop_on_reply", False):
+            _lids = [e[1] for e in new_enrollments]
+            _rep = await db.execute(
+                select(LeadReply.lead_id).where(
+                    LeadReply.campaign_id == campaign_id,
+                    LeadReply.lead_id.in_(_lids),
+                )
+            )
+            replied_lead_ids = {row[0] for row in _rep.all()}
+
         if match_provider:
             # Providers must be known before queue slot assignment so the correct
             # inbox type is selected (Google → Gmail, Office 365 → Office365).
             from app.email_provider import detect_provider_for_email
             needs_detection = [
                 (cl_id, lead_id, email)
-                for cl_id, lead_id, email, has_prov in new_enrollments
+                for cl_id, lead_id, email, has_prov, _can in new_enrollments
                 if not has_prov
             ]
             for _, lead_id, email in needs_detection:
@@ -1549,7 +1586,9 @@ async def bulk_add_leads_to_campaign(
             await db.flush()
             to_schedule_cl_ids: list[int] = []
         else:
-            to_schedule_cl_ids = [e[0] for e in new_enrollments]
+            to_schedule_cl_ids = [
+                e[0] for e in new_enrollments if e[4] and e[1] not in replied_lead_ids
+            ]
 
         if to_schedule_cl_ids:
             await reserve_slots_for_new_leads_bulk(db, to_schedule_cl_ids, campaign_id)
@@ -1584,7 +1623,7 @@ async def bulk_add_leads_to_campaign(
     # When provider matching is disabled, still detect providers in the background
     # for leads that don't have one yet (future use / analytics).
     if not match_provider:
-        needs_bg = [(lead_id, email) for _, lead_id, email, has_prov in new_enrollments if not has_prov]
+        needs_bg = [(lead_id, email) for _, lead_id, email, has_prov, _ in new_enrollments if not has_prov]
         if needs_bg:
             import asyncio
             asyncio.create_task(_detect_providers_background(needs_bg))
@@ -1741,8 +1780,7 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
                         fresh_lead.email_verification_result = vr.raw
 
                         if new_verif in BLOCK_SEND_STATUSES:
-                            fresh_lead.status = "invalid"
-                            new_status = "invalid"
+                            new_status = fresh_lead.status
                             # Remove any existing queue slots
                             cl_result = await db.execute(
                                 select(CampaignLead.id).where(CampaignLead.lead_id == lead.id)
@@ -1754,10 +1792,7 @@ async def _run_background_verification(lead_ids: list[int], *, reverify: bool = 
                                 )
                         else:
                             pending_valid.append(lead.id)
-                            # Restore to active if it was previously flagged invalid
-                            if reverify and fresh_lead.status == "invalid":
-                                fresh_lead.status = "active"
-                                new_status = "active"
+                            new_status = fresh_lead.status
 
                         await db.commit()
 
@@ -1901,7 +1936,7 @@ async def get_verification_status(
 async def export_campaign_leads(
     campaign_id: int,
     verification_status: str | None = Query(None, description="Filter by email verification status"),
-    status: str | None = Query(None, description="Filter by lead status (active, bounced, etc.)"),
+    status: str | None = Query(None, description="Filter by per-campaign enrollment status"),
     db: AsyncSession = Depends(get_db),
 ):
     """Export leads for a campaign as a CSV file, with optional filtering."""
@@ -1921,11 +1956,45 @@ async def export_campaign_leads(
         else:
             query = query.where(Lead.email_verification_status == verification_status)
     if status:
-        query = query.where(Lead.status == status)
+        query = query.where(CampaignLead.enrollment_status == status.strip().lower())
     query = query.order_by(CampaignLead.enrolled_at.desc())
 
     result = await db.execute(query)
     rows = result.all()
+    lead_ids = [lead.id for _cl, lead in rows]
+    opened_set: set[int] = set()
+    clicked_set: set[int] = set()
+    replied_set: set[int] = set()
+    if lead_ids:
+        o_r = await db.execute(
+            select(EmailLog.lead_id)
+            .where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+                EmailLog.opened == True,  # noqa: E712
+            )
+            .distinct()
+        )
+        opened_set = {r[0] for r in o_r.all()}
+        c_r = await db.execute(
+            select(EmailLog.lead_id)
+            .where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+                EmailLog.clicked == True,  # noqa: E712
+            )
+            .distinct()
+        )
+        clicked_set = {r[0] for r in c_r.all()}
+        rep_r = await db.execute(
+            select(LeadReply.lead_id)
+            .where(
+                LeadReply.campaign_id == campaign_id,
+                LeadReply.lead_id.in_(lead_ids),
+            )
+            .distinct()
+        )
+        replied_set = {r[0] for r in rep_r.all()}
 
     # Gather all custom_data keys
     all_keys = set()
@@ -1936,10 +2005,19 @@ async def export_campaign_leads(
 
     output = io.StringIO()
     writer = csv.writer(output)
-    header = ["email", "name", "status", "email_verification_status"] + custom_keys
+    header = list(_CAMPAIGN_LEADS_CSV_BUILTIN) + custom_keys
     writer.writerow(header)
-    for _cl, lead in rows:
-        row = [lead.email, lead.name or "", lead.status or "", lead.email_verification_status or ""]
+    for cl, lead in rows:
+        row = [
+            lead.email,
+            lead.name or "",
+            getattr(cl, "enrollment_status", None) or "active",
+            cl.interest_status or "",
+            lead.email_verification_status or "",
+            "1" if lead.id in opened_set else "0",
+            "1" if lead.id in clicked_set else "0",
+            "1" if lead.id in replied_set else "0",
+        ]
         for k in custom_keys:
             val = (lead.custom_data or {}).get(k, "")
             row.append(str(val) if val is not None else "")
@@ -1998,7 +2076,7 @@ async def import_campaign_leads(
     results_list = []
     seen_emails: set[str] = set()
     # Track new enrollments for bulk scheduling after provider detection
-    new_enrollments: list[tuple[int, int, str, bool]] = []  # (cl.id, lead.id, email, already_has_provider)
+    new_enrollments: list[tuple[int, int, str, bool, bool]] = []  # cl.id, lead.id, email, has_prov, can_send
 
     for row_num, row in enumerate(reader, start=2):
         # Normalize keys
@@ -2016,10 +2094,10 @@ async def import_campaign_leads(
         seen_emails.add(email)
 
         name = normalized.get("name", "")
-        # Everything else is custom data
+        _csv_reserved = frozenset({"email", "name", "status", "interest", "email_verification_status"})
         custom_data = {}
         for k, v in normalized.items():
-            if k not in ("email", "name") and v:
+            if k not in _csv_reserved and v:
                 custom_data[k] = v
 
         try:
@@ -2068,7 +2146,18 @@ async def import_campaign_leads(
             cl = CampaignLead(campaign_id=campaign_id, lead_id=lead.id)
             db.add(cl)
             await db.flush()
-            new_enrollments.append((cl.id, lead.id, email, bool(lead.provider)))
+            _row_opts = CampaignLeadAdd(
+                email=email,
+                name=name,
+                custom_data=custom_data,
+                status=normalized.get("status") or None,
+                interest=normalized.get("interest") or None,
+                email_verification_status=normalized.get("email_verification_status") or None,
+            )
+            _apply_campaign_lead_add_options(cl, lead, _row_opts)
+            await db.flush()
+            can_send_csv = campaign_lead_may_receive_sends(cl, lead)
+            new_enrollments.append((cl.id, lead.id, email, bool(lead.provider), can_send_csv))
             added += 1
             results_list.append({"row": row_num, "email": email, "status": "added", "lead_id": lead.id})
         except Exception as exc:
@@ -2079,13 +2168,24 @@ async def import_campaign_leads(
     # ── Detect providers then schedule all new enrollments ──────────────────
     added_lead_ids_csv: list[int] = []
     if new_enrollments:
+        replied_lead_ids_csv: set[int] = set()
+        if getattr(campaign_obj, "stop_on_reply", False):
+            _lids_csv = [e[1] for e in new_enrollments]
+            _rep_csv = await db.execute(
+                select(LeadReply.lead_id).where(
+                    LeadReply.campaign_id == campaign_id,
+                    LeadReply.lead_id.in_(_lids_csv),
+                )
+            )
+            replied_lead_ids_csv = {row[0] for row in _rep_csv.all()}
+
         if match_provider:
             # Providers must be known before queue slot assignment so the correct
             # inbox type is selected (Google → Gmail, Office 365 → Office365).
             from app.email_provider import detect_provider_for_email
             needs_detection = [
                 (cl_id, lead_id, email)
-                for cl_id, lead_id, email, has_prov in new_enrollments
+                for cl_id, lead_id, email, has_prov, _can in new_enrollments
                 if not has_prov
             ]
             for _, lead_id, email in needs_detection:
@@ -2111,7 +2211,9 @@ async def import_campaign_leads(
             await db.flush()
             to_schedule_cl_ids_csv: list[int] = []
         else:
-            to_schedule_cl_ids_csv = [e[0] for e in new_enrollments]
+            to_schedule_cl_ids_csv = [
+                e[0] for e in new_enrollments if e[4] and e[1] not in replied_lead_ids_csv
+            ]
 
         if to_schedule_cl_ids_csv:
             await reserve_slots_for_new_leads_bulk(db, to_schedule_cl_ids_csv, campaign_id)
@@ -2124,7 +2226,7 @@ async def import_campaign_leads(
     # When provider matching is disabled, still detect providers in the background
     # for leads that don't have one yet (future use / analytics).
     if not match_provider:
-        needs_bg = [(lead_id, email) for _, lead_id, email, has_prov in new_enrollments if not has_prov]
+        needs_bg = [(lead_id, email) for _, lead_id, email, has_prov, _ in new_enrollments if not has_prov]
         if needs_bg:
             import asyncio
             asyncio.create_task(_detect_providers_background(needs_bg))

@@ -1,16 +1,23 @@
 """Pydantic schemas for API and validation."""
-from pydantic import BaseModel, EmailStr
+from pydantic import AliasChoices, BaseModel, EmailStr, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime, time
 from app.models import WEBHOOK_EVENT_TYPES
 
 
 class LeadCampaignInfo(BaseModel):
-    """Minimal campaign enrollment info embedded in a LeadResponse."""
+    """Campaign enrollment slice on a lead (status & interest are per campaign)."""
     campaign_id: int
+    campaign_public_id: str
     campaign_name: str
     enrolled_at: datetime
-    interest_status: Optional[str] = None
+    # Per-campaign enrollment pipeline
+    status: str = "active"
+    # Reply / intent classification for this campaign (null = none)
+    interest: Optional[str] = None
+    opened: bool = False
+    clicked: bool = False
+    replied: bool = False
     sending_paused: bool = False
 
     class Config:
@@ -26,7 +33,8 @@ class LeadCreate(BaseModel):
 class LeadUpdate(BaseModel):
     name: Optional[str] = None
     custom_data: Optional[Dict[str, Any]] = None
-    status: Optional[str] = None  # active, unsubscribed, bounced, replied, invalid
+    # Applied to every CampaignLead row for this lead (queue may recalculate)
+    enrollment_status: Optional[str] = None
 
 
 class LeadRecoverRequest(BaseModel):
@@ -47,11 +55,13 @@ class LeadResponse(BaseModel):
     email: str
     name: str
     custom_data: Dict[str, Any]
-    status: str
     provider: Optional[str] = None
+    # valid | invalid | pending | null (other provider values may still appear in DB)
     email_verification_status: Optional[str] = None
     created_at: datetime
     campaigns: List["LeadCampaignInfo"] = []
+    # Populated on GET /api/leads/{id} only: merged outbound sends + inbound mirror/reply markers
+    interactions: List[Dict[str, Any]] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -63,7 +73,8 @@ class LeadBulkDeleteRequest(BaseModel):
 
 class LeadBulkStatusRequest(BaseModel):
     lead_ids: List[int]
-    status: str
+    # Per-campaign enrollment status applied to every enrollment of each lead
+    enrollment_status: str
 
 
 class LeadBulkRecoverItem(BaseModel):
@@ -309,6 +320,11 @@ class CampaignLeadAdd(BaseModel):
     email: str
     name: str = ""
     custom_data: Dict[str, Any] = {}
+    # Optional enrollment + interest (CSV / API). Invalid values are ignored (default enrollment).
+    status: Optional[str] = None
+    interest: Optional[str] = None
+    # Optional verification override when creating/updating the lead row (valid|invalid|pending or empty)
+    email_verification_status: Optional[str] = None
 
 
 class QueueSlotResponse(BaseModel):
@@ -337,6 +353,17 @@ class EmailLogResponse(BaseModel):
 class MarkReplied(BaseModel):
     lead_id: int
     campaign_id: int
+
+
+class CampaignLeadEnrollmentPatch(BaseModel):
+    """PATCH body for /api/campaigns/{id}/leads/{lead_id}."""
+
+    status: Optional[str] = None
+    interest: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("interest", "interest_status"),
+    )
+    sending_paused: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------

@@ -36,7 +36,7 @@ MCP requests are checked before the MCP session runs. Tool calls that proxy to `
 |------|--------|
 | `list_leads` | List leads (`q`, `status`, `bad_only`) — same filters as `GET /api/leads` |
 | `get_lead` | `GET /api/leads/{id}` |
-| `update_lead` | `PATCH /api/leads/{id}` (`name`, `status`, `custom_data`) |
+| `update_lead` | `PATCH /api/leads/{id}` (`name`, `enrollment_status`, `custom_data`) |
 | `delete_lead` | `DELETE /api/leads/{id}` |
 | `add_campaign_leads` | `POST /api/campaigns/{campaign_id}/leads` (bulk add / enroll) |
 

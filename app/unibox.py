@@ -733,11 +733,8 @@ async def _classify_and_notify_bg(
             if classification is None:
                 return  # classifier failed — normal webhook already sent
 
-            # Statuses that should pause sending and delete queue slots
-            _PAUSE_STATUSES = {"not_interested", "wrong_person", "out_of_office", "unsubscribed"}
+            from app.models import CampaignLead as _CL
 
-            # Update CampaignLead.interest_status (and optionally pause sending)
-            from app.models import CampaignLead as _CL, Lead as _Lead
             for camp_id in campaign_ids:
                 cl_res = await session.execute(
                     select(_CL).where(
@@ -746,27 +743,25 @@ async def _classify_and_notify_bg(
                     )
                 )
                 cl = cl_res.scalar_one_or_none()
-                if cl:
+                if not cl:
+                    continue
+                if classification == "unsubscribed":
+                    cl.enrollment_status = "unsubscribed"
+                    cl.interest_status = None
+                elif classification == "wrong_person":
+                    cl.enrollment_status = "wrong_person"
+                    cl.interest_status = None
+                elif classification in ("not_interested", "out_of_office"):
                     cl.interest_status = classification
-                    if classification in _PAUSE_STATUSES:
-                        cl.sending_paused = True
-                        # Delete remaining queue slots to stop sending
-                        from sqlalchemy import delete as _del
-                        from app.models import QueueSlot as _QS
-                        await session.execute(
-                            _del(_QS).where(_QS.campaign_lead_id == cl.id)
-                        )
+                elif classification == "auto_reply":
+                    cl.interest_status = "auto_reply"
+                elif classification == "interested":
+                    cl.interest_status = "interested"
 
-            # For unsubscribe requests, mark the lead record itself so they are
-            # excluded from all future campaigns.
-            if classification == "unsubscribed":
-                lead_res = await session.execute(
-                    select(_Lead).where(_Lead.id == lead_id)
-                )
-                lead_obj = lead_res.scalar_one_or_none()
-                if lead_obj:
-                    lead_obj.status = "unsubscribed"
+            await session.flush()
+            from app.routers.schedule import recalculate_all_campaigns
 
+            await recalculate_all_campaigns(session)
             await session.commit()
 
             # Fire the appropriate webhook event
@@ -917,10 +912,6 @@ async def _upsert_message_from_gmail(
                     thread_obj.is_lead_thread = True
                     thread_obj.unread_lead_reply = True
 
-                # Mark lead status as replied.
-                if lead.status != "replied":
-                    lead.status = "replied"
-
                 # Find which campaign(s) this thread belongs to via EmailLog,
                 # then record a LeadReply so stop_on_reply works correctly.
                 # Primary lookup: match by Gmail thread_id stored in EmailLog.
@@ -952,6 +943,15 @@ async def _upsert_message_from_gmail(
                     )
                     if existing_reply.scalar_one_or_none() is None:
                         db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
+                    cl_touch = await db.execute(
+                        select(CampaignLead).where(
+                            CampaignLead.lead_id == lead.id,
+                            CampaignLead.campaign_id == camp_id,
+                        )
+                    )
+                    _clt = cl_touch.scalar_one_or_none()
+                    if _clt is not None and _clt.enrollment_status == "active":
+                        _clt.enrollment_status = "contacted"
 
                 # Delete all remaining QueueSlots for this lead+campaign so
                 # the queue is clean and the send job doesn't re-skip them.
@@ -1033,57 +1033,56 @@ async def _upsert_message_from_gmail(
                         select(Lead).where(func.lower(Lead.email) == bounced_addr)
                     )
                     b_lead = b_lead_res.scalar_one_or_none()
-                    if b_lead is not None and b_lead.status not in ("bounced", "unsubscribed"):
-                        log.info(
-                            "NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
-                            b_lead.id, bounced_addr, inbox_id,
-                        )
-                        b_lead.status = "bounced"
-                        # Remove all remaining queue slots for this lead.
-                        b_cl_res = await db.execute(
-                            select(CampaignLead.id).where(
-                                CampaignLead.lead_id == b_lead.id
-                            )
-                        )
-                        b_cl_ids = [r[0] for r in b_cl_res.all()]
-                        if b_cl_ids:
+                    if b_lead is not None:
+                        b_rows = (
                             await db.execute(
-                                delete(QueueSlot).where(
-                                    QueueSlot.campaign_lead_id.in_(b_cl_ids)
-                                )
+                                select(CampaignLead).where(CampaignLead.lead_id == b_lead.id)
                             )
-                        await db.flush()
-                        # Fire bounce webhook for each campaign the lead is in.
-                        b_camp_res = await db.execute(
-                            select(CampaignLead.campaign_id).where(
-                                CampaignLead.lead_id == b_lead.id
-                            ).distinct()
-                        )
-                        b_camp_ids = [r[0] for r in b_camp_res.all()]
-                        for b_camp_id in b_camp_ids:
-                            try:
-                                from app.webhooks import fire_webhook_event as _fwe
-                                await _fwe(db, "email.bounced", {
-                                    "lead_id": b_lead.id,
-                                    "lead_email": b_lead.email,
-                                    "campaign_id": b_camp_id,
-                                    "inbox_id": inbox_id,
-                                    "error_type": "bounce",
-                                    "error_message": snippet[:300] or subject_hdr,
-                                    "timestamp": time_provider.utcnow().isoformat() + "Z",
-                                })
-                                await _fwe(db, "lead.status_changed", {
-                                    "lead_id": b_lead.id,
-                                    "lead_email": b_lead.email,
-                                    "old_status": "active",
-                                    "new_status": "bounced",
-                                    "reason": f"NDR from {from_addr_ndr}",
-                                    "timestamp": time_provider.utcnow().isoformat() + "Z",
-                                })
-                            except Exception:
-                                log.exception(
-                                    "Failed to fire bounce webhook for lead_id=%s", b_lead.id
+                        ).scalars().all()
+                        if any(
+                            getattr(r, "enrollment_status", None) not in ("bounced", "unsubscribed")
+                            for r in b_rows
+                        ):
+                            log.info(
+                                "NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
+                                b_lead.id, bounced_addr, inbox_id,
+                            )
+                            for _bcl in b_rows:
+                                _bcl.enrollment_status = "bounced"
+                            b_cl_ids = [r.id for r in b_rows]
+                            if b_cl_ids:
+                                await db.execute(
+                                    delete(QueueSlot).where(
+                                        QueueSlot.campaign_lead_id.in_(b_cl_ids)
+                                    )
                                 )
+                            await db.flush()
+                            b_camp_ids = list({r.campaign_id for r in b_rows})
+                            for b_camp_id in b_camp_ids:
+                                try:
+                                    from app.webhooks import fire_webhook_event as _fwe
+                                    await _fwe(db, "email.bounced", {
+                                        "lead_id": b_lead.id,
+                                        "lead_email": b_lead.email,
+                                        "campaign_id": b_camp_id,
+                                        "inbox_id": inbox_id,
+                                        "error_type": "bounce",
+                                        "error_message": snippet[:300] or subject_hdr,
+                                        "timestamp": time_provider.utcnow().isoformat() + "Z",
+                                    })
+                                    await _fwe(db, "lead.status_changed", {
+                                        "lead_id": b_lead.id,
+                                        "lead_email": b_lead.email,
+                                        "campaign_id": b_camp_id,
+                                        "old_enrollment_status": "contacted",
+                                        "new_enrollment_status": "bounced",
+                                        "reason": f"NDR from {from_addr_ndr}",
+                                        "timestamp": time_provider.utcnow().isoformat() + "Z",
+                                    })
+                                except Exception:
+                                    log.exception(
+                                        "Failed to fire bounce webhook for lead_id=%s", b_lead.id
+                                    )
     # -----------------------------------------------------------------------
 
     # ---------- Sent-to-lead detection (outbound messages only) ----------
@@ -3056,8 +3055,15 @@ async def _detect_o365_lead_replies(
 
             db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
 
-            if lead.status in ("active", ""):
-                lead.status = "replied"
+            _clr = await db.execute(
+                select(CampaignLead).where(
+                    CampaignLead.lead_id == lead.id,
+                    CampaignLead.campaign_id == camp_id,
+                )
+            )
+            _cl_o = _clr.scalar_one_or_none()
+            if _cl_o is not None and _cl_o.enrollment_status == "active":
+                _cl_o.enrollment_status = "contacted"
 
             # Delete remaining queue slots
             cl_ids_res = await db.execute(
@@ -3124,18 +3130,24 @@ async def _detect_o365_lead_replies(
             select(Lead).where(func.lower(Lead.email) == bounced_addr)
         )
         b_lead = b_lead_res.scalar_one_or_none()
-        if b_lead is None or b_lead.status in ("bounced", "unsubscribed"):
+        if b_lead is None:
+            continue
+        b_rows_o365 = (
+            await db.execute(select(CampaignLead).where(CampaignLead.lead_id == b_lead.id))
+        ).scalars().all()
+        if not b_rows_o365 or all(
+            getattr(r, "enrollment_status", None) in ("bounced", "unsubscribed")
+            for r in b_rows_o365
+        ):
             continue
 
         log.info(
             "O365 NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
             b_lead.id, bounced_addr, inbox.id,
         )
-        b_lead.status = "bounced"
-        b_cl_res = await db.execute(
-            select(CampaignLead.id).where(CampaignLead.lead_id == b_lead.id)
-        )
-        b_cl_ids = [r[0] for r in b_cl_res.all()]
+        for _bcl in b_rows_o365:
+            _bcl.enrollment_status = "bounced"
+        b_cl_ids = [r.id for r in b_rows_o365]
         if b_cl_ids:
             await db.execute(
                 delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(b_cl_ids))
@@ -3162,8 +3174,9 @@ async def _detect_o365_lead_replies(
                 await _fwe(db, "lead.status_changed", {
                     "lead_id": b_lead.id,
                     "lead_email": b_lead.email,
-                    "old_status": "active",
-                    "new_status": "bounced",
+                    "campaign_id": b_camp_id,
+                    "old_enrollment_status": "active",
+                    "new_enrollment_status": "bounced",
                     "reason": f"NDR from {from_addr_ndr}",
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })

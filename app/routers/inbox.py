@@ -140,8 +140,6 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{inbox_id}", response_model=InboxResponse)
 async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depends(get_db)):
-    from app.queue_logic import recalculate_queue_after_sequence_change_for_leads
-    
     result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
     inbox = result.scalar_one_or_none()
     if not inbox:
