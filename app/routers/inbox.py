@@ -162,11 +162,12 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
     if data.tracking_domain is not None:
         inbox.tracking_domain = _normalise_tracking_domain(data.tracking_domain) or None
     if data.ramp_up_enabled is not None:
+        was_enabled = inbox.ramp_up_enabled
         if data.ramp_up_enabled != inbox.ramp_up_enabled:
             capacity_changed = True
         inbox.ramp_up_enabled = data.ramp_up_enabled
-        # Reset the start date whenever ramp-up is turned on
-        if data.ramp_up_enabled:
+        # Only reset the ramp-up clock when turning it on (not on every save while enabled)
+        if data.ramp_up_enabled and not was_enabled:
             inbox.ramp_up_started_at = datetime.utcnow()
     if data.ramp_up_period_days is not None:
         if data.ramp_up_period_days != inbox.ramp_up_period_days:

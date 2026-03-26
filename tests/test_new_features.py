@@ -183,6 +183,30 @@ async def test_update_inbox_disables_ramp_up(session):
     assert result.effective_max_per_day == 20
 
 
+@pytest.mark.asyncio
+async def test_update_inbox_preserves_ramp_up_start_when_already_enabled(session):
+    """Saving other fields with ramp_up_enabled=True must not reset ramp_up_started_at."""
+    from app.schemas import InboxUpdate
+
+    started = datetime.utcnow() - timedelta(days=10)
+    inbox = Inbox(
+        email="rampkeep@test.com",
+        max_emails_per_day=20,
+        ramp_up_enabled=True,
+        ramp_up_started_at=started,
+        ramp_up_start=1,
+        created_at=started,
+    )
+    session.add(inbox)
+    await session.flush()
+    orig_started = inbox.ramp_up_started_at
+
+    data = InboxUpdate(ramp_up_enabled=True, display_name="Renamed")
+    await inbox_router.update_inbox(inbox.id, data, db=session)
+    await session.refresh(inbox)
+    assert inbox.ramp_up_started_at == orig_started
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # AI Classifier: unsubscribed label
 # ══════════════════════════════════════════════════════════════════════════════

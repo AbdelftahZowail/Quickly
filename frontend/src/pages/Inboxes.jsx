@@ -5,6 +5,33 @@ import { Card } from '../components/ui/Card';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 
+/** Backend stores jitter in seconds (cap 600). Forms show minutes and convert on change / save. */
+const JITTER_MAX_MINUTES = 10;
+
+function clampJitterSeconds(s) {
+  const n = Number(s);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(600, Math.max(0, Math.round(n)));
+}
+
+function jitterInputMinutesFromSeconds(sec) {
+  return clampJitterSeconds(sec ?? 0) / 60;
+}
+
+function jitterSecondsFromInputMinutes(minVal) {
+  const v = parseFloat(minVal);
+  if (!Number.isFinite(v) || v < 0) return 0;
+  return clampJitterSeconds(Math.min(JITTER_MAX_MINUTES, v) * 60);
+}
+
+function formatJitterMinutesLabel(seconds) {
+  const s = clampJitterSeconds(seconds ?? 0);
+  if (s <= 0) return null;
+  const min = s / 60;
+  const t = Number.isInteger(min) ? String(min) : (Math.round(min * 10) / 10).toString();
+  return `up to ${t} min random`;
+}
+
 /**
  * Reusable tracking-domain form section.
  * Lets the user choose between the app's default domain or a custom one,
@@ -355,7 +382,7 @@ export default function Inboxes() {
         provider: editing.provider,
         max_emails_per_day: editing.max_emails_per_day,
         wait_minutes_between: editing.wait_minutes_between,
-        max_jitter_seconds: editing.max_jitter_seconds ?? 180,
+        max_jitter_seconds: clampJitterSeconds(editing.max_jitter_seconds ?? 180),
         tracking_domain: newDomain || null,
         ramp_up_enabled: editing.ramp_up_enabled,
         ramp_up_period_days: editing.ramp_up_period_days,
@@ -614,9 +641,17 @@ export default function Inboxes() {
                         <input type="number" name="wait_minutes_between" value={editing.wait_minutes_between || 5} onChange={e => { setEditing(prev => ({ ...prev, wait_minutes_between: +e.target.value })); setEditDirty(true); }} min={1} max={120} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                       </div>
                       <div>
-                        <label className="block text-xs font-medium text-gray-700">Send time jitter (seconds)</label>
-                        <input type="number" name="max_jitter_seconds" value={editing.max_jitter_seconds ?? 180} onChange={e => { setEditing(prev => ({ ...prev, max_jitter_seconds: +e.target.value })); setEditDirty(true); }} min={0} max={600} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
-                        <p className="mt-1 text-xs text-gray-400">Adds a random 0–N second delay to each send time. Breaks predictable sending patterns. Set to 0 to disable.</p>
+                        <label className="block text-xs font-medium text-gray-700">Send time jitter (minutes)</label>
+                        <input
+                          type="number"
+                          value={jitterInputMinutesFromSeconds(editing.max_jitter_seconds)}
+                          onChange={e => { setEditing(prev => ({ ...prev, max_jitter_seconds: jitterSecondsFromInputMinutes(e.target.value) })); setEditDirty(true); }}
+                          min={0}
+                          max={JITTER_MAX_MINUTES}
+                          step={0.5}
+                          className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                        />
+                        <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (stored as seconds on the server). Set to 0 to disable.</p>
                       </div>
                       <TrackingDomainField
                         value={editing.tracking_domain || ''}
@@ -730,9 +765,8 @@ export default function Inboxes() {
                       <div className="flex justify-between text-sm">
                         <span className="text-gray-600">Send jitter</span>
                         <span className="font-medium text-gray-900">
-                          {(selectedInbox.max_jitter_seconds ?? 180) > 0
-                            ? `up to ${selectedInbox.max_jitter_seconds ?? 180}s random`
-                            : <span className="text-gray-400">disabled</span>}
+                          {formatJitterMinutesLabel(selectedInbox.max_jitter_seconds)
+                            ?? <span className="text-gray-400">disabled</span>}
                         </span>
                       </div>
                     </div>
@@ -847,9 +881,17 @@ export default function Inboxes() {
                 <input type="number" name="wait_minutes_between" value={form.wait_minutes_between} onChange={handleChange} min={1} max={120} className="mt-1 block w-full border-gray-300 rounded-md" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700">Send time jitter (seconds)</label>
-                <input type="number" name="max_jitter_seconds" value={form.max_jitter_seconds} onChange={handleChange} min={0} max={600} className="mt-1 block w-full border-gray-300 rounded-md" />
-                <p className="mt-1 text-xs text-gray-400">Adds a random 0–N second delay per send. Breaks predictable sending patterns. Default 180s. Set to 0 to disable.</p>
+                <label className="block text-sm font-medium text-gray-700">Send time jitter (minutes)</label>
+                <input
+                  type="number"
+                  value={jitterInputMinutesFromSeconds(form.max_jitter_seconds)}
+                  onChange={e => setForm(f => ({ ...f, max_jitter_seconds: jitterSecondsFromInputMinutes(e.target.value) }))}
+                  min={0}
+                  max={JITTER_MAX_MINUTES}
+                  step={0.5}
+                  className="mt-1 block w-full border-gray-300 rounded-md"
+                />
+                <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (default 3 min). Set to 0 to disable.</p>
               </div>
               {/* Tracking domain */}
               <TrackingDomainField
