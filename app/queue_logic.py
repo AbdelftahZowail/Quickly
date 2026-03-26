@@ -898,6 +898,13 @@ async def reserve_slots_for_new_leads_bulk(
         return
     campaign, inboxes, sequences = data
 
+    if getattr(campaign, "paused", False):
+        log.info(
+            "reserve_slots_for_new_leads_bulk: campaign %s is paused — skipping slot creation",
+            campaign_id,
+        )
+        return
+
     if not inboxes:
         log.warning("reserve_slots_for_new_leads_bulk: no inboxes for campaign %s", campaign_id)
         return

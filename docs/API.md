@@ -293,7 +293,6 @@ List all campaigns with aggregated stats.
   "sending_days": [0, 1, 2, 3, 4],
   "sending_hours_start": "09:00",
   "sending_hours_end": "17:00",
-  "wait_minutes_between": 5,
   "stop_on_reply": true,
   "paused": false,
   "priority": 1,
@@ -336,7 +335,6 @@ Create a new campaign.
 | `sending_days` | int[] | No | `[0,1,2,3,4]` | Array of weekdays to send (0=Mon … 6=Sun) |
 | `sending_hours_start` | string | No | `"09:00"` | Start of daily sending window (HH:MM) |
 | `sending_hours_end` | string | No | `"17:00"` | End of daily sending window (HH:MM) |
-| `wait_minutes_between` | int | No | `5` | Minimum minutes between sends per inbox |
 | `stop_on_reply` | bool | No | `true` | Stop sending to a lead after they reply |
 | `paused` | bool | No | `false` | Start campaign in paused state |
 | `priority` | int | No | auto | Priority order (lower = higher priority) |

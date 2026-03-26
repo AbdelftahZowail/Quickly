@@ -62,7 +62,7 @@ def _serialize_sent(
         "campaign_sending_days": campaign.sending_days or [],
         "campaign_hours_start": campaign.sending_hours_start or "09:00",
         "campaign_hours_end": campaign.sending_hours_end or "17:00",
-        "campaign_wait_minutes": campaign.wait_minutes_between or 5,
+        "campaign_wait_minutes": (inbox.wait_minutes_between if inbox else None) or 5,
         "campaign_stop_on_reply": campaign.stop_on_reply,
         "inbox_id": el.inbox_id,
         "inbox_email": inbox.email if inbox else "",
@@ -109,7 +109,7 @@ def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, includ
         "campaign_sending_days": campaign.sending_days or [],
         "campaign_hours_start": campaign.sending_hours_start or "09:00",
         "campaign_hours_end": campaign.sending_hours_end or "17:00",
-        "campaign_wait_minutes": campaign.wait_minutes_between or 5,
+        "campaign_wait_minutes": inbox.wait_minutes_between or 5,
         "campaign_stop_on_reply": campaign.stop_on_reply,
     }
 

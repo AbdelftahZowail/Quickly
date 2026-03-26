@@ -36,6 +36,7 @@ from tests.conftest import (
     make_campaign_lead,
     make_campaign_inbox,
     make_queue_slot,
+    make_sequence,
 )
 
 
@@ -503,6 +504,48 @@ async def test_csv_import_already_enrolled(session):
 
     assert result["already_enrolled"] == 1
     assert result["added"] == 1
+
+
+@pytest.mark.asyncio
+async def test_csv_import_preserves_custom_field_key_casing(session):
+    """Custom column headers from CSV should be stored with original casing."""
+    campaign = await make_campaign(session)
+    inbox = await make_inbox(session, email="csv-case@test.com")
+    await make_sequence(session, campaign.id, position=0, body="Hi")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await session.flush()
+
+    from app.routers.campaigns import import_campaign_leads
+    from fastapi import UploadFile
+
+    csv_content = b"email,CompanyName\nfixcase@test.com,Acme\n"
+    upload = UploadFile(filename="leads.csv", file=io.BytesIO(csv_content))
+
+    await import_campaign_leads(campaign.id, upload, db=session)
+
+    lead = (
+        await session.execute(select(Lead).where(Lead.email == "fixcase@test.com"))
+    ).scalar_one()
+    assert lead.custom_data.get("CompanyName") == "Acme"
+    assert "companyname" not in (lead.custom_data or {})
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_paused_campaign_creates_no_queue_slots(session):
+    inbox = await make_inbox(session, email="bulk-paused@test.com")
+    campaign = await make_campaign(session, paused=True)
+    await make_sequence(session, campaign.id, position=0, body="Hi")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await session.flush()
+
+    result = await bulk_add_leads_to_campaign(
+        campaign.id,
+        [CampaignLeadAdd(email="paused-lead@test.com", name="P")],
+        db=session,
+    )
+    assert result["added"] == 1
+    r0 = next(x for x in result["results"] if x.get("email") == "paused-lead@test.com")
+    assert r0.get("slots_created", 0) == 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════

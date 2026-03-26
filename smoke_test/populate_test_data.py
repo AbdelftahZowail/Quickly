@@ -92,7 +92,6 @@ async def main(skip_duplicates: bool = True):
                     sending_days=sending_days,  # Excludes today so it starts tomorrow
                     sending_hours_start="09:00",
                     sending_hours_end="17:00",
-                    wait_minutes_between=5,
                     stop_on_reply=True,
                     paused=False,
                     priority=i - 1,

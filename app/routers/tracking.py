@@ -37,11 +37,9 @@ router = APIRouter(tags=["tracking"])
 
 def _extract_ip(request: Request) -> str | None:
     """Extract the client IP from the request, respecting proxy headers."""
-    return (
-        request.headers.get("X-Real-IP")
-        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or (request.client.host if request.client else None)
-    ) or None
+    from app.client_ip import client_ip_from_request
+
+    return client_ip_from_request(request)
 
 
 async def _is_known_ip(db: AsyncSession, ip: str | None) -> bool:

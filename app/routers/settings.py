@@ -841,11 +841,9 @@ _IP_EXPIRY_DAYS = 7  # auto-collected IPs expire after 1 week
 
 def _extract_ip(request) -> str | None:
     """Best-effort client IP from proxy headers or socket."""
-    return (
-        request.headers.get("X-Real-IP")
-        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-        or (request.client.host if request.client else None)
-    ) or None
+    from app.client_ip import client_ip_from_request
+
+    return client_ip_from_request(request)
 
 
 class _KnownIPCreate(_BaseModel):

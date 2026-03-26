@@ -83,7 +83,6 @@ def _campaign_to_response(
         sending_days=campaign.sending_days or [0, 1, 2, 3, 4],
         sending_hours_start=campaign.sending_hours_start or "09:00",
         sending_hours_end=campaign.sending_hours_end or "17:00",
-        wait_minutes_between=campaign.wait_minutes_between,
         stop_on_reply=campaign.stop_on_reply,
         paused=campaign.paused if hasattr(campaign, 'paused') else False,
         priority=campaign.priority if hasattr(campaign, 'priority') else 0,
@@ -260,7 +259,6 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         sending_days=data.sending_days,
         sending_hours_start=data.sending_hours_start,
         sending_hours_end=data.sending_hours_end,
-        wait_minutes_between=data.wait_minutes_between,
         stop_on_reply=data.stop_on_reply,
         paused=data.paused,
         priority=data.priority,
@@ -470,8 +468,6 @@ async def update_campaign(
             from app.routers.schedule import recalculate_all_campaigns
             await recalculate_all_campaigns(db)
     
-    if data.wait_minutes_between is not None:
-        campaign.wait_minutes_between = data.wait_minutes_between
     if data.stop_on_reply is not None:
         campaign.stop_on_reply = data.stop_on_reply
     if data.paused is not None:
@@ -2063,10 +2059,13 @@ async def import_campaign_leads(
     if not reader.fieldnames:
         raise HTTPException(400, "CSV file appears to be empty or has no headers")
 
-    # Normalize field names
-    fields = [f.strip().lower() for f in reader.fieldnames]
-    if "email" not in fields:
+    raw_headers = [(f or "").strip() for f in reader.fieldnames]
+    if not any(h.lower() == "email" for h in raw_headers if h):
         raise HTTPException(400, "CSV must have an 'email' column")
+
+    _csv_reserved_lower = frozenset(
+        {"email", "name", "status", "interest", "email_verification_status"}
+    )
 
     added = 0
     already_enrolled = 0
@@ -2079,9 +2078,18 @@ async def import_campaign_leads(
     new_enrollments: list[tuple[int, int, str, bool, bool]] = []  # cl.id, lead.id, email, has_prov, can_send
 
     for row_num, row in enumerate(reader, start=2):
-        # Normalize keys
-        normalized = {k.strip().lower(): v.strip() if v else "" for k, v in row.items() if k}
-        email = normalized.get("email", "").strip().lower()
+        by_header = {}
+        for fk in reader.fieldnames or []:
+            h = (fk or "").strip()
+            if not h:
+                continue
+            raw_val = row.get(fk)
+            by_header[h] = raw_val.strip() if raw_val else ""
+
+        email = next(
+            (by_header[h] for h in raw_headers if h.lower() == "email"),
+            "",
+        ).strip().lower()
         if not email:
             results_list.append({"row": row_num, "status": "error", "detail": "Empty email"})
             errors += 1
@@ -2093,12 +2101,24 @@ async def import_campaign_leads(
             continue
         seen_emails.add(email)
 
-        name = normalized.get("name", "")
-        _csv_reserved = frozenset({"email", "name", "status", "interest", "email_verification_status"})
+        name = next(
+            (by_header[h] for h in raw_headers if h.lower() == "name"),
+            "",
+        )
         custom_data = {}
-        for k, v in normalized.items():
-            if k not in _csv_reserved and v:
-                custom_data[k] = v
+        for h in raw_headers:
+            if not h or h.lower() in _csv_reserved_lower:
+                continue
+            v = by_header.get(h, "")
+            if v:
+                custom_data[h] = v
+
+        def _csv_cell(field_lower: str):
+            for h in raw_headers:
+                if h.lower() == field_lower:
+                    v = by_header.get(h, "")
+                    return v if v else None
+            return None
 
         try:
             lead_result = await db.execute(select(Lead).where(Lead.email == email))
@@ -2150,9 +2170,9 @@ async def import_campaign_leads(
                 email=email,
                 name=name,
                 custom_data=custom_data,
-                status=normalized.get("status") or None,
-                interest=normalized.get("interest") or None,
-                email_verification_status=normalized.get("email_verification_status") or None,
+                status=_csv_cell("status"),
+                interest=_csv_cell("interest"),
+                email_verification_status=_csv_cell("email_verification_status"),
             )
             _apply_campaign_lead_add_options(cl, lead, _row_opts)
             await db.flush()

@@ -34,3 +34,20 @@ async def test_reserve_slots_for_new_leads_bulk_handles_empty_list(session):
     # should be a no-op and not raise
     await reserve_slots_for_new_leads_bulk(session, [], 1)
     # nothing to assert beyond no exception
+
+
+@pytest.mark.asyncio
+async def test_reserve_slots_for_new_leads_bulk_skips_paused_campaign(session):
+    inbox = await make_inbox(session, email="paused-camp@test.com")
+    campaign = await make_campaign(session, paused=True)
+    await make_sequence(session, campaign.id, position=0, body="Hello")
+    await make_campaign_inbox(session, campaign.id, inbox.id, position=0)
+    lead = await make_lead(session, email="puser@example.com")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await session.flush()
+
+    await reserve_slots_for_new_leads_bulk(session, [cl.id], campaign.id, start_date=date(2026, 3, 2))
+    await session.flush()
+
+    q = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id))
+    assert q.scalar() == 0

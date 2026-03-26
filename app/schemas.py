@@ -213,7 +213,6 @@ class CampaignCreate(BaseModel):
     sending_days: List[int] = [0, 1, 2, 3, 4]  # Mon=0 .. Sun=6
     sending_hours_start: str = "09:00"
     sending_hours_end: str = "17:00"
-    wait_minutes_between: int = 5  # Deprecated: wait time is now controlled by inbox settings
     stop_on_reply: bool = True
     paused: bool = False
     priority: int = 0  # Lower value = processed first in priority scheduling
@@ -237,7 +236,6 @@ class CampaignUpdate(BaseModel):
     sending_days: Optional[List[int]] = None
     sending_hours_start: Optional[str] = None
     sending_hours_end: Optional[str] = None
-    wait_minutes_between: Optional[int] = None
     stop_on_reply: Optional[bool] = None
     paused: Optional[bool] = None
     priority: Optional[int] = None  # Lower value = processed first in priority scheduling
@@ -290,7 +288,6 @@ class CampaignResponse(BaseModel):
     sending_days: List[int]
     sending_hours_start: str
     sending_hours_end: str
-    wait_minutes_between: int
     stop_on_reply: bool
     paused: bool
     priority: int
