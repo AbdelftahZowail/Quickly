@@ -235,7 +235,7 @@ async def unsubscribe(
     know exactly which campaign to stop.
 
     Actions:
-      1. Mark the lead's status as ``unsubscribed``.
+      1. Mark this lead's **enrollment** in that campaign as ``unsubscribed``.
       2. Delete remaining ``QueueSlot`` rows for this lead+campaign so no
          further emails are dispatched.
     """
@@ -255,47 +255,47 @@ async def unsubscribe(
     lead = lead_res.scalar_one_or_none()
 
     already_done = False
-    if lead:
-        if lead.status == "unsubscribed":
+    cl_res = await db.execute(
+        select(CampaignLead).where(
+            CampaignLead.lead_id == row.lead_id,
+            CampaignLead.campaign_id == row.campaign_id,
+        )
+    )
+    cl = cl_res.scalar_one_or_none()
+    if not cl:
+        already_done = True
+    else:
+        if cl.enrollment_status == "unsubscribed":
             already_done = True
         else:
-            lead.status = "unsubscribed"
+            cl.enrollment_status = "unsubscribed"
+            cl.interest_status = None
             log.info(
                 "Unsubscribed lead_id=%s via campaign_id=%s token=%s",
                 row.lead_id, row.campaign_id, token,
             )
-
-        # Remove remaining queue slots for this (lead, campaign)
-        cl_res = await db.execute(
-            select(CampaignLead).where(
-                CampaignLead.lead_id == row.lead_id,
-                CampaignLead.campaign_id == row.campaign_id,
-            )
+        await db.execute(
+            delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
         )
-        cl = cl_res.scalar_one_or_none()
-        if cl:
-            await db.execute(
-                delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id)
-            )
 
-        await db.commit()
+    await db.commit()
 
-        # Fire webhook events for unsubscribe
-        if not already_done:
-            await fire_webhook_event(db, "lead.unsubscribed", {
-                "lead_id": row.lead_id,
-                "lead_email": lead.email if lead else "",
-                "campaign_id": row.campaign_id,
-                "timestamp": time_provider.utcnow().isoformat() + "Z",
-            })
-            await fire_webhook_event(db, "lead.status_changed", {
-                "lead_id": row.lead_id,
-                "lead_email": lead.email if lead else "",
-                "old_status": "active",
-                "new_status": "unsubscribed",
-                "campaign_id": row.campaign_id,
-                "timestamp": time_provider.utcnow().isoformat() + "Z",
-            })
+    # Fire webhook events for unsubscribe
+    if not already_done and lead and cl:
+        await fire_webhook_event(db, "lead.unsubscribed", {
+            "lead_id": row.lead_id,
+            "lead_email": lead.email if lead else "",
+            "campaign_id": row.campaign_id,
+            "timestamp": time_provider.utcnow().isoformat() + "Z",
+        })
+        await fire_webhook_event(db, "lead.status_changed", {
+            "lead_id": row.lead_id,
+            "lead_email": lead.email if lead else "",
+            "campaign_id": row.campaign_id,
+            "old_enrollment_status": "active",
+            "new_enrollment_status": "unsubscribed",
+            "timestamp": time_provider.utcnow().isoformat() + "Z",
+        })
 
     html = _ALREADY_UNSUBSCRIBED_HTML if already_done else _UNSUBSCRIBE_HTML
     return Response(content=html, media_type="text/html")

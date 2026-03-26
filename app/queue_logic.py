@@ -11,6 +11,7 @@ try:
 except ImportError:
     ZoneInfo = None  # type: ignore[assignment,misc]  # Python < 3.9 fallback
 
+from app.campaign_lead_status import campaign_lead_schedule_eligibility_clause
 from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, EmailLog, CampaignInbox, Lead
 
 log = logging.getLogger("quickly.queue")
@@ -878,6 +879,10 @@ async def reserve_slots_for_new_leads_bulk(
 
     This gives the same DB efficiency as the recalculation routines but scoped
     only to the freshly-enrolled leads.  Passing a single ID is also supported.
+
+    Enrollments that would never be sent (verification, interest, enrollment
+    status, ``sending_paused``, ``stop_on_reply`` with an existing reply, etc.)
+    are filtered out so the queue stays aligned with the send job.
     """
     if not campaign_lead_ids:
         return
@@ -900,15 +905,28 @@ async def reserve_slots_for_new_leads_bulk(
         log.warning("reserve_slots_for_new_leads_bulk: no sequences for campaign %s — no slots created", campaign_id)
         return
 
-    # ── Step 2: fetch CampaignLead rows for the given ids ────────────────────
+    # ── Step 2: fetch CampaignLead rows schedulable under the same rules as
+    #     ``recalculate_all_campaigns`` / the send job ───────────────────────
+    _elig = campaign_lead_schedule_eligibility_clause()
     cl_result = await session.execute(
-        select(CampaignLead).where(CampaignLead.id.in_(campaign_lead_ids))
+        select(CampaignLead)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .join(Campaign, Campaign.id == CampaignLead.campaign_id)
+        .where(CampaignLead.id.in_(campaign_lead_ids), _elig)
     )
     campaign_leads = list(cl_result.scalars().all())
 
     if not campaign_leads:
-        log.warning("reserve_slots_for_new_leads_bulk: no CampaignLead rows found for ids %s", campaign_lead_ids)
+        log.warning(
+            "reserve_slots_for_new_leads_bulk: no schedulable CampaignLead rows for ids %s",
+            campaign_lead_ids,
+        )
         return
+    if len(campaign_leads) < len(campaign_lead_ids):
+        log.info(
+            "reserve_slots_for_new_leads_bulk: skipped %d non-schedulable enrollment(s)",
+            len(campaign_lead_ids) - len(campaign_leads),
+        )
 
     # ── Step 3: pre-seed cache from existing slots (single bulk query) ────────
     inbox_ids = [i[0] for i in inboxes]

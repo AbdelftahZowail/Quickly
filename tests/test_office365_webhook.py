@@ -1,5 +1,6 @@
 import pytest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from sqlalchemy import select
 
 from app.models import Office365Account, Office365GraphSubscription
@@ -21,7 +22,7 @@ async def test_ensure_subscription_creates_new(session, monkeypatch):
     await session.flush()
 
     async def fake_fresh(db, inbox_id):
-        return "fake-token"
+        return SimpleNamespace(access_token="fake-token")
 
     monkeypatch.setattr("app.routers.office365_webhook._fresh_token", fake_fresh)
 
@@ -70,7 +71,8 @@ async def test_ensure_subscription_renews_existing(session, monkeypatch):
     await session.flush()
 
     async def fake_fresh(db, inbox_id):
-        return "fresh-token"
+        return SimpleNamespace(access_token="fresh-token")
+
     monkeypatch.setattr("app.routers.office365_webhook._fresh_token", fake_fresh)
 
     calls = {}

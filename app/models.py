@@ -251,8 +251,9 @@ class CampaignLead(Base):
     campaign_id = Column(Integer, ForeignKey("campaign.id"), nullable=False)
     lead_id = Column(Integer, ForeignKey("lead.id"), nullable=False)
     enrolled_at = Column(DateTime, default=_utcnow)
-    # AI classification: null = not yet classified, "interested", "not_interested",
-    # "out_of_office", "wrong_person", "auto_reply"
+    # Per-campaign pipeline: active, contacted, completed, bounced, unsubscribed, wrong_person
+    enrollment_status = Column(String(32), nullable=False, default="active")
+    # Reply intent (per campaign): interested, not_interested, out_of_office, auto_reply, or null
     interest_status = Column(String(32), nullable=True, default=None)
     # Whether sending is paused for this specific campaign-lead pair
     # (e.g. auto-paused by AI classifier when marked not_interested)

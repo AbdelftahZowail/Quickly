@@ -109,20 +109,20 @@ async def update_lead(
     ctx: Context,
     lead_id: int,
     name: str | None = None,
-    status: str | None = None,
+    enrollment_status: str | None = None,
     custom_data: dict[str, Any] | None = None,
 ) -> str:
-    """Patch lead fields (name, status, custom_data). Status changes may trigger queue recalculation."""
+    """Patch lead fields (name, enrollment_status on all campaigns, custom_data). Enrollment changes recalculate the queue."""
     headers = _outbound_headers(ctx)
     body: dict[str, Any] = {}
     if name is not None:
         body["name"] = name
-    if status is not None:
-        body["status"] = status
+    if enrollment_status is not None:
+        body["enrollment_status"] = enrollment_status
     if custom_data is not None:
         body["custom_data"] = custom_data
     if not body:
-        return json.dumps({"error": "Provide at least one of: name, status, custom_data"})
+        return json.dumps({"error": "Provide at least one of: name, enrollment_status, custom_data"})
     url = f"{_api_base()}/api/leads/{lead_id}"
     async with httpx.AsyncClient(timeout=120.0) as client:
         r = await client.patch(url, headers={**headers, "Content-Type": "application/json"}, json=body)

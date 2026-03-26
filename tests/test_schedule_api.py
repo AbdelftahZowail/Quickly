@@ -68,7 +68,7 @@ async def test_schedule_sent_includes_opens_clicks(session):
     await session.flush()
 
     with TestClient(app) as client:
-        resp = client.get("/api/schedule/sent")
+        resp = client.get("/api/schedule/sent", params={"include_events": "true"})
         assert resp.status_code == 200
         data = resp.json()
         assert isinstance(data, list)

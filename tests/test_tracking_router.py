@@ -308,16 +308,16 @@ async def test_unsubscribe_invalid_token_returns_404(session, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unsubscribe_marks_lead_status_unsubscribed(session, monkeypatch):
+async def test_unsubscribe_marks_enrollment_unsubscribed(session, monkeypatch):
     monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
 
     lead, campaign, cl, token_str = await _setup_unsubscribe(session)
-    assert lead.status != "unsubscribed"
+    assert cl.enrollment_status != "unsubscribed"
 
     await unsubscribe(token=token_str, db=session)
 
-    await session.refresh(lead)
-    assert lead.status == "unsubscribed"
+    await session.refresh(cl)
+    assert cl.enrollment_status == "unsubscribed"
 
 
 @pytest.mark.asyncio
@@ -363,7 +363,7 @@ async def test_unsubscribe_already_unsubscribed_shows_different_page(session, mo
     monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
 
     lead, campaign, cl, token_str = await _setup_unsubscribe(session)
-    lead.status = "unsubscribed"
+    cl.enrollment_status = "unsubscribed"
     await session.flush()
 
     resp = await unsubscribe(token=token_str, db=session)
@@ -398,8 +398,8 @@ async def test_unsubscribe_already_done_does_not_fire_webhooks(session, monkeypa
 
     monkeypatch.setattr("app.routers.tracking.fire_webhook_event", capture)
 
-    lead, _, _, token_str = await _setup_unsubscribe(session)
-    lead.status = "unsubscribed"
+    lead, _, cl, token_str = await _setup_unsubscribe(session)
+    cl.enrollment_status = "unsubscribed"
     await session.flush()
 
     await unsubscribe(token=token_str, db=session)

@@ -241,7 +241,7 @@ async def test_classify_reply_returns_unsubscribed(session, monkeypatch):
 @pytest.mark.asyncio
 async def test_classify_and_notify_sets_unsubscribed_status(session, monkeypatch):
     """When the AI classifies a reply as 'unsubscribed', the background task
-    must mark the lead.status = 'unsubscribed', pause sending, and delete slots.
+    must mark the campaign enrollment as unsubscribed and delete slots.
     """
     # Setup: campaign, inbox, lead, enrollment, queue slot
     campaign = await make_campaign(session)
@@ -298,13 +298,10 @@ async def test_classify_and_notify_sets_unsubscribed_status(session, monkeypatch
         reply_text="Please unsubscribe me",
     )
 
-    # Verify lead.status is now "unsubscribed"
     await session.refresh(lead)
-    assert lead.status == "unsubscribed"
-
-    # Verify sending_paused = True on CampaignLead
     await session.refresh(cl)
-    assert cl.sending_paused is True
+    assert cl.enrollment_status == "unsubscribed"
+    assert cl.interest_status is None
 
     # Verify queue slots were deleted
     slots = (await session.execute(
@@ -350,40 +347,42 @@ async def test_classify_not_interested_does_not_set_lead_status(session, monkeyp
     assert lead.status == original_status  # unchanged — only unsubscribed mutates lead
 
     await session.refresh(cl)
-    assert cl.sending_paused is True  # still paused
+    assert cl.interest_status == "not_interested"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Campaigns: VALID_INTEREST_STATUSES includes "unsubscribed"
+# Campaigns: PATCH enrollment status
 # ══════════════════════════════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
 async def test_patch_campaign_lead_unsubscribed_accepted(session):
-    """Patching interest_status to 'unsubscribed' must succeed (not raise 400)."""
+    """Patching enrollment status to 'unsubscribed' must succeed."""
     campaign = await make_campaign(session)
     lead = await make_lead(session, email="p-lead@test.com")
     cl = await make_campaign_lead(session, campaign.id, lead.id)
     await session.flush()
 
-    from app.routers.campaigns import _CampaignLeadPatch, patch_campaign_lead
+    from app.schemas import CampaignLeadEnrollmentPatch
+    from app.routers.campaigns import patch_campaign_lead
 
-    payload = _CampaignLeadPatch(interest_status="unsubscribed")
+    payload = CampaignLeadEnrollmentPatch(status="unsubscribed")
     result = await patch_campaign_lead(campaign.id, lead.id, payload, db=session)
-    assert result["interest_status"] == "unsubscribed"
+    assert result["status"] == "unsubscribed"
 
 
 @pytest.mark.asyncio
 async def test_patch_campaign_lead_invalid_status_rejected(session):
-    """An unknown interest_status should still be rejected with 400."""
+    """An unknown interest value should still be rejected with 400."""
     import fastapi
     campaign = await make_campaign(session)
     lead = await make_lead(session, email="bad-status@test.com")
     await make_campaign_lead(session, campaign.id, lead.id)
     await session.flush()
 
-    from app.routers.campaigns import _CampaignLeadPatch, patch_campaign_lead
+    from app.schemas import CampaignLeadEnrollmentPatch
+    from app.routers.campaigns import patch_campaign_lead
 
-    payload = _CampaignLeadPatch(interest_status="nonsense_value")
+    payload = CampaignLeadEnrollmentPatch(interest="nonsense_value")
     with pytest.raises(fastapi.HTTPException) as exc:
         await patch_campaign_lead(campaign.id, lead.id, payload, db=session)
     assert exc.value.status_code == 400
