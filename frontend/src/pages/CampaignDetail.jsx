@@ -97,6 +97,13 @@ export default function CampaignDetail() {
 
   useEffect(() => { loadAll(); }, [id]);
 
+  const scheduleWaitMinutes = useMemo(() => {
+    const ids = campaign?.inbox_ids;
+    if (!ids?.length || !inboxes?.length) return 5;
+    const ib = inboxes.find((i) => i.id === ids[0]);
+    return ib?.wait_minutes_between ?? 5;
+  }, [campaign, inboxes]);
+
   /* ── queue helpers ── */
   function estimatedTime(positionInDay) {
     if (!campaign) return '';
@@ -104,7 +111,7 @@ export default function CampaignDetail() {
     const [hStr, mStr] = start.split(':');
     let h = parseInt(hStr, 10) || 9;
     let m = parseInt(mStr, 10) || 0;
-    const offset = (positionInDay - 1) * (campaign.wait_minutes_between || 5);
+    const offset = (positionInDay - 1) * scheduleWaitMinutes;
     m += offset;
     h += Math.floor(m / 60);
     m = m % 60;
@@ -230,7 +237,7 @@ export default function CampaignDetail() {
   if (loading||!campaign) return <div className="p-8 text-gray-400">Loading…</div>;
 
   return (
-    <div className="p-6">
+    <div className="p-6 min-w-0 max-w-full">
       {/* header */}
       <div className="flex items-center gap-3 mb-6">
         <h1 className="text-2xl font-bold flex-1 truncate">{campaign.name}</h1>
@@ -680,7 +687,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 min-w-0 max-w-full">
       {/* Import / Export toolbar */}
       <div className="flex flex-wrap items-center gap-3">
         <Button size="sm" variant="outline" onClick={handleExport} disabled={!leads.length}>
@@ -900,8 +907,8 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
             : 'No leads match the current filter.'}
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
-          <table className="min-w-full text-sm bg-white">
+        <div className="w-full max-w-full min-w-0 overflow-x-auto rounded-lg border border-gray-200 shadow-sm">
+          <table className="min-w-max w-full text-sm bg-white">
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Email</th>

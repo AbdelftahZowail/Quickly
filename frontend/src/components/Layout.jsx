@@ -27,7 +27,7 @@ function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
           });
         }}
       />
-      <div className={`${contentMargin} flex-1 bg-gray-50 text-gray-900`}
+      <div className={`${contentMargin} flex-1 min-w-0 bg-gray-50 text-gray-900`}
       >
         {!isProduction && <TestModeBanner />}
         {children}

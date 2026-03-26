@@ -438,12 +438,12 @@ export default function Leads() {
         </Card>
       )}
 
-      <Card className="overflow-auto">
+      <Card className="overflow-x-auto max-w-full min-w-0">
         <div className="px-4 py-2 text-sm text-gray-500 border-b border-gray-100">
           {leads.length} lead{leads.length !== 1 ? 's' : ''}
           {tab === TAB_BOUNCED ? ' (bounced or invalid)' : ''}
         </div>
-        <table className="w-full table-auto border-collapse text-sm">
+        <table className="min-w-max w-full table-auto border-collapse text-sm">
           <thead>
             <tr className="text-left text-gray-600 border-b">
               <th className="p-2 w-10">

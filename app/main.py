@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from app.client_ip import client_ip_from_request
 from app.database import init_db, db_url
 from app.settings_manager import settings
 from app.routers import inbox, leads, campaigns, test_mode
@@ -177,21 +178,8 @@ from slowapi.errors import RateLimitExceeded
 
 
 def _get_real_ip(request: Request) -> str:
-    """Return the real client IP, honouring Caddy's X-Real-IP header.
-
-    When the app runs behind the Caddy reverse proxy, ``request.client.host``
-    is Caddy's Docker-internal IP, not the browser/bot's address.  Caddy sets
-    ``X-Real-IP`` to the true remote address (configured in the Caddyfile), so
-    we prefer that.  Falling back to ``X-Forwarded-For`` and finally to the
-    direct client address ensures the function works in all environments.
-    """
-    real_ip = (
-        request.headers.get("X-Real-IP")
-        or request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
-    )
-    if real_ip:
-        return real_ip
-    return request.client.host if request.client else "unknown"
+    """Rate-limit key: client IP via common proxy/CDN headers, else the socket."""
+    return client_ip_from_request(request) or "unknown"
 
 
 limiter = Limiter(key_func=_get_real_ip, default_limits=["200/minute"])

@@ -30,19 +30,31 @@ from tests.conftest import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _req(x_real_ip: str | None = None, x_forwarded_for: str | None = None):
+def _req(
+    x_real_ip: str | None = None,
+    x_forwarded_for: str | None = None,
+    cf_connecting_ip: str | None = None,
+    client_host: str | None = None,
+):
     """Build a minimal fake Starlette Request-like object for the router functions."""
     raw_headers: dict[str, str] = {}
     if x_real_ip:
         raw_headers["X-Real-IP"] = x_real_ip
     if x_forwarded_for:
         raw_headers["X-Forwarded-For"] = x_forwarded_for
+    if cf_connecting_ip:
+        raw_headers["CF-Connecting-IP"] = cf_connecting_ip
 
     class _FakeHeaders:
         def get(self, key: str, default=None):
-            return raw_headers.get(key, default)
+            lk = key.lower()
+            for k, v in raw_headers.items():
+                if k.lower() == lk:
+                    return v
+            return default
 
-    return SimpleNamespace(headers=_FakeHeaders(), client=None)
+    client = SimpleNamespace(host=client_host) if client_host else None
+    return SimpleNamespace(headers=_FakeHeaders(), client=client)
 
 
 async def _noop_webhook(*args, **kwargs):
@@ -158,6 +170,27 @@ async def test_open_pixel_fires_webhook(session, monkeypatch):
     assert "email.opened" in events
 
 
+@pytest.mark.asyncio
+async def test_open_pixel_prefers_cf_connecting_ip(session, monkeypatch):
+    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session)
+    lead = await make_lead(session)
+    await make_campaign_lead(session, campaign.id, lead.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+
+    await open_pixel(
+        token=email_log.open_token or str(email_log.id),
+        request=_req(x_real_ip="10.0.0.1", cf_connecting_ip="203.0.113.9", client_host="10.0.0.2"),
+        db=session,
+    )
+
+    result = await session.execute(select(EmailOpen).where(EmailOpen.email_log_id == email_log.id))
+    open_row = result.scalar_one()
+    assert open_row.ip_address == "203.0.113.9"
+
+
 # ---------------------------------------------------------------------------
 # GET /c/{token} — click redirect
 # ---------------------------------------------------------------------------
@@ -221,6 +254,37 @@ async def test_click_redirect_records_email_click(session, monkeypatch):
     )
     click = result.scalar_one()
     assert click.ip_address == "9.9.9.9"
+
+
+@pytest.mark.asyncio
+async def test_click_redirect_prefers_cf_connecting_ip(session, monkeypatch):
+    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session)
+    lead = await make_lead(session)
+    await make_campaign_lead(session, campaign.id, lead.id)
+    email_log = await make_email_log(session, lead.id, campaign.id, inbox_id=inbox.id)
+
+    tracked = TrackedLink(
+        email_log_id=email_log.id,
+        token="click-token-cf",
+        original_url="https://example.com",
+    )
+    session.add(tracked)
+    await session.flush()
+
+    await click_redirect(
+        token="click-token-cf",
+        request=_req(x_real_ip="10.0.0.1", cf_connecting_ip="198.51.100.2", client_host="10.0.0.2"),
+        db=session,
+    )
+
+    result = await session.execute(
+        select(EmailClick).where(EmailClick.email_log_id == email_log.id)
+    )
+    click = result.scalar_one()
+    assert click.ip_address == "198.51.100.2"
 
 
 @pytest.mark.asyncio
