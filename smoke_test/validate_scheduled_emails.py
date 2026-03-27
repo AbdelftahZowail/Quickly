@@ -32,6 +32,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import AsyncSessionLocal
 from app.models import Campaign, Sequence, CampaignLead, QueueSlot, Inbox, EmailLog, CampaignInbox
+from app.queue_logic import compute_effective_daily_limit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,7 +99,7 @@ class ValidationResult:
     issues: List[ValidationIssue] = field(default_factory=list)
     passes: List[str] = field(default_factory=list)
     # Efficiency tracking
-    total_capacity: int = 0  # Sum of max_emails_per_day across all inbox-days
+    total_capacity: int = 0  # Sum of effective per-day limits across inbox-days (ramp-up aware)
     total_empty_slots: int = 0  # Unused capacity
     inbox_stats: Dict[str, Dict] = field(default_factory=dict)  # Per-inbox statistics
     
@@ -149,7 +150,12 @@ class ValidationResult:
                 inbox_eff = ((stats['capacity'] - stats['empty']) / stats['capacity']) * 100 if stats['capacity'] > 0 else 0
                 print(f"  {inbox_email}:")
                 print(f"    - Active days: {stats['days']}")
-                print(f"    - Capacity: {stats['capacity']} emails (max {stats['max_per_day']}/day)")
+                cap_detail = (
+                    f"ramp-up; ceiling {stats['max_per_day']}/day"
+                    if stats.get("ramp_up_enabled")
+                    else f"max {stats['max_per_day']}/day"
+                )
+                print(f"    - Capacity: {stats['capacity']} emails ({cap_detail})")
                 print(f"    - Scheduled: {stats['used']} emails")
                 print(f"    - Empty slots: {stats['empty']}")
                 print(f"    - Utilization: {inbox_eff:.1f}%")
@@ -433,9 +439,14 @@ class EmailScheduleValidator:
                         )
                         slots_on_ideal = count_result.scalar() or 0
                         inbox_result = await self.session.execute(
-                            select(Inbox.max_emails_per_day).where(Inbox.id == inbox_id)
+                            select(Inbox).where(Inbox.id == inbox_id)
                         )
-                        max_per_day = inbox_result.scalar() or 999
+                        inbox_row = inbox_result.scalar_one_or_none()
+                        max_per_day = (
+                            compute_effective_daily_limit(inbox_row, ideal_date)
+                            if inbox_row is not None
+                            else 999
+                        )
 
                         if slots_on_ideal < max_per_day:
                             # Inbox had capacity on the ideal date but slot was
@@ -497,23 +508,29 @@ class EmailScheduleValidator:
                 slot_date = slot.scheduled_date.date()
                 slots_by_date[slot_date].append(slot)
             
-            # Check each date against the limit
+            # Check each date against the effective limit (ramp-up aware)
             violating_days = 0
             max_overrun = 0
             for slot_date, day_slots in slots_by_date.items():
                 count = len(day_slots)
-                if count > inbox.max_emails_per_day:
+                effective = compute_effective_daily_limit(inbox, slot_date)
+                if count > effective:
                     violating_days += 1
-                    overrun = count - inbox.max_emails_per_day
+                    overrun = count - effective
                     if overrun > max_overrun:
                         max_overrun = overrun
 
             if violating_days:
+                limit_desc = (
+                    f"effective daily limit (ramp-up; ceiling {inbox.max_emails_per_day}/day)"
+                    if getattr(inbox, "ramp_up_enabled", False)
+                    else f"{inbox.max_emails_per_day} emails/day"
+                )
                 self.result.add_error(
                     'Inbox Daily Limit',
                     inbox.email,
                     'Multiple campaigns',
-                    f"{violating_days} day(s) exceed the {inbox.max_emails_per_day} emails/day limit. "
+                    f"{violating_days} day(s) exceed the {limit_desc}. "
                     f"Worst overrun: +{max_overrun} email(s)."
                 )
     
@@ -596,7 +613,9 @@ class EmailScheduleValidator:
             
             dates_with_emails = inbox_date_usage[inbox.id]
             active_days = len(dates_with_emails)
-            inbox_capacity = active_days * inbox.max_emails_per_day
+            inbox_capacity = sum(
+                compute_effective_daily_limit(inbox, d) for d in dates_with_emails
+            )
             inbox_used = sum(dates_with_emails.values())
             inbox_empty = inbox_capacity - inbox_used
             
@@ -609,7 +628,8 @@ class EmailScheduleValidator:
                 'capacity': inbox_capacity,
                 'used': inbox_used,
                 'empty': inbox_empty,
-                'max_per_day': inbox.max_emails_per_day
+                'max_per_day': inbox.max_emails_per_day,
+                'ramp_up_enabled': bool(getattr(inbox, "ramp_up_enabled", False)),
             }
         
         self.result.total_capacity = total_capacity
