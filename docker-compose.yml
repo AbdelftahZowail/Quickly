@@ -1,3 +1,5 @@
+name: quickly-caddy
+
 version: "3.9"
 
 services:
@@ -29,6 +31,10 @@ services:
       # override DATABASE_URL so users running compose don't have to edit
       # .env; it will point at the db container automatically.
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+      # Settings → Backup: save dumps under /app/backups (default folder name "backups")
+      QUICKLY_LOCAL_DISK_BACKUPS: "1"
+    volumes:
+      - ./backups:/app/backups
 
   caddy:
     image: caddy:alpine
@@ -46,3 +52,5 @@ services:
 
 volumes:
   pgdata:
+    external: true
+    name: quickly_pgdata

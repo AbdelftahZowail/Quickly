@@ -1,3 +1,5 @@
+name: quickly-nothost
+
 version: "3.9"
 
 # Same layout as docker-compose-not-host.dev.yml but production image (no bind
@@ -35,8 +37,10 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+      QUICKLY_LOCAL_DISK_BACKUPS: "1"
+    volumes:
+      - ./backups:/app/backups
 
-# Same volume as docker-compose-not-host.dev.yml (existing production data).
 volumes:
   pgdata:
     external: true

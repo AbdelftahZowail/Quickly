@@ -1,7 +1,11 @@
+import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 
 export default function Login() {
   const { setupComplete } = useAuth();
+  const [restoreFile, setRestoreFile] = useState(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
+  const [restoreMsg, setRestoreMsg] = useState(null);
 
   const isFirstUser = setupComplete === false;
 
@@ -58,9 +62,77 @@ export default function Login() {
         </div>
 
         {isFirstUser && (
-          <p className="text-center text-sm text-gray-500">
-            The first account created becomes the admin.
-          </p>
+          <>
+            <p className="text-center text-sm text-gray-500">
+              The first account created becomes the admin.
+            </p>
+
+            <div className="mt-10 pt-8 border-t border-gray-200 space-y-3">
+              <p className="text-center text-sm font-medium text-gray-800">
+                Want to restore from a backup?
+              </p>
+              <p className="text-xs text-center text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                Upload a PostgreSQL custom-format backup (<code className="text-[11px]">.dump</code>).
+                This replaces all data in the database. Only available before the first account exists.
+              </p>
+              <input
+                type="file"
+                accept=".dump,application/octet-stream"
+                className="block w-full text-xs text-gray-600"
+                disabled={restoreBusy}
+                onChange={e => {
+                  setRestoreMsg(null);
+                  setRestoreFile(e.target.files?.[0] || null);
+                }}
+              />
+              <button
+                type="button"
+                disabled={restoreBusy || !restoreFile}
+                className="w-full py-2 px-4 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                onClick={async () => {
+                  if (!restoreFile) return;
+                  if (!window.confirm('This will erase the current database and replace it with your backup. Continue?')) {
+                    return;
+                  }
+                  setRestoreBusy(true);
+                  setRestoreMsg(null);
+                  try {
+                    const form = new FormData();
+                    form.append('file', restoreFile);
+                    const res = await fetch('/api/auth/restore-setup', { method: 'POST', body: form });
+                    const text = await res.text();
+                    let data;
+                    try {
+                      data = JSON.parse(text);
+                    } catch {
+                      data = { detail: text || res.statusText };
+                    }
+                    if (!res.ok) {
+                      const d = data.detail;
+                      const errText = Array.isArray(d)
+                        ? d.map(x => (typeof x === 'string' ? x : x.msg || JSON.stringify(x))).join(' ')
+                        : (d || res.statusText);
+                      throw new Error(errText);
+                    }
+                    setRestoreMsg({ type: 'ok', text: data.detail || 'Restore complete. You can sign in below.' });
+                  } catch (e) {
+                    setRestoreMsg({ type: 'err', text: e.message || 'Restore failed' });
+                  } finally {
+                    setRestoreBusy(false);
+                  }
+                }}
+              >
+                {restoreBusy ? 'Restoring…' : 'Restore from backup file'}
+              </button>
+              {restoreMsg && (
+                <p
+                  className={`text-center text-xs ${restoreMsg.type === 'ok' ? 'text-green-700' : 'text-red-600'}`}
+                >
+                  {restoreMsg.text}
+                </p>
+              )}
+            </div>
+          </>
         )}
       </div>
     </div>

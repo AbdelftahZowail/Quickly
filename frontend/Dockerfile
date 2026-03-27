@@ -1,5 +1,5 @@
 # simple development Dockerfile for the React frontend
-FROM node:18-alpine
+FROM node:20-alpine
 WORKDIR /app
 
 # install dependencies once. volume mount will override node_modules

@@ -27,6 +27,7 @@ from app.routers import office365_oauth
 from app.routers import office365_webhook as office365_webhook_router
 from app.routers import schedule as schedule_router
 from app.routers import settings as settings_router
+from app.routers import backup as backup_router
 from app.routers import unibox as unibox_router
 from app.routers import tracking as tracking_router
 from app.routers import email_provider as email_provider_router
@@ -97,6 +98,10 @@ async def lifespan(app: FastAPI):
             max_instances=1,
         )
         schedule.start()
+
+        from app.backup_schedule import register_scheduled_backup_from_db
+
+        await register_scheduled_backup_from_db(schedule)
 
         # Perform a global recalculation on startup to ensure the queue reflects
         # any configuration changes that may have occurred while the server was down.
@@ -183,7 +188,7 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ---------------------------------------------------------------------------
-# Auth router (public endpoints: login, register, setup-status, refresh)
+# Auth router (public endpoints: login, register, setup-status, restore-setup, refresh)
 # ---------------------------------------------------------------------------
 from app.routers import auth as auth_router
 app.include_router(auth_router.router)
@@ -211,6 +216,7 @@ office365_oauth.router.dependencies = _auth_deps
 # so auth is NOT applied globally.  Management routes enforce auth individually.
 schedule_router.router.dependencies = _auth_deps
 settings_router.router.dependencies = _auth_deps
+backup_router.router.dependencies = _auth_deps
 unibox_router.router.dependencies = _auth_deps
 # tracking_router has public endpoints (open pixel, click redirect, unsubscribe)
 # so it does NOT get global auth — individual endpoints handle auth internally.
@@ -229,6 +235,7 @@ app.include_router(office365_oauth.callback_router)
 app.include_router(office365_webhook_router.router)
 app.include_router(schedule_router.router)
 app.include_router(settings_router.router)
+app.include_router(backup_router.router)
 app.include_router(unibox_router.router)
 app.include_router(tracking_router.router)
 app.include_router(notifications_router.router)

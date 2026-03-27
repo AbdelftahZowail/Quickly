@@ -1,0 +1,55 @@
+# Host Caddy (systemd) — do NOT copy Caddyfile or Caddyfile.dev from this repo for
+# /etc/caddy/Caddyfile: those use Docker service names (app:8000, backend:8000).
+#
+# Production Quickly (docker-compose-not-host.yml) publishes the app on host port 5050.
+# docker-compose-not-host.dev.yml: Vite on 5174 (browser entry), backend on 5051 / 8001.
+# On-demand TLS approval must hit production on 5050 only — never :5051 (dev).
+#
+# After editing:  sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+# Avoid loading config via :2019 unless you use --resume; reload overwrites API changes.
+
+{
+	on_demand_tls {
+		ask http://127.0.0.1:5050/api/caddy/ask
+	}
+}
+
+n8n.shortformfunnels.com {
+	reverse_proxy 127.0.0.1:5678
+	request_body {
+		max_size 100MB
+	}
+}
+
+db.shortformfunnels.com {
+	reverse_proxy 127.0.0.1:8080
+}
+
+process.shortformfunnels.com {
+	reverse_proxy 127.0.0.1:8081
+}
+
+quickly.shortformfunnels.com {
+	reverse_proxy 127.0.0.1:5050 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# Quickly dev (docker-compose-not-host.dev.yml) — Vite proxies /api and /oauth to backend.
+bt.shortformfunnels.com {
+	reverse_proxy 127.0.0.1:5174 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# Inbox custom tracking domains (CNAME → this server). Certificates: on_demand, approved
+# only by production Quickly on 5050 (see global ask above). Other hostnames match blocks above first.
+:443 {
+	tls {
+		on_demand
+	}
+	reverse_proxy 127.0.0.1:5050 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}

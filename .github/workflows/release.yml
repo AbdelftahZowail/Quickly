@@ -138,7 +138,7 @@ jobs:
         with:
           tag: ${{ steps.tagger.outputs.TAG }}
           name: ${{ steps.tagger.outputs.TAG }}
-          artifacts: "docker-compose.yml,.env.example,Caddyfile"
+          artifacts: "docker-compose.yml,docker-compose-not-host.yml,.env.example,Caddyfile"
           artifactErrorsFailBuild: true
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           prerelease: false
@@ -157,8 +157,11 @@ jobs:
 
             Requires Docker and a domain pointed at your server.
 
+            **Self-hosted VPS** (Docker Compose: Postgres + Quickly + Caddy in Docker):
+
             ```bash
             mkdir quickly && cd quickly
+            docker volume create quickly_pgdata
             curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
             curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
             curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
@@ -166,6 +169,8 @@ jobs:
             # Edit .env — set CADDY_HOST, BASE_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
             docker compose up -d
             ```
+
+            **Already using Caddy on the server?** Download `docker-compose-not-host.yml` instead of `docker-compose.yml` (no Caddyfile in Docker). Point your host Caddy at `127.0.0.1:5050`. See [INSTALL.md](https://github.com/azowail/quickly/blob/main/docs/INSTALL.md).
 
             Caddy handles HTTPS automatically with Let's Encrypt. Open `https://yourdomain.com`.
 
