@@ -1,7 +1,7 @@
 """Inbox API routes."""
 import logging
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, exists, update as sa_update
 
@@ -139,7 +139,12 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{inbox_id}", response_model=InboxResponse)
-async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depends(get_db)):
+async def update_inbox(
+    inbox_id: int,
+    data: InboxUpdate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
     inbox = result.scalar_one_or_none()
     if not inbox:
@@ -197,16 +202,24 @@ async def update_inbox(inbox_id: int, data: InboxUpdate, db: AsyncSession = Depe
         )
         campaign_ids = [cid for (cid,) in campaign_result.all()]
         log.info("Inbox %s capacity changed; campaigns touched %s", inbox_id, campaign_ids)
-        from app.routers.schedule import recalculate_all_campaigns
-        await recalculate_all_campaigns(db)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
     await db.refresh(inbox)
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     await _maybe_complete_ramp_up(inbox, db)
+    await db.commit()
     return inbox
 
 
 @router.post("/{inbox_id}/pause", response_model=InboxResponse)
-async def pause_inbox(inbox_id: int, body: PauseInboxRequest, db: AsyncSession = Depends(get_db)):
+async def pause_inbox(
+    inbox_id: int,
+    body: PauseInboxRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """Pause an inbox. Choose what happens to leads currently assigned to it:
     - action='pause_leads': set sending_paused=True on all affected CampaignLeads.
     - action='reassign': pause and run a full recalculation so remaining inboxes
@@ -252,18 +265,25 @@ async def pause_inbox(inbox_id: int, body: PauseInboxRequest, db: AsyncSession =
     elif body.action == "reassign":
         # Full recalculation: the scheduler rebuilds slots across all active
         # inboxes, automatically excluding the now-paused one.
-        from app.routers.schedule import recalculate_all_campaigns
-        await recalculate_all_campaigns(db)
-        log.info("pause_inbox: inbox=%s slots redistributed via recalculation", inbox_id)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
+        log.info("pause_inbox: inbox=%s slots redistributed via recalculation (queued)", inbox_id)
 
     await db.refresh(inbox)
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     inbox.sent_today = 0
+    await db.commit()
     return inbox
 
 
 @router.post("/{inbox_id}/unpause", response_model=InboxResponse)
-async def unpause_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
+async def unpause_inbox(
+    inbox_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """Resume a paused inbox.
 
     Also un-pauses any CampaignLeads that were paused because of this inbox
@@ -298,13 +318,16 @@ async def unpause_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
         )
 
     # Rebuild queue slots for the now-active inbox
-    from app.routers.schedule import recalculate_all_campaigns
-    await recalculate_all_campaigns(db)
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+
+    enqueue_global_recalculate(background_tasks)
 
     await db.refresh(inbox)
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     inbox.sent_today = 0
     log.info("unpause_inbox: inbox=%s resumed and queue recalculated", inbox_id)
+    await db.commit()
     return inbox
 
 

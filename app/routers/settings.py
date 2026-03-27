@@ -431,24 +431,9 @@ async def set_scheduling_strategy_endpoint(
         # recalculation sees the new value.
         await db.commit()
 
-        # schedule recalculation by POSTing to the public endpoint
-        # `/api/schedule/recalculate-all`.  This mirrors the startup logic in
-        # ``app.main`` and ensures any middleware or side effects run through
-        # the normal request machinery.  We do not wait for the request to
-        # complete before returning to the caller.
-        from httpx import AsyncClient, ASGITransport
-        from app.main import app
+        from app.routers.schedule import run_recalculate_all_in_new_session
 
-        async def _bg_recalc():
-            try:
-                transport = ASGITransport(app=app)
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.post("/api/schedule/recalculate-all")
-                    resp.raise_for_status()
-            except Exception:
-                log.exception("background recalculation via endpoint failed")
-
-        background_tasks.add_task(_bg_recalc)
+        background_tasks.add_task(run_recalculate_all_in_new_session)
 
         return {"ok": True, "scheduling_strategy": payload.scheduling_strategy}
     except ValueError as e:

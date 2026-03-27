@@ -6,7 +6,7 @@ import json
 import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -308,7 +308,12 @@ async def _after_lead_recovered(db: AsyncSession, lead_id: int) -> None:
     await _reset_all_enrollments_for_lead(db, lead_id)
 
 
-async def _finalize_lead_recovery(db: AsyncSession, lead_ids: list[int], verify: bool) -> None:
+async def _finalize_lead_recovery(
+    db: AsyncSession,
+    lead_ids: list[int],
+    verify: bool,
+    background_tasks: BackgroundTasks,
+) -> None:
     if not lead_ids:
         return
     if verify:
@@ -316,9 +321,10 @@ async def _finalize_lead_recovery(db: AsyncSession, lead_ids: list[int], verify:
 
         asyncio.create_task(_run_background_verification(lead_ids))
     else:
-        from app.routers.schedule import recalculate_all_campaigns
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
 
-        await recalculate_all_campaigns(db)
+        enqueue_global_recalculate(background_tasks)
 
 
 @router.get("", response_model=list[LeadResponse])
@@ -425,6 +431,7 @@ async def export_leads_csv(
 @router.post("/bulk-delete")
 async def bulk_delete_leads(
     body: LeadBulkDeleteRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     if not body.lead_ids:
@@ -447,19 +454,21 @@ async def bulk_delete_leads(
         deleted += 1
 
     if all_campaign_ids:
-        from app.routers.schedule import recalculate_all_campaigns
-
         log.info(
             "bulk_delete_leads: deleted %d lead(s); recalc (campaigns touched)",
             deleted,
         )
-        await recalculate_all_campaigns(db)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
     return {"ok": True, "deleted": deleted}
 
 
 @router.post("/bulk-status")
 async def bulk_update_lead_status(
     body: LeadBulkStatusRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     if not body.lead_ids:
@@ -476,15 +485,17 @@ async def bulk_update_lead_status(
                 updated += 1
     await db.flush()
     if changed:
-        from app.routers.schedule import recalculate_all_campaigns
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
 
-        await recalculate_all_campaigns(db)
+        enqueue_global_recalculate(background_tasks)
     return {"ok": True, "updated": updated}
 
 
 @router.post("/bulk-recover")
 async def bulk_recover_leads(
     body: LeadBulkRecoverRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Recover many leads: one verification batch or one queue recalculation."""
@@ -527,12 +538,13 @@ async def bulk_recover_leads(
         recovered_ids.append(lead_id)
 
     await db.flush()
-    await _finalize_lead_recovery(db, recovered_ids, verify)
+    await _finalize_lead_recovery(db, recovered_ids, verify, background_tasks)
     return {"recovered": len(recovered_ids), "errors": errors, "recovered_ids": recovered_ids}
 
 
 @router.post("/recover-import")
 async def import_recover_csv(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     verify_emails: bool = Query(True),
     db: AsyncSession = Depends(get_db),
@@ -581,7 +593,7 @@ async def import_recover_csv(
         raise HTTPException(400, "No valid id,email rows found")
 
     bulk_body = LeadBulkRecoverRequest(items=items, verify_email=verify_emails)
-    return await bulk_recover_leads(bulk_body, db)
+    return await bulk_recover_leads(bulk_body, background_tasks, db)
 
 
 @router.post("", response_model=LeadResponse)
@@ -625,7 +637,12 @@ async def get_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{lead_id}", response_model=LeadResponse)
-async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends(get_db)):
+async def update_lead(
+    lead_id: int,
+    data: LeadUpdate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(Lead).where(Lead.id == lead_id))
     lead = result.scalar_one_or_none()
     if not lead:
@@ -645,19 +662,23 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
     await db.flush()
 
     if enrollment_changed:
-        from app.routers.schedule import recalculate_all_campaigns
-
         log.info(
             "Lead %s enrollment_status bulk-updated; triggering full recalculation",
             lead_id,
         )
-        await recalculate_all_campaigns(db)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
 
     result2 = await db.execute(
         _lead_query_with_campaigns().where(Lead.id == lead_id),
     )
     lead_loaded = result2.scalar_one()
     opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
+    # End read transaction so a queued global recalc (separate session on
+    # SQLite StaticPool) is not blocked waiting for this connection.
+    await db.commit()
     return _lead_to_response(lead_loaded, opened, clicked, replied)
 
 
@@ -665,6 +686,7 @@ async def update_lead(lead_id: int, data: LeadUpdate, db: AsyncSession = Depends
 async def recover_lead(
     lead_id: int,
     body: LeadRecoverRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -696,18 +718,23 @@ async def recover_lead(
     await _mutate_lead_recover(lead, norm, verify)
     await _after_lead_recovered(db, lead_id)
     await db.flush()
-    await _finalize_lead_recovery(db, [lead_id], verify)
+    await _finalize_lead_recovery(db, [lead_id], verify, background_tasks)
 
     result3 = await db.execute(
         _lead_query_with_campaigns().where(Lead.id == lead_id),
     )
     lead_out = result3.scalar_one()
     opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
+    await db.commit()
     return _lead_to_response(lead_out, opened, clicked, replied)
 
 
 @router.delete("/{lead_id}")
-async def delete_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_lead(
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(select(Lead).where(Lead.id == lead_id))
     lead = result.scalar_one_or_none()
     if not lead:
@@ -721,14 +748,15 @@ async def delete_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(lead)
 
     if campaign_ids:
-        from app.routers.schedule import recalculate_all_campaigns
-
         log.info(
             "Lead %s deleted (campaigns=%s); triggering full recalculation",
             lead_id,
             campaign_ids,
         )
-        await recalculate_all_campaigns(db)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
     return {"ok": True}
 
 

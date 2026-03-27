@@ -300,14 +300,35 @@ export default function Schedule() {
   };
   const recalculateAll = async () => {
     setRecalcState({ busy: true, text: '⚡ Recalculating...' });
+    const baselineStats = await api.get('/schedule/stats').catch(() => ({}));
     try {
       const res = await fetch('/api/schedule/recalculate-all',{method:'POST'});
       if (res.ok) {
         const data = await res.json();
         const stratLabel = strategy==='priority'?'Priority':'Round-Robin';
-        const message = `✓ Done! [${stratLabel}] (${data.campaigns_processed} campaigns, ${data.total_slots} slots)`;
-        setRecalcState({ busy: true, text: message });
-        setTimeout(loadData,100);
+        if (data.accepted) {
+          setRecalcState({ busy: true, text: '⚡ Recalculation running…' });
+          // Server sets global_recalc_finished_at when the job completes; polling
+          // slot counts is unreliable (same total as before, or no visible "empty" window).
+          const baselineToken = baselineStats?.global_recalc_finished_at ?? null;
+          const deadline = Date.now() + 120000;
+          for (let i = 0; Date.now() < deadline; i++) {
+            const delay = i < 30 ? 350 : 1000;
+            await new Promise(r => setTimeout(r, delay));
+            await loadData();
+            const st = await api.get('/schedule/stats').catch(() => ({}));
+            const t = st.global_recalc_finished_at;
+            if (t != null && t !== baselineToken) break;
+          }
+          await loadData();
+          const finalStats = await api.get('/schedule/stats').catch(() => ({}));
+          const message = `✓ Done! [${stratLabel}] (${finalStats.total_campaigns ?? '—'} campaigns, ${finalStats.total_scheduled ?? '—'} scheduled)`;
+          setRecalcState({ busy: true, text: message });
+        } else {
+          const message = `✓ Done! [${stratLabel}] (${data.campaigns_processed} campaigns, ${data.total_slots} slots)`;
+          setRecalcState({ busy: true, text: message });
+          setTimeout(loadData, 100);
+        }
       } else {
         const t = await res.text();
         notify({ type: 'error', message: 'Error recalculating: ' + t });

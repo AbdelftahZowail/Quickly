@@ -853,7 +853,18 @@ All upcoming queue slots across all campaigns.
 
 Quick summary counts.
 
-**Response:** `{ "total_sent": 500, "total_scheduled": 200, "total_campaigns": 5 }`
+**Response:**
+
+```json
+{
+  "total_sent": 500,
+  "total_scheduled": 200,
+  "total_campaigns": 5,
+  "global_recalc_finished_at": "2026-03-26T12:00:00+00:00"
+}
+```
+
+`global_recalc_finished_at` is an ISO-8601 UTC timestamp written when the last **global** queue recalculation finished successfully (`null` until the first run). The Schedule page uses it to detect async recalc completion without guessing from slot counts.
 
 ### `POST /api/schedule/sent/{log_id}/open`
 
@@ -888,7 +899,22 @@ Run validation checks on all scheduled emails. Reports issues like slots assigne
 
 Full queue rebuild across all campaigns using the active scheduling strategy.
 
-**Response:** `{ "ok": true, "strategy": "priority", "campaigns_processed": 5, "total_slots": 800 }`
+**Default (async):** Returns immediately after enqueueing work. The HTTP handler does not wait for the rebuild to finish.
+
+```json
+{ "ok": true, "accepted": true }
+```
+
+**Synchronous rebuild:** Use query `?sync=true` when the caller must wait for completion (tests, scripts, debugging). Response includes full stats:
+
+```json
+{
+  "ok": true,
+  "strategy": "priority",
+  "campaigns_processed": 5,
+  "total_slots": 800
+}
+```
 
 ---
 

@@ -1,13 +1,14 @@
 """Global schedule API — all sent + scheduled emails across all campaigns."""
 import logging
 import os
-from datetime import timedelta
-from fastapi import APIRouter, Depends, Query, HTTPException
+from datetime import datetime, timedelta, timezone
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, HTTPException
 from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased, selectinload
 from pathlib import Path
 
+from app import database as _app_db
 from app.database import get_db
 from app.campaign_lead_status import campaign_lead_schedule_eligibility_clause
 from app.models import (
@@ -16,12 +17,48 @@ from app.models import (
 )
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app import time as time_provider
-from app.app_settings import get_scheduling_strategy
+from app.app_settings import (
+    get_scheduling_strategy,
+    get_setting,
+    put_setting,
+    GLOBAL_RECALC_FINISHED_AT_KEY,
+)
 from smoke_test.validate_scheduled_emails import EmailScheduleValidator
 
 log = logging.getLogger("quickly.schedule")
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
+
+
+async def run_recalculate_all_in_new_session() -> None:
+    """Run a full global recalculate in a fresh session (for background tasks).
+
+    Do not use a module-level asyncio.Lock: pytest-asyncio may use a different
+    event loop per test, which leaves a process-global lock unusable and causes
+    hangs. Production overlap is rare; callers already commit before enqueue.
+    """
+    async with _app_db.AsyncSessionLocal() as session:
+        try:
+            await recalculate_all_campaigns(session)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            log.exception("run_recalculate_all_in_new_session failed")
+
+
+def enqueue_global_recalculate(background_tasks: BackgroundTasks) -> None:
+    """Queue a global recalculate to run after the response is sent."""
+    background_tasks.add_task(run_recalculate_all_in_new_session)
+
+
+async def _record_global_recalc_finished(db: AsyncSession) -> None:
+    """Persist a fresh timestamp so clients can detect async recalc completion."""
+    await put_setting(
+        db,
+        GLOBAL_RECALC_FINISHED_AT_KEY,
+        datetime.now(timezone.utc).isoformat(),
+    )
+    await db.flush()
 
 
 def _utc_iso(dt) -> "str | None":
@@ -305,10 +342,12 @@ async def global_stats(db: AsyncSession = Depends(get_db)):
     sent_count = await db.execute(select(func.count(EmailLog.id)))
     scheduled_count = await db.execute(select(func.count(QueueSlot.id)))
     campaign_count = await db.execute(select(func.count(Campaign.id)))
+    finished_at = await get_setting(db, GLOBAL_RECALC_FINISHED_AT_KEY)
     return {
         "total_sent": sent_count.scalar() or 0,
         "total_scheduled": scheduled_count.scalar() or 0,
         "total_campaigns": campaign_count.scalar() or 0,
+        "global_recalc_finished_at": finished_at,
     }
 
 
@@ -434,9 +473,11 @@ async def order_campaign_leads_prioritizing_partials(
     return [cl.id for cl in ordered]
 
 
-@router.post("/recalculate-all")
-async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
+async def recalculate_all_campaigns(db: AsyncSession) -> dict:
     """Recalculate queue slots for all campaigns while preserving inbox assignments.
+
+    Callers: send job (await inline), HTTP ``sync=true``, smoke tests, or
+    :func:`run_recalculate_all_in_new_session` for deferred runs.
 
     Dispatches to the correct scheduling strategy:
     - **priority** (default): campaigns are processed in ascending ``priority`` order;
@@ -461,6 +502,7 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
 
     if not campaigns:
         log.warning("recalculate_all_campaigns: no campaigns found")
+        await _record_global_recalc_finished(db)
         return {"ok": True, "campaigns_processed": 0, "total_slots": 0, "initial_slots": initial_slots,
                 "strategy": strategy}
 
@@ -497,6 +539,7 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
         campaigns_processed = len(campaigns)
         slot_count = await db.execute(select(func.count(QueueSlot.id)))
         total_slots = slot_count.scalar() or 0
+        await _record_global_recalc_finished(db)
         return {"ok": True, "campaigns_processed": campaigns_processed, "initial_slots": initial_slots,
                 "total_slots": total_slots, "strategy": strategy}
 
@@ -534,6 +577,7 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
         "recalculate_all_campaigns: completed — strategy=%s, processed %d campaigns, %d -> %d slots",
         strategy, campaigns_processed, initial_slots, total_slots,
     )
+    await _record_global_recalc_finished(db)
     return {
         "ok": True,
         "strategy": strategy,
@@ -541,6 +585,24 @@ async def recalculate_all_campaigns(db: AsyncSession = Depends(get_db)):
         "initial_slots": initial_slots,
         "total_slots": total_slots,
     }
+
+
+@router.post("/recalculate-all")
+async def recalculate_all_endpoint(
+    background_tasks: BackgroundTasks,
+    sync: bool = Query(
+        False,
+        description="If true, run inline and return full stats (tests / startup). "
+        "Default defers work until after the response.",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """Queue a global recalculate by default; use ``sync=true`` to block until done."""
+    if sync:
+        return await recalculate_all_campaigns(db)
+    enqueue_global_recalculate(background_tasks)
+    return {"ok": True, "accepted": True}
+
 
 @router.post("/validate-queue")
 async def validate_queue(db: AsyncSession = Depends(get_db)):

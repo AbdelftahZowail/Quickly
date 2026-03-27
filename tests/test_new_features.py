@@ -11,6 +11,7 @@ import io
 import pytest
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
+from fastapi import BackgroundTasks
 
 from sqlalchemy import select
 
@@ -178,7 +179,9 @@ async def test_update_inbox_disables_ramp_up(session):
     await session.flush()
 
     data = InboxUpdate(ramp_up_enabled=False)
-    result = await inbox_router.update_inbox(inbox.id, data, db=session)
+    result = await inbox_router.update_inbox(
+        inbox.id, data, BackgroundTasks(), db=session
+    )
     assert result.ramp_up_enabled is False
     assert result.effective_max_per_day == 20
 
@@ -202,7 +205,9 @@ async def test_update_inbox_preserves_ramp_up_start_when_already_enabled(session
     orig_started = inbox.ramp_up_started_at
 
     data = InboxUpdate(ramp_up_enabled=True, display_name="Renamed")
-    await inbox_router.update_inbox(inbox.id, data, db=session)
+    await inbox_router.update_inbox(
+        inbox.id, data, BackgroundTasks(), db=session
+    )
     await session.refresh(inbox)
     assert inbox.ramp_up_started_at == orig_started
 
@@ -391,7 +396,11 @@ async def test_patch_campaign_lead_unsubscribed_accepted(session):
     from app.routers.campaigns import patch_campaign_lead
 
     payload = CampaignLeadEnrollmentPatch(status="unsubscribed")
-    result = await patch_campaign_lead(campaign.id, lead.id, payload, db=session)
+    bg = BackgroundTasks()
+    result = await patch_campaign_lead(
+        campaign.id, lead.id, payload, background_tasks=bg, db=session
+    )
+    await bg()
     assert result["status"] == "unsubscribed"
 
 
@@ -409,7 +418,9 @@ async def test_patch_campaign_lead_invalid_status_rejected(session):
 
     payload = CampaignLeadEnrollmentPatch(interest="nonsense_value")
     with pytest.raises(fastapi.HTTPException) as exc:
-        await patch_campaign_lead(campaign.id, lead.id, payload, db=session)
+        await patch_campaign_lead(
+            campaign.id, lead.id, payload, background_tasks=BackgroundTasks(), db=session
+        )
     assert exc.value.status_code == 400
 
 
@@ -630,7 +641,9 @@ async def test_update_campaign_name(session):
     from app.schemas import CampaignUpdate
 
     data = CampaignUpdate(name="New Name")
-    result = await update_campaign(campaign.id, data, db=session)
+    result = await update_campaign(
+        campaign.id, data, background_tasks=BackgroundTasks(), db=session
+    )
     assert result.name == "New Name"
 
 
@@ -649,6 +662,7 @@ async def test_create_and_list_sequences(session):
         await create_sequence(
             campaign.id,
             SequenceCreate(position=pos, subject=subject, body="body"),
+            background_tasks=BackgroundTasks(),
             db=session,
         )
 
