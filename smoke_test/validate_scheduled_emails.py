@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import asyncio
 import logging
+import math
 from datetime import datetime, date, time, timedelta
 from typing import List, Dict, Optional, Set, Tuple
 from dataclasses import dataclass, field
@@ -37,6 +38,46 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 log = logging.getLogger(__name__)
+
+
+def looks_uniform_random(values, n):
+    """
+    values : list of ints in range 1..n
+    n      : max value
+
+    returns True if distribution looks uniform, False otherwise
+    """
+
+    m = len(values)
+    if m < 5:
+        return False  # too small to judge
+
+    # automatic bins
+    bins = min(n, max(5, int(math.sqrt(m))))
+
+    counts = [0] * bins
+    bin_width = n / bins
+
+    # fill bins
+    for v in values:
+        if v < 1 or v > n:
+            return False
+        idx = min(int((v - 1) / bin_width), bins - 1)
+        counts[idx] += 1
+
+    expected = m / bins
+
+    # chi-square
+    chi2 = sum((c - expected) ** 2 / expected for c in counts)
+
+    # degrees of freedom
+    df = bins - 1
+
+    # fast threshold approximation
+    # chi-square approx: df ± sqrt(2*df)
+    lower = df - 2 * math.sqrt(2 * df)
+    upper = df + 2 * math.sqrt(2 * df)
+    return lower <= chi2 <= upper
 
 
 @dataclass
@@ -595,15 +636,13 @@ class EmailScheduleValidator:
         For each inbox with max_jitter_seconds > 0 the jitter on a slot is
         recovered by subtracting the minimum inter-send gap
         (wait_minutes_between * 60 s) from the actual gap between consecutive
-        same-day slots.  Because jitter is drawn from a uniform [0, max_jitter_s]
-        distribution its expected average is max_jitter_seconds / 2.  A WARNING
-        is raised when the observed mean deviates from that expectation by more
-        than 10 seconds.
+        same-day slots.  Samples are discretized to integers 1..n (n =
+        max_jitter_seconds) and tested with a chi-square style uniformity check
+        (``looks_uniform_random``).
 
-        At least 10 same-day consecutive pairs are required before the check
-        fires; with fewer samples the variance is too large to be meaningful.
+        Gaps outside [0, max_jitter + slack] are excluded.  Fewer than five
+        samples skips the check; the uniformity helper also requires m >= 5.
         """
-        MIN_SAMPLES = 10
         TOLERANCE_SECONDS = 10.0
 
         inboxes_query = select(Inbox)
@@ -614,8 +653,11 @@ class EmailScheduleValidator:
             if not max_jitter or max_jitter <= 0:
                 continue  # Jitter disabled for this inbox
 
+            n = int(max_jitter)
+            if n < 1:
+                continue
+
             min_gap_seconds = inbox.wait_minutes_between * 60
-            expected_avg = max_jitter / 2.0
 
             # Fetch all slots ordered by time so same-day pairs are consecutive
             slots_query = (
@@ -648,29 +690,37 @@ class EmailScheduleValidator:
                     if 0.0 <= extracted <= max_jitter + TOLERANCE_SECONDS:
                         jitter_samples.append(extracted)
 
-            if len(jitter_samples) < MIN_SAMPLES:
-                continue  # Not enough data to draw a conclusion
+            if len(jitter_samples) < 5:
+                continue  # Not enough data (looks_uniform_random needs m >= 5)
 
-            avg_jitter = sum(jitter_samples) / len(jitter_samples)
-            deviation = abs(avg_jitter - expected_avg)
+            # Map U[0, max_jitter] to integers 1..n for uniformity test
+            values: List[int] = []
+            mj = float(max_jitter)
+            for x in jitter_samples:
+                xc = min(float(x), mj)
+                if xc <= 0:
+                    values.append(1)
+                elif xc >= mj:
+                    values.append(n)
+                else:
+                    b = int(xc / mj * n) + 1
+                    values.append(min(n, max(1, b)))
 
-            if deviation > TOLERANCE_SECONDS:
+            if not looks_uniform_random(values, n):
                 self.result.add_warning(
                     'Jitter Distribution',
                     inbox.email,
                     'Multiple campaigns',
-                    f"Average extracted jitter is {avg_jitter:.1f}s but expected "
-                    f"~{expected_avg:.1f}s (half of max_jitter_seconds={max_jitter}s). "
-                    f"Deviation: {deviation:.1f}s (tolerance: ±{TOLERANCE_SECONDS:.0f}s). "
-                    f"Sampled from {len(jitter_samples)} consecutive same-day slot pairs."
+                    f"Discretized jitter (1..n={n}) does not look uniformly random "
+                    f"(chi-square band check). max_jitter_seconds={max_jitter}. "
+                    f"{len(jitter_samples)} consecutive same-day slot pairs."
                 )
             else:
                 self.result.add_pass(
                     'Jitter Distribution',
                     inbox.email,
-                    f"avg jitter {avg_jitter:.1f}s ≈ expected {expected_avg:.1f}s "
-                    f"(deviation {deviation:.1f}s ≤ ±{TOLERANCE_SECONDS:.0f}s, "
-                    f"{len(jitter_samples)} samples)"
+                    f"jitter distribution looks uniform on 1..{n} "
+                    f"({len(jitter_samples)} samples)"
                 )
 
     # ========================================================================

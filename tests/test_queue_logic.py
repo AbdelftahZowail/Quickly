@@ -11,6 +11,7 @@ import pytest
 from datetime import datetime, date, time, timedelta
 from sqlalchemy import select, func, delete
 import inspect
+from fastapi import BackgroundTasks
 
 from app.models import QueueSlot, EmailLog, EmailClick, CampaignLead, Lead, LeadUnsubscribeToken
 from app.queue_logic import (
@@ -1303,14 +1304,22 @@ class TestApiRecalculationTriggers:
         assert cnt.scalar() == 1
 
         # pause the campaign (should clear the slot)
-        await update_campaign(campaign.id, CampaignUpdate(paused=True), db=session)
+        bg = BackgroundTasks()
+        await update_campaign(
+            campaign.id, CampaignUpdate(paused=True), background_tasks=bg, db=session
+        )
+        await bg()
         cnt2 = await session.execute(
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
         )
         assert cnt2.scalar() == 0
 
         # unpause should recompute and add the slot back
-        await update_campaign(campaign.id, CampaignUpdate(paused=False), db=session)
+        bg2 = BackgroundTasks()
+        await update_campaign(
+            campaign.id, CampaignUpdate(paused=False), background_tasks=bg2, db=session
+        )
+        await bg2()
         cnt3 = await session.execute(
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
         )
@@ -1355,7 +1364,14 @@ class TestApiRecalculationTriggers:
         assert cnt.scalar() == 1
 
         # change status to unsubscribed
-        await update_lead(lead.id, LeadUpdate(enrollment_status="unsubscribed"), db=session)
+        bg = BackgroundTasks()
+        await update_lead(
+            lead.id,
+            LeadUpdate(enrollment_status="unsubscribed"),
+            background_tasks=bg,
+            db=session,
+        )
+        await bg()
         cnt2 = await session.execute(
             select(func.count(QueueSlot.id)).where(QueueSlot.campaign_lead_id == cl.id)
         )
@@ -1383,7 +1399,9 @@ class TestApiRecalculationTriggers:
 
         # delete the first lead; after a full recalculation the remaining
         # lead should be scheduled earlier than the original March 3 date
-        await delete_lead(lead1.id, db=session)
+        bg = BackgroundTasks()
+        await delete_lead(lead1.id, background_tasks=bg, db=session)
+        await bg()
         slots2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id))
         new_date = slots2.scalars().one().scheduled_date.date()
         assert new_date < date(2026,3,10)
@@ -1411,13 +1429,17 @@ class TestApiRecalculationTriggers:
 
 
         # bump inbox capacity and update via router
-        await update_inbox(inbox.id, InboxUpdate(max_emails_per_day=2), db=session)
+        bg = BackgroundTasks()
+        await update_inbox(
+            inbox.id, InboxUpdate(max_emails_per_day=2), background_tasks=bg, db=session
+        )
+        await bg()
         slot2b = await session.execute(
             select(QueueSlot).where(QueueSlot.campaign_lead_id == cl2.id)
         )
         new_date = slot2b.scalars().one().scheduled_date.date()
-                # should have moved earlier than the original March 10 slot
-        assert new_date < date(2026,3,10)
+        # should have moved earlier than the original March 10 slot
+        assert new_date < date(2026, 3, 10)
 
 
 
@@ -1433,7 +1455,11 @@ class TestApiRecalculationTriggers:
         cnt = await session.execute(select(func.count(QueueSlot.id)))
         assert cnt.scalar() == 1
         # add another sequence via router
-        await create_sequence(campaign.id, SequenceCreate(position=1, body="x"), db=session)
+        bg = BackgroundTasks()
+        await create_sequence(
+            campaign.id, SequenceCreate(position=1, body="x"), background_tasks=bg, db=session
+        )
+        await bg()
         cnt2 = await session.execute(select(func.count(QueueSlot.id)))
         assert cnt2.scalar() == 2
 
@@ -1448,7 +1474,9 @@ class TestApiRecalculationTriggers:
         cnt = await session.execute(select(func.count(QueueSlot.id)))
         assert cnt.scalar() == 3
         # delete middle sequence
-        await delete_sequence(campaign.id, 1, db=session)
+        bg = BackgroundTasks()
+        await delete_sequence(campaign.id, 1, background_tasks=bg, db=session)
+        await bg()
         cnt2 = await session.execute(select(func.count(QueueSlot.id)))
         assert cnt2.scalar() == 2
 
@@ -1477,7 +1505,13 @@ class TestApiRecalculationTriggers:
         date_b = slot_b.scalars().one().scheduled_date.date()
         assert date_b > date_a
         # now swap priority via reorder API
-        await reorder_campaigns(CampaignReorder(campaign_ids=[camp_b.id, camp_a.id]), db=session)
+        bg = BackgroundTasks()
+        await reorder_campaigns(
+            CampaignReorder(campaign_ids=[camp_b.id, camp_a.id]),
+            background_tasks=bg,
+            db=session,
+        )
+        await bg()
         # after recalculation b should now be scheduled before a
         slot_a2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_a.id))
         slot_b2 = await session.execute(select(QueueSlot).where(QueueSlot.campaign_lead_id == cl_b.id))

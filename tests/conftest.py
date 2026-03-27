@@ -18,6 +18,7 @@ os.environ.setdefault("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:?cache=s
 # helpers have been removed.
 
 import contextlib
+import uuid
 
 import pytest
 import pytest_asyncio
@@ -56,12 +57,10 @@ async def engine():
     """Create a database engine for tests.
 
     If ``TEST_DATABASE_URL`` is defined, use it.  Otherwise fall back to an
-    in-memory SQLite database with a ``StaticPool`` so that the entire test
-    suite can be run without a Postgres server.  This keeps local development
-    easy while production remains Postgres-only.
+    in-memory SQLite database (shared cache, small connection pool) so the
+    entire test suite can be run without a Postgres server.
     """
     from app.settings_manager import settings
-    from sqlalchemy.pool import StaticPool
     from sqlalchemy.exc import OperationalError
 
     url = os.getenv("TEST_DATABASE_URL") or settings.database_url
@@ -81,25 +80,30 @@ async def engine():
             eng = None
 
     if eng is None:
-        # default in-memory sqlite with static pool
+        # Shared in-memory SQLite with multiple pooled connections. StaticPool
+        # uses a single connection; tests that run global recalc in AsyncSessionLocal
+        # while holding a test session would otherwise block each other on SQLite.
+        from sqlalchemy.pool import AsyncAdaptedQueuePool
+
+        # Named shared-cache DB so every pooled connection shares one schema.
+        # ``:memory:?cache=shared`` alone does not reliably attach all pool
+        # connections to the same database, which breaks background sessions.
+        _mem = uuid.uuid4().hex
         eng = create_async_engine(
-            "sqlite+aiosqlite:///:memory:?cache=shared",
+            f"sqlite+aiosqlite:///file:qtest_{_mem}?mode=memory&cache=shared",
             echo=False,
-            connect_args={"check_same_thread": False, "uri": True},
-            poolclass=StaticPool,
+            connect_args={"check_same_thread": False, "uri": True, "timeout": 30.0},
+            poolclass=AsyncAdaptedQueuePool,
+            pool_size=5,
+            max_overflow=10,
         )
         async with eng.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
 
-    # install listener for any sqlite engine so that new threads/connections
-    # will also have the tables.  the listener uses the sync_engine since
-    # metadata.create_all requires a sync connection.
-    if eng.dialect.name == "sqlite":
-        from sqlalchemy import event
-
-        @event.listens_for(eng.sync_engine, "connect")
-        def _on_connect(dbapi_conn, conn_record):
-            Base.metadata.create_all(bind=eng.sync_engine)
+    # Do not run create_all from a sync_engine "connect" listener when using a
+    # multi-connection pool: create_all(bind=engine) checks out another pooled
+    # connection while the connect hook is still running, which deadlocks.
+    # Shared-cache in-memory SQLite already sees tables created above.
 
     # ensure the global app.database engine matches the test engine so
     # requests via FastAPI use the same database connection state.  Without

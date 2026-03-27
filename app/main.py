@@ -100,16 +100,12 @@ async def lifespan(app: FastAPI):
 
         # Perform a global recalculation on startup to ensure the queue reflects
         # any configuration changes that may have occurred while the server was down.
-        # This also re-creates all slot jobs in APScheduler.
-        from httpx import AsyncClient, ASGITransport
-
         async def kickoff():
             await asyncio.sleep(1)
             try:
-                transport = ASGITransport(app=app)
-                async with AsyncClient(transport=transport, base_url="http://test") as client:
-                    resp = await client.post("/api/schedule/recalculate-all")
-                    resp.raise_for_status()
+                from app.routers.schedule import run_recalculate_all_in_new_session
+
+                await run_recalculate_all_in_new_session()
             except Exception as e:
                 logging.getLogger("quickly.routes").error(
                     "startup recalculation failed: %s", e

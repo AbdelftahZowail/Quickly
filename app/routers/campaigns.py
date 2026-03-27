@@ -3,7 +3,7 @@ import csv
 import io
 import json
 import logging
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -289,7 +289,11 @@ class CampaignReorder(BaseModel):
 
 
 @router.post("/reorder")
-async def reorder_campaigns(data: CampaignReorder, db: AsyncSession = Depends(get_db)):
+async def reorder_campaigns(
+    data: CampaignReorder,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
     """Set the priority order of campaigns used by the priority-based scheduling strategy.
 
     Pass a list of all campaign IDs in the desired order (highest priority first).
@@ -317,8 +321,10 @@ async def reorder_campaigns(data: CampaignReorder, db: AsyncSession = Depends(ge
         {cid: idx for idx, cid in enumerate(data.campaign_ids)},
     )
     # changing campaign order affects scheduling;
-    from app.routers.schedule import recalculate_all_campaigns
-    await recalculate_all_campaigns(db)
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+
+    enqueue_global_recalculate(background_tasks)
     return {"ok": True, "order": data.campaign_ids}
 
 
@@ -422,12 +428,16 @@ async def delete_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{campaign_id}", response_model=CampaignResponse)
 async def update_campaign(
-    campaign_id: int, data: CampaignUpdate, db: AsyncSession = Depends(get_db)
+    campaign_id: int,
+    data: CampaignUpdate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
     campaign = result.scalar_one_or_none()
     if not campaign:
         raise HTTPException(404, "Campaign not found")
+    needs_global_recalc = False
     if data.name is not None:
         campaign.name = data.name
     if data.inbox_ids is not None:
@@ -445,9 +455,8 @@ async def update_campaign(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            from app.routers.schedule import recalculate_all_campaigns
-            await recalculate_all_campaigns(db)
-    
+            needs_global_recalc = True
+
     schedule_changed = False
     if data.sending_days is not None:
         campaign.sending_days = data.sending_days
@@ -465,9 +474,8 @@ async def update_campaign(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            from app.routers.schedule import recalculate_all_campaigns
-            await recalculate_all_campaigns(db)
-    
+            needs_global_recalc = True
+
     if data.stop_on_reply is not None:
         campaign.stop_on_reply = data.stop_on_reply
     if data.paused is not None:
@@ -479,21 +487,18 @@ async def update_campaign(
             # schedule (or are added back when resumed) and other campaigns can
             # move into the newly freed capacity.  Using the global routine is
             # simpler than trying to reason about individual leads.
-            from app.routers.schedule import recalculate_all_campaigns
             log.info(
                 "Campaign %s paused state changed (%s -> %s); triggering full recalculation",
                 campaign_id,
                 old_paused,
                 data.paused,
             )
-            # we can call the router helper directly
-            await recalculate_all_campaigns(db)
+            needs_global_recalc = True
     if data.priority is not None:
         campaign.priority = data.priority
         # Changing priority affects the order campaigns are scheduled, so
         # rebuild globally.
-        from app.routers.schedule import recalculate_all_campaigns
-        await recalculate_all_campaigns(db)
+        needs_global_recalc = True
     # Tracking and delivery options (no queue recalculation needed)
     if data.track_opens is not None:
         campaign.track_opens = data.track_opens
@@ -515,18 +520,22 @@ async def update_campaign(
                 "Campaign %s match_lead_provider changed (%s -> %s); triggering queue recalculation",
                 campaign_id, old_match, data.match_lead_provider,
             )
-            from app.routers.schedule import recalculate_all_campaigns
-            await recalculate_all_campaigns(db)
+            needs_global_recalc = True
     if data.timezone is not None:
         old_tz = campaign.timezone
         campaign.timezone = data.timezone if data.timezone else None
         if campaign.timezone != old_tz:
             await db.flush()
             log.info("Campaign %s timezone changed (%s -> %s); triggering queue recalculation", campaign_id, old_tz, campaign.timezone)
-            from app.routers.schedule import recalculate_all_campaigns
-            await recalculate_all_campaigns(db)
+            needs_global_recalc = True
     await db.flush()
+    if needs_global_recalc:
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
     inbox_map = await _get_inbox_ids_for_campaigns(db, [campaign_id])
+    await db.commit()
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []))
 
 
@@ -605,7 +614,10 @@ async def list_sequences(campaign_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{campaign_id}/sequences", response_model=SequenceResponse)
 async def create_sequence(
-    campaign_id: int, data: SequenceCreate, db: AsyncSession = Depends(get_db)
+    campaign_id: int,
+    data: SequenceCreate,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
     # Verify campaign exists
     result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
@@ -627,12 +639,15 @@ async def create_sequence(
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
-        from app.routers.schedule import recalculate_all_campaigns
-        await recalculate_all_campaigns(db)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
     # Re-query with variants eagerly loaded
     result2 = await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
     )
+    await db.commit()
     return result2.scalar_one()
 
 
@@ -641,6 +656,7 @@ async def update_sequence(
     campaign_id: int,
     sequence_id: int,
     data: SequenceUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -666,13 +682,16 @@ async def update_sequence(
         cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
         cl_ids = [r[0] for r in cl_res.all()]
         if cl_ids:
-            from app.routers.schedule import recalculate_all_campaigns
-            await recalculate_all_campaigns(db)
+            await db.commit()
+            from app.routers.schedule import enqueue_global_recalculate
+
+            enqueue_global_recalculate(background_tasks)
     await db.flush()
     # Re-query with variants eagerly loaded to avoid lazy-load MissingGreenlet error
     result2 = await db.execute(
         select(Sequence).options(selectinload(Sequence.variants)).where(Sequence.id == seq.id)
     )
+    await db.commit()
     return result2.scalar_one()
 
 
@@ -680,6 +699,7 @@ async def update_sequence(
 async def delete_sequence(
     campaign_id: int,
     sequence_id: int,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
@@ -706,8 +726,10 @@ async def delete_sequence(
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
-        from app.routers.schedule import recalculate_all_campaigns
-        await recalculate_all_campaigns(db)
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+
+        enqueue_global_recalculate(background_tasks)
     return {"ok": True}
 
 
@@ -940,6 +962,7 @@ async def patch_campaign_lead(
     campaign_id: int,
     lead_id: int,
     payload: CampaignLeadEnrollmentPatch,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """Update enrollment status, interest, and/or sending_paused for this campaign."""
@@ -980,10 +1003,10 @@ async def patch_campaign_lead(
 
     await db.flush()
     # Full global recalculation: schedule must mirror what the send job will deliver.
-    from app.routers.schedule import recalculate_all_campaigns
-
-    await recalculate_all_campaigns(db)
     await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
+
+    enqueue_global_recalculate(background_tasks)
     return {
         "ok": True,
         "status": cl.enrollment_status,
@@ -1397,7 +1420,10 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
 
 @router.delete("/{campaign_id}/leads/{lead_id}")
 async def remove_lead_from_campaign(
-    campaign_id: int, lead_id: int, db: AsyncSession = Depends(get_db)
+    campaign_id: int,
+    lead_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
 ):
     """Remove a lead from a campaign. Deletes enrollment and pending queue slots."""
     result = await db.execute(
@@ -1413,9 +1439,10 @@ async def remove_lead_from_campaign(
     await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
     await db.delete(cl)
     await db.flush()
-    from app.routers.schedule import recalculate_all_campaigns
+    await db.commit()
+    from app.routers.schedule import enqueue_global_recalculate
 
-    await recalculate_all_campaigns(db)
+    enqueue_global_recalculate(background_tasks)
     log.info("remove_lead: campaign=%s lead=%s", campaign_id, lead_id)
     return {"ok": True}
 

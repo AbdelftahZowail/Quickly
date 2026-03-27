@@ -17,6 +17,8 @@ GOOGLE_CLIENT_ID_KEY = "google_client_id"
 GOOGLE_CLIENT_SECRET_KEY = "google_client_secret"
 TEST_MODE_KEY = "test_mode"
 SCHEDULING_STRATEGY_KEY = "scheduling_strategy"  # "priority" (default) | "round_robin"
+# ISO-8601 UTC timestamp; bumped when a global queue recalculation completes successfully.
+GLOBAL_RECALC_FINISHED_AT_KEY = "global_recalc_finished_at"
 GMAIL_PUSH_TOPIC_KEY = "gmail_push_topic"
 GMAIL_PUSH_WEBHOOK_TOKEN_KEY = "gmail_push_webhook_token"
 GMAIL_REPLY_SYNC_INTERVAL_MINUTES_KEY = "gmail_reply_sync_interval_minutes"

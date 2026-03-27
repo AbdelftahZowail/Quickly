@@ -18,6 +18,10 @@ def test_schedule_api_basic_endpoints():
         assert isinstance(stats.get("total_sent"), int)
         assert isinstance(stats.get("total_scheduled"), int)
         assert isinstance(stats.get("total_campaigns"), int)
+        assert "global_recalc_finished_at" in stats
+        assert stats["global_recalc_finished_at"] is None or isinstance(
+            stats["global_recalc_finished_at"], str
+        )
 
         # sent / scheduled lists should simply be arrays
         resp = client.get("/api/schedule/sent")
@@ -28,12 +32,17 @@ def test_schedule_api_basic_endpoints():
         assert resp.status_code == 200
         assert isinstance(resp.json(), list)
 
-        # recalculate-all and validate-queue should return at least the 'ok' flag
-        resp = client.post("/api/schedule/recalculate-all")
+        # recalculate-all: default is async; sync=true for full stats in tests
+        resp = client.post("/api/schedule/recalculate-all?sync=true")
         assert resp.status_code == 200
         data = resp.json()
         assert data.get("ok") is True
         assert "campaigns_processed" in data
+
+        resp = client.get("/api/schedule/stats")
+        assert resp.status_code == 200
+        after = resp.json()
+        assert isinstance(after.get("global_recalc_finished_at"), str)
 
         resp = client.post("/api/schedule/validate-queue")
         assert resp.status_code == 200
@@ -66,6 +75,9 @@ async def test_schedule_sent_includes_opens_clicks(session):
     clk = EmailClick(email_log_id=log.id, ip_address="5.6.7.8")
     session.add_all([op, clk])
     await session.flush()
+    # Release the write lock before TestClient runs app lifespan/settings writes
+    # on the same pooled SQLite database.
+    await session.commit()
 
     with TestClient(app) as client:
         resp = client.get("/api/schedule/sent", params={"include_events": "true"})

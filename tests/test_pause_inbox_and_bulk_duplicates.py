@@ -7,7 +7,7 @@
 import io
 import pytest
 from datetime import datetime, timedelta
-from fastapi import HTTPException
+from fastapi import BackgroundTasks, HTTPException
 
 from sqlalchemy import select
 
@@ -64,11 +64,15 @@ async def test_update_inbox_sets_paused(session):
     """PATCH /inboxes/{id} with paused=True should persist the flag."""
     inbox = await make_inbox(session, email="patch-pause@test.com")
     data = InboxUpdate(paused=True)
-    result = await inbox_router.update_inbox(inbox.id, data, db=session)
+    result = await inbox_router.update_inbox(
+        inbox.id, data, BackgroundTasks(), db=session
+    )
     assert result.paused is True
 
     data2 = InboxUpdate(paused=False)
-    result2 = await inbox_router.update_inbox(inbox.id, data2, db=session)
+    result2 = await inbox_router.update_inbox(
+        inbox.id, data2, BackgroundTasks(), db=session
+    )
     assert result2.paused is False
 
 
@@ -92,7 +96,9 @@ async def test_pause_inbox_pause_leads_sets_sending_paused(session):
     )
 
     body = PauseInboxRequest(action="pause_leads")
-    await inbox_router.pause_inbox(inbox.id, body, db=session)
+    await inbox_router.pause_inbox(
+        inbox.id, body, BackgroundTasks(), db=session
+    )
 
     await session.refresh(cl)
     assert cl.sending_paused is True
@@ -114,7 +120,9 @@ async def test_pause_inbox_pause_leads_ignores_past_slots(session):
     )
 
     body = PauseInboxRequest(action="pause_leads")
-    await inbox_router.pause_inbox(inbox.id, body, db=session)
+    await inbox_router.pause_inbox(
+        inbox.id, body, BackgroundTasks(), db=session
+    )
 
     await session.refresh(cl)
     # No future slots → sending_paused should stay False
@@ -126,7 +134,9 @@ async def test_pause_inbox_marks_inbox_paused(session):
     """After pausing, inbox.paused should be True."""
     inbox = await make_inbox(session, email="mark-paused@test.com")
     body = PauseInboxRequest(action="pause_leads")
-    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    result = await inbox_router.pause_inbox(
+        inbox.id, body, BackgroundTasks(), db=session
+    )
     assert result.paused is True
     await session.refresh(inbox)
     assert inbox.paused is True
@@ -141,7 +151,9 @@ async def test_pause_inbox_already_paused_raises(session):
 
     body = PauseInboxRequest(action="pause_leads")
     with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(inbox.id, body, db=session)
+        await inbox_router.pause_inbox(
+            inbox.id, body, BackgroundTasks(), db=session
+        )
     assert exc_info.value.status_code == 400
 
 
@@ -150,7 +162,9 @@ async def test_pause_inbox_not_found_raises(session):
     """Pausing a non-existent inbox should raise 404."""
     body = PauseInboxRequest(action="pause_leads")
     with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(9999, body, db=session)
+        await inbox_router.pause_inbox(
+            9999, body, BackgroundTasks(), db=session
+        )
     assert exc_info.value.status_code == 404
 
 
@@ -160,7 +174,9 @@ async def test_pause_inbox_invalid_action_raises(session):
     inbox = await make_inbox(session, email="bad-action@test.com")
     body = PauseInboxRequest(action="delete_everything")
     with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.pause_inbox(inbox.id, body, db=session)
+        await inbox_router.pause_inbox(
+            inbox.id, body, BackgroundTasks(), db=session
+        )
     assert exc_info.value.status_code == 400
 
 
@@ -189,7 +205,9 @@ async def test_pause_inbox_reassign_moves_slots(session):
     )
 
     body = PauseInboxRequest(action="reassign")
-    await inbox_router.pause_inbox(inbox_a.id, body, db=session)
+    bg = BackgroundTasks()
+    await inbox_router.pause_inbox(inbox_a.id, body, background_tasks=bg, db=session)
+    await bg()
 
     # After recalculation, new slots must not use the paused inbox_a
     from sqlalchemy import select as sa_select
@@ -216,7 +234,9 @@ async def test_pause_inbox_reassign_does_not_pause_leads(session):
     )
 
     body = PauseInboxRequest(action="reassign")
-    await inbox_router.pause_inbox(inbox_a.id, body, db=session)
+    bg = BackgroundTasks()
+    await inbox_router.pause_inbox(inbox_a.id, body, background_tasks=bg, db=session)
+    await bg()
 
     await session.refresh(cl)
     assert cl.sending_paused is False
@@ -228,7 +248,9 @@ async def test_pause_inbox_reassign_no_target_succeeds(session):
     (no target required); the inbox should end up paused."""
     inbox = await make_inbox(session, email="no-target@test.com")
     body = PauseInboxRequest(action="reassign", target_inbox_id=None)
-    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    result = await inbox_router.pause_inbox(
+        inbox.id, body, BackgroundTasks(), db=session
+    )
     assert result.paused is True
 
 
@@ -237,7 +259,9 @@ async def test_pause_inbox_reassign_with_nonexistent_target_succeeds(session):
     """action='reassign' ignores target_inbox_id; global recalc runs regardless."""
     inbox = await make_inbox(session, email="bad-target@test.com")
     body = PauseInboxRequest(action="reassign", target_inbox_id=9999)
-    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    result = await inbox_router.pause_inbox(
+        inbox.id, body, BackgroundTasks(), db=session
+    )
     assert result.paused is True
 
 
@@ -251,7 +275,9 @@ async def test_pause_inbox_reassign_target_validation_removed(session):
     await session.flush()
 
     body = PauseInboxRequest(action="reassign", target_inbox_id=inbox_b.id)
-    result = await inbox_router.pause_inbox(inbox_a.id, body, db=session)
+    result = await inbox_router.pause_inbox(
+        inbox_a.id, body, BackgroundTasks(), db=session
+    )
     assert result.paused is True
 
 
@@ -260,7 +286,9 @@ async def test_pause_inbox_reassign_sets_paused_flag(session):
     """Reassign (regardless of target_inbox_id) should mark the inbox as paused."""
     inbox = await make_inbox(session, email="self-reassign@test.com")
     body = PauseInboxRequest(action="reassign", target_inbox_id=inbox.id)
-    result = await inbox_router.pause_inbox(inbox.id, body, db=session)
+    result = await inbox_router.pause_inbox(
+        inbox.id, body, BackgroundTasks(), db=session
+    )
     assert result.paused is True
 
 
@@ -275,7 +303,9 @@ async def test_unpause_inbox_clears_flag(session):
     inbox.paused = True
     await session.flush()
 
-    result = await inbox_router.unpause_inbox(inbox.id, db=session)
+    result = await inbox_router.unpause_inbox(
+        inbox.id, BackgroundTasks(), db=session
+    )
     assert result.paused is False
     await session.refresh(inbox)
     assert inbox.paused is False
@@ -285,7 +315,7 @@ async def test_unpause_inbox_clears_flag(session):
 async def test_unpause_inbox_not_found_raises(session):
     """Unpausing a non-existent inbox should raise 404."""
     with pytest.raises(HTTPException) as exc_info:
-        await inbox_router.unpause_inbox(9999, db=session)
+        await inbox_router.unpause_inbox(9999, BackgroundTasks(), db=session)
     assert exc_info.value.status_code == 404
 
 
