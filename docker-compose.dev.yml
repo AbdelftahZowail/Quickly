@@ -1,3 +1,5 @@
+name: quickly-dev
+
 services:
   db:
     image: postgres:15-alpine
@@ -23,11 +25,14 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
     volumes:
       - ./:/app          # mount source for live reload
+      - ./backups:/app/backups
     ports:
       - "8000:8000"      # direct access without Caddy (useful for quick testing)
     env_file: .env
     environment:
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+      # Server-side backup folder in Settings (default path backups/ under /app)
+      QUICKLY_LOCAL_DISK_BACKUPS: "1"
     depends_on:
       db:
         condition: service_healthy

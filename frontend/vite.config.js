@@ -1,9 +1,18 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
+const allowedHostsExtra = (process.env.VITE_ALLOWED_HOSTS || '')
+  .split(',')
+  .map((h) => h.trim())
+  .filter(Boolean);
+
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Public dev hostname (e.g. behind host Caddy → docker-compose-not-host.dev.yml).
+    // Add more via VITE_ALLOWED_HOSTS in .env_dev (comma-separated).
+***REMOVED***
+
     // File watching inside Docker on Windows can miss changes because
     // the underlying filesystem notifications don’t propagate across
     // the bind mount.  Enabling polling ensures hot‑reload works.

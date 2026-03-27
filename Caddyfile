@@ -14,24 +14,24 @@
 
 # ── Global configuration ─────────────────────────────────────────────────────
 {
-    # Before issuing a certificate for any hostname, Caddy asks this endpoint.
-    # The app returns 200 (allow) or 403 (deny).
-    on_demand_tls {
-        ask http://app:8000/api/caddy/ask
-    }
+	# Before issuing a certificate for any hostname, Caddy asks this endpoint.
+	# The app returns 200 (allow) or 403 (deny).
+	on_demand_tls {
+		ask http://app:8000/api/caddy/ask
+	}
 }
 
 # ── Primary site block ────────────────────────────────────────────────────────
 # When CADDY_HOST is unset the site binds to :80 (no TLS, local dev).
 # When CADDY_HOST=yourdomain.com Caddy auto-provisions a Let's Encrypt cert.
 {$CADDY_HOST::80} {
-    reverse_proxy app:8000 {
-        # Forward the real client IP so the backend rate-limiter and logs
-        # see the actual remote address instead of Caddy's container IP.
-        header_up X-Real-IP {remote_host}
-        # Let the app know the original scheme (http/https).
-        header_up X-Forwarded-Proto {scheme}
-    }
+	reverse_proxy app:8000 {
+		# Forward the real client IP so the backend rate-limiter and logs
+		# see the actual remote address instead of Caddy's container IP.
+		header_up X-Real-IP {remote_host}
+		# Let the app know the original scheme (http/https).
+		header_up X-Forwarded-Proto {scheme}
+	}
 }
 
 # ── Custom tracking domain catch-all ─────────────────────────────────────────
@@ -41,11 +41,11 @@
 # This block is effectively inactive when running on :80 (local dev with no
 # inbound HTTPS traffic).
 :443 {
-    tls {
-        on_demand
-    }
-    reverse_proxy app:8000 {
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-Proto {scheme}
-    }
+	tls {
+		on_demand
+	}
+	reverse_proxy app:8000 {
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
 }

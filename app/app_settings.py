@@ -197,3 +197,59 @@ async def get_office365_oauth_credentials(db: AsyncSession | None = None) -> tup
         settings.office365_client_secret,
         settings.office365_tenant_id,
     )
+
+
+# Scheduled / destination backup (PostgreSQL dumps) ---------------------------
+
+BACKUP_SCHEDULE_ENABLED_KEY = "backup_schedule_enabled"
+BACKUP_CRON_EXPRESSION_KEY = "backup_cron_expression"
+BACKUP_SAVE_LOCAL_KEY = "backup_save_local"
+BACKUP_LOCAL_RELATIVE_PATH_KEY = "backup_local_relative_path"
+BACKUP_SEND_WEBHOOK_KEY = "backup_send_webhook"
+BACKUP_WEBHOOK_URL_KEY = "backup_webhook_url"
+BACKUP_WEBHOOK_AUTH_HEADER_KEY = "backup_webhook_auth_header"
+
+
+def _is_truthy_setting(raw: str | None) -> bool:
+    return bool(raw and raw.strip().lower() in ("true", "1", "yes"))
+
+
+async def get_backup_config(db: AsyncSession) -> dict:
+    """Return persisted backup schedule and destination flags."""
+    from app.backup_pg import normalize_user_backup_path
+
+    cron = (await get_setting(db, BACKUP_CRON_EXPRESSION_KEY) or "").strip()
+    local_rel = normalize_user_backup_path(await get_setting(db, BACKUP_LOCAL_RELATIVE_PATH_KEY))
+    return {
+        "schedule_enabled": _is_truthy_setting(await get_setting(db, BACKUP_SCHEDULE_ENABLED_KEY)),
+        "cron_expression": cron,
+        "save_local": _is_truthy_setting(await get_setting(db, BACKUP_SAVE_LOCAL_KEY)),
+        "local_relative_path": local_rel,
+        "send_webhook": _is_truthy_setting(await get_setting(db, BACKUP_SEND_WEBHOOK_KEY)),
+        "webhook_url": (await get_setting(db, BACKUP_WEBHOOK_URL_KEY) or "").strip(),
+        "webhook_auth_header": (await get_setting(db, BACKUP_WEBHOOK_AUTH_HEADER_KEY) or "").strip(),
+    }
+
+
+async def save_backup_config(
+    db: AsyncSession,
+    *,
+    schedule_enabled: bool,
+    cron_expression: str,
+    save_local: bool,
+    local_relative_path: str,
+    send_webhook: bool,
+    webhook_url: str,
+    webhook_auth_header: str,
+) -> None:
+    """Persist backup settings (caller commits)."""
+    from app.backup_pg import normalize_user_backup_path
+
+    await put_setting(db, BACKUP_SCHEDULE_ENABLED_KEY, "true" if schedule_enabled else "false")
+    await put_setting(db, BACKUP_CRON_EXPRESSION_KEY, cron_expression.strip())
+    await put_setting(db, BACKUP_SAVE_LOCAL_KEY, "true" if save_local else "false")
+    await put_setting(db, BACKUP_LOCAL_RELATIVE_PATH_KEY, normalize_user_backup_path(local_relative_path))
+    await put_setting(db, BACKUP_SEND_WEBHOOK_KEY, "true" if send_webhook else "false")
+    await put_setting(db, BACKUP_WEBHOOK_URL_KEY, webhook_url.strip())
+    await put_setting(db, BACKUP_WEBHOOK_AUTH_HEADER_KEY, webhook_auth_header.strip())
+    await db.flush()

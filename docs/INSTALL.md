@@ -8,7 +8,8 @@
 
 - [Step 1: Choose Your Deployment Path](#step-1-choose-your-deployment-path)
     - [Option A: Railway / PaaS (No server needed)](#option-a-railway--paas-no-server-needed)
-    - [Option B: Fresh VPS + Caddy (Recommended)](#option-b-fresh-vps--caddy-recommended)
+    - [Option B: VPS with Docker Compose](#option-b-vps-with-docker-compose)
+    - [Already running Caddy on the host (not-host)](#already-running-caddy-on-the-host-not-host)
     - [Option C: Existing Server with nginx](#option-c-existing-server-with-nginx)
     - [Option D: Local Development](#option-d-local-development)
 - [Step 2: First Login & User Setup](#step-2-first-login--user-setup)
@@ -28,7 +29,7 @@
 |Path|Best for|Difficulty|
 |---|---|---|
 |[**A — Railway / PaaS**](#option-a-railway--paas-no-server-needed)|Fastest setup, no DevOps experience needed|⭐ Easiest|
-|[**B — Fresh VPS + Caddy**](#option-b-fresh-vps--caddy-recommended)|Full control, custom domain, production use|⭐⭐ Easy|
+|[**B — VPS + Docker Compose**](#option-b-vps-with-docker-compose)|Your own server: Postgres, app, and Caddy in one Compose stack|⭐⭐ Easy|
 |[**C — Existing server with nginx**](#option-c-existing-server-with-nginx)|You already have other sites on the same server|⭐⭐⭐ Medium|
 |[**D — Local development**](#option-d-local-development)|Contributing, testing, or hacking on the code|⭐⭐ Easy|
 
@@ -97,9 +98,9 @@ In the Railway dashboard, go to **Settings → Domains** and copy the generated 
 
 ---
 
-## Option B: Fresh VPS + Caddy (Recommended)
+## Option B: VPS with Docker Compose
 
-> **Best for:** Full control with a custom domain. Caddy handles HTTPS automatically — no Certbot or manual certificate management required.
+> **Best for:** **Your own VPS.** Docker Compose runs PostgreSQL, Quickly, and Caddy together. Caddy obtains and renews HTTPS certificates (Let's Encrypt) — no Certbot.
 
 ### What you'll need
 
@@ -117,7 +118,17 @@ In the Railway dashboard, go to **Settings → Domains** and copy the generated 
 ssh user@your-server-ip
 ```
 
-**2. Download the required files.**
+**2. Create a Docker volume for PostgreSQL (once, before the first start).**
+
+The bundled `docker-compose.yml` keeps Postgres data in a **named Docker volume** so it survives container restarts and image updates.
+
+```bash
+docker volume create quickly_pgdata
+```
+
+If this volume does not exist yet, `docker compose up` will fail — the file expects `quickly_pgdata` to be there already.
+
+**3. Download the required files.**
 
 ```bash
 mkdir quickly && cd quickly
@@ -128,7 +139,7 @@ curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.exampl
 mv .env.example .env
 ```
 
-**3. Edit your `.env` file.**
+**4. Edit your `.env` file.**
 
 ```bash
 nano .env
@@ -162,7 +173,7 @@ OFFICE365_TENANT_ID=common
 
 > `DATABASE_URL` is already pre-configured in `docker-compose.yml` to use the bundled PostgreSQL container. You don't need to change it.
 
-**4. Open the required firewall ports.**
+**5. Open the required firewall ports.**
 
 Caddy needs ports 80 and 443 for the Let's Encrypt domain challenge:
 
@@ -183,7 +194,7 @@ If you're on a cloud provider, also open these ports in your cloud dashboard:
 |AWS EC2|Security Groups → Inbound Rules|
 |Google Cloud|VPC Network → Firewall rules|
 
-**5. Start everything.**
+**6. Start everything.**
 
 ```bash
 docker compose up -d
@@ -193,12 +204,61 @@ On first start, Caddy contacts Let's Encrypt and obtains a TLS certificate for y
 
 Certificates are stored in the `caddy_data` Docker volume and **renew automatically**. You never need to manage them again.
 
-**6. Verify all services are running.**
+**7. Verify all services are running.**
 
 ```bash
 docker compose ps        # all services should show "running"
 docker compose logs app  # check for any startup errors
 ```
+
+### Already running Caddy on the host (not-host)
+
+Choose this if **Caddy is already on your VPS** for other sites and you **do not** want another Caddy container in Docker.
+
+**Compared to the Compose + Caddy layout above**
+
+| | Compose + Caddy (`docker-compose.yml`) | Not-host (`docker-compose-not-host.yml`) |
+|---|---|---|
+| Caddy | Runs **inside** Docker with Quickly | Only your **existing host Caddy** |
+| What you download | `docker-compose.yml` + `Caddyfile` | `docker-compose-not-host.yml` (no Caddyfile for Docker) |
+| HTTPS | The Compose Caddy gets certificates | Your **host** Caddy keeps handling TLS as it does today |
+
+**What to do**
+
+1. **Same PostgreSQL volume as above** — create it once if you have not already:
+
+   ```bash
+   docker volume create quickly_pgdata
+   ```
+
+2. Download **`docker-compose-not-host.yml`** from the [releases page](https://github.com/azowail/quickly/releases/latest) (bundled beside `docker-compose.yml`), plus **`.env.example`**:
+
+   ```bash
+   mkdir quickly && cd quickly
+   curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose-not-host.yml
+   curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+   mv .env.example .env
+   ```
+
+3. Edit **`.env`**: set **`BASE_URL`**, **`QUICKLY_SECRET_KEY`**, and your OAuth variables — same as in the **Compose + Caddy** steps above. You can leave **`CADDY_HOST`** empty; this stack does not run the project’s Caddy container.
+
+4. Start Quickly:
+
+   ```bash
+   docker compose -f docker-compose-not-host.yml up -d
+   ```
+
+5. Tell **host Caddy** to proxy to Quickly. The not-host compose publishes Quickly on **`127.0.0.1:5050`** (and also on `8000`). Add a site block like this to **`/etc/caddy/Caddyfile`** (use your real domain):
+
+   ```caddy
+   quickly.example.com {
+       reverse_proxy 127.0.0.1:5050
+   }
+   ```
+
+   Reload Caddy on the host (for example: `sudo systemctl reload caddy`). That is all — your other sites are unchanged.
+
+> **Tip:** If you prefer to maintain one edited `docker-compose.yml` by hand, you can instead follow [Option C](#option-c-existing-server-with-nginx) and remove the in-compose Caddy service yourself. The not-host file is the same idea in a ready-made form.
 
 ---
 
@@ -295,6 +355,8 @@ docker compose up -d
 - Python 3.12+
 - Node.js 18+
 - PostgreSQL 15+ (local install or via Docker)
+- **PostgreSQL client** (`pg_dump`, `pg_restore`) if you use **Settings → Backup** while running the backend on the host — e.g. `postgresql-client` on Debian/Ubuntu. Docker-based dev images include these tools.
+- **Saving backups on disk** from Settings needs **`QUICKLY_LOCAL_DISK_BACKUPS=1`** and a writable **`backups`** mount (all **Docker Compose** files in this repo set both). Hosted platforms without a persistent volume should use **webhook** delivery instead.
 
 ---
 
@@ -662,12 +724,21 @@ Caddy automatically provisions a certificate for this domain on the first reques
 
 ## Updating Quickly
 
+**`docker-compose.yml` (Caddy in Docker):**
+
 ```bash
 docker compose pull
 docker compose up -d
 ```
 
-Database volumes are preserved across updates. Quickly automatically applies any schema changes on startup — no manual migrations needed.
+**`docker-compose-not-host.yml`** (host Caddy):
+
+```bash
+docker compose -f docker-compose-not-host.yml pull
+docker compose -f docker-compose-not-host.yml up -d
+```
+
+The PostgreSQL Docker volume (`quickly_pgdata`) keeps your data across updates. Quickly applies schema changes on startup — no manual migrations needed.
 
 ---
 
@@ -687,6 +758,9 @@ Database volumes are preserved across updates. Quickly automatically applies any
 |`OFFICE365_TENANT_ID`|No|`common`|Use `common` for multi-tenant, or your specific tenant ID — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
 |`QUICKLY_SECRET_KEY`|No|auto-generated|JWT signing key — **set this** or sessions reset on every restart|
 |`CORS_ORIGINS`|No|`http://localhost:5173,...`|Comma-separated allowed CORS origins|
+|`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest dump files. PaaS without a volume: use **webhook** instead.|
+
+**Backup and restore:** The app uses `pg_dump` / `pg_restore`. The production Docker image includes the PostgreSQL client tools. If you run the backend directly on the host (e.g. `uvicorn` without Docker), install the client package for your OS (e.g. `postgresql-client` on Debian/Ubuntu) so backup and restore work. Compose dev files mount `./backups` to `/app/backups` so the default folder is persisted on the host.
 
 **Generate a secret key:**
 

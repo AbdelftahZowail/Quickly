@@ -1,5 +1,6 @@
 # Environment and secrets
 .env
+.env_dev
 
 # Database
 *.db
@@ -18,6 +19,9 @@ venv/
 *.pyc
 .idea/
 temp/
+
+# Local DB dumps from Settings → Backup (Docker Compose dev)
+backups/*.dump
 
 # Caddy TLS certificates (persisted locally to avoid Let's Encrypt rate limits)
 caddy_data/

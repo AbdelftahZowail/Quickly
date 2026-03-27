@@ -5,7 +5,17 @@ import logging
 import secrets
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Response, Request, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Response,
+    Request,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,7 +32,9 @@ from app.auth import (
     require_admin,
     verify_password,
 )
-from app.database import get_db
+from app.backup_pg import BackupToolError, BackupUnsupportedError
+from app.backup_restore_ops import restore_database_from_bytes
+from app.database import AsyncSessionLocal, get_db
 from app.models import APIKey, User
 from app.time import utcnow
 
@@ -137,6 +149,31 @@ async def setup_status(db: AsyncSession = Depends(get_db)):
     """Check if initial setup (first user registration) is complete."""
     done = await is_setup_complete(db)
     return {"setup_complete": done}
+
+
+@router.post("/restore-setup")
+async def restore_setup(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    """Destructively restore PostgreSQL from a backup before any user exists."""
+    async with AsyncSessionLocal() as db:
+        if await is_setup_complete(db):
+            raise HTTPException(
+                status_code=403,
+                detail="Setup already complete. Sign in and use Settings → Backup to restore.",
+            )
+    raw = await file.read()
+    if not raw or len(raw) < 64:
+        raise HTTPException(status_code=400, detail="Invalid or empty backup file")
+    try:
+        await restore_database_from_bytes(raw, background_tasks)
+    except BackupUnsupportedError:
+        raise HTTPException(status_code=501, detail="Restore requires PostgreSQL.")
+    except BackupToolError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    log.warning("Database restored from backup during pre-setup flow")
+    return {"ok": True, "detail": "Database restored; you can sign in or create an admin account."}
 
 
 # ---------------------------------------------------------------------------

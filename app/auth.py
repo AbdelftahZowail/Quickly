@@ -23,7 +23,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import AsyncSessionLocal, get_db
 from app.time import utcnow
 
 log = logging.getLogger("quickly.auth")
@@ -127,29 +127,19 @@ def decode_token(token: str) -> dict:
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 
-async def get_current_user(
+async def resolve_current_user(
     request: Request,
-    db: AsyncSession = Depends(get_db),
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
-):
-    """Resolve the authenticated user from JWT cookie or API key header.
-
-    Priority:
-    1. ``Authorization: Bearer <jwt>`` header (frontend uses this)
-    2. ``X-API-Key: <raw_key>`` header (programmatic API access) — O(1) lookup by HMAC hash
-    3. ``access_token`` httpOnly cookie (fallback)
-
-    Returns the User ORM object. Raises 401 if unauthenticated.
-    """
+    db: AsyncSession,
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> "User":
+    """Resolve the authenticated user; same rules as :func:`get_current_user`."""
     from app.models import User, APIKey  # deferred to avoid circular import
 
     token: str | None = None
 
-    # 1. Check Bearer header
     if credentials and credentials.credentials:
         token = credentials.credentials
 
-    # 2. Check X-API-Key header – hash and do a direct DB lookup (O(1))
     api_key_header = request.headers.get("X-API-Key")
     if api_key_header:
         hashed = hash_api_key(api_key_header)
@@ -164,7 +154,6 @@ async def get_current_user(
         ak = result.scalar_one_or_none()
         if ak is None:
             raise HTTPException(status_code=401, detail="Invalid API key")
-        # Update last used timestamp
         ak.last_used_at = utcnow()
         await db.flush()
         user = await db.get(User, ak.user_id)
@@ -172,7 +161,6 @@ async def get_current_user(
             return user
         raise HTTPException(status_code=401, detail="User account disabled")
 
-    # 3. Check cookie fallback
     if not token:
         token = request.cookies.get("access_token")
 
@@ -182,7 +170,6 @@ async def get_current_user(
             detail="Not authenticated",
         )
 
-    # Decode JWT
     payload = decode_token(token)
     if payload.get("type") != "access":
         raise HTTPException(status_code=401, detail="Invalid token type")
@@ -195,6 +182,43 @@ async def get_current_user(
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found or disabled")
 
+    return user
+
+
+async def get_current_user(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+):
+    """Resolve the authenticated user from JWT cookie or API key header.
+
+    Priority:
+    1. ``Authorization: Bearer <jwt>`` header (frontend uses this)
+    2. ``X-API-Key: <raw_key>`` header (programmatic API access) — O(1) lookup by HMAC hash
+    3. ``access_token`` httpOnly cookie (fallback)
+
+    Returns the User ORM object. Raises 401 if unauthenticated.
+    """
+    return await resolve_current_user(request, db, credentials)
+
+
+async def require_admin_short_session(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
+):
+    """Commit and close the DB session before returning (for use before ``engine.dispose()``)."""
+    async with AsyncSessionLocal() as db:
+        try:
+            user = await resolve_current_user(request, db, credentials)
+            if user.role != "admin":
+                raise HTTPException(status_code=403, detail="Admin access required")
+            await db.commit()
+        except HTTPException:
+            await db.rollback()
+            raise
+        except Exception:
+            await db.rollback()
+            raise
     return user
 
 

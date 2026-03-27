@@ -25,7 +25,10 @@ const SECTIONS_BY_TAB = {
     { id: 'account', label: 'Account & Security' },
     { id: 'known-ips', label: 'Known IPs' },
   ],
-  setup: [{ id: 'gmail-sync', label: 'Gmail sync' }],
+  setup: [
+    { id: 'gmail-sync', label: 'Gmail sync' },
+    { id: 'backup-restore', label: 'Backup & restore' },
+  ],
   features: [
     { id: 'ai', label: 'AI features' },
     { id: 'other', label: 'Other' },
@@ -95,6 +98,26 @@ export default function Settings() {
   const [gmailSyncSaving, setGmailSyncSaving] = useState(false);
   const savedGmailSyncRef = useRef(null);
 
+  // Backup & restore (admin — PostgreSQL)
+  const [backupCfg, setBackupCfg] = useState({
+    schedule_enabled: false,
+    cron_expression: '0 3 * * *',
+    save_local: false,
+    local_relative_path: 'backups',
+    send_webhook: false,
+    webhook_url: '',
+    webhook_auth_header: '',
+  });
+  const [backupMeta, setBackupMeta] = useState({
+    webhook_auth_configured: false,
+    webhook_auth_header_masked: '',
+    local_disk_available: false,
+    local_backup_resolved: null,
+  });
+  const [backupSaving, setBackupSaving] = useState(false);
+  const [backupRunning, setBackupRunning] = useState(false);
+  const [restoreFile, setRestoreFile] = useState(null);
+
   // Known IPs
   const [knownIps, setKnownIps] = useState(() => apiCache.get('/settings/known-ips')?.known_ips || []);
   const [knownIpsOpen, setKnownIpsOpen] = useState(false);
@@ -151,9 +174,32 @@ export default function Settings() {
         setGmailSync(snap);
         savedGmailSyncRef.current = snap;
       }
+      if (user?.role === 'admin') {
+        try {
+          const b = await api.get('/settings/backup/config');
+          const diskOn = !!b.local_disk_available;
+          setBackupCfg({
+            schedule_enabled: !!b.schedule_enabled,
+            cron_expression: b.cron_expression || '0 3 * * *',
+            save_local: diskOn && !!b.save_local,
+            local_relative_path: b.local_relative_path || 'backups',
+            send_webhook: !!b.send_webhook,
+            webhook_url: b.webhook_url || '',
+            webhook_auth_header: '',
+          });
+          setBackupMeta({
+            webhook_auth_configured: !!b.webhook_auth_configured,
+            webhook_auth_header_masked: b.webhook_auth_header_masked || '',
+            local_disk_available: diskOn,
+            local_backup_resolved: b.local_backup_resolved || null,
+          });
+        } catch {
+          /* non-admin or unavailable */
+        }
+      }
       setMcpSetup(mcpData || null);
     } catch {}
-  }, []);
+  }, [user]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -813,6 +859,211 @@ export default function Settings() {
             </Button>
           </div>
         </section>
+
+        {user?.role === 'admin' && (
+        <section id="settings-backup-restore" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2 dark:border-gray-700">Backup & restore</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+            Backup and restore the database containing all your leads, campaigns, and other data.
+          </p>
+
+          <div className="space-y-4 mb-6">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={async () => {
+                  try {
+                    const res = await api.download('/settings/backup/download');
+                    const blob = await res.blob();
+                    const dispo = res.headers.get('Content-Disposition');
+                    const m = dispo && dispo.match(/filename="([^"]+)"/);
+                    const name = m ? m[1] : 'quickly-backup.dump';
+                    const a = document.createElement('a');
+                    a.href = URL.createObjectURL(blob);
+                    a.download = name;
+                    a.click();
+                    URL.revokeObjectURL(a.href);
+                    notify({ type: 'success', message: 'Backup downloaded' });
+                  } catch (e) {
+                    notify({ type: 'error', message: e.message || 'Download failed' });
+                  }
+                }}
+              >
+                Download backup
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={backupRunning}
+                onClick={async () => {
+                  setBackupRunning(true);
+                  try {
+                    const r = await api.post('/settings/backup/run', {});
+                    const parts = [];
+                    if (r.local_path) parts.push(`Saved ${r.local_path}`);
+                    if (r.webhook_ok) parts.push('Webhook sent');
+                    if (r.webhook_error) parts.push(`Webhook error: ${r.webhook_error}`);
+                    if (r.local_skipped) parts.push(r.local_skipped);
+                    notify({ type: 'success', message: parts.join(' · ') || 'Backup completed' });
+                  } catch (e) {
+                    notify({ type: 'error', message: e.message });
+                  } finally {
+                    setBackupRunning(false);
+                  }
+                }}
+              >
+                {backupRunning ? 'Running…' : 'Run backup now'}
+              </Button>
+            </div>
+
+            <div className="border-t border-gray-200 dark:border-gray-700 pt-4">
+              <p className="text-sm font-medium mb-2">Restore from file</p>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
+                Caution: This will delete all your current data and replace it with the backup.
+              </p>
+              <input
+                type="file"
+                accept=".dump,application/octet-stream"
+                className="block text-sm mb-2"
+                onChange={e => setRestoreFile(e.target.files?.[0] || null)}
+              />
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={!restoreFile}
+                onClick={async () => {
+                  const ok = await confirm(
+                    'Restore will replace the entire database with this file. This cannot be undone. Continue?',
+                  );
+                  if (!ok) return;
+                  try {
+                    await api.upload('/settings/backup/restore', restoreFile);
+                    notify({ type: 'success', message: 'Restore completed. Reloading…' });
+                    setTimeout(() => window.location.reload(), 1500);
+                  } catch (e) {
+                    notify({ type: 'error', message: e.message });
+                  }
+                }}
+              >
+                Restore from upload
+              </Button>
+            </div>
+          </div>
+
+          <h3 className="text-sm font-semibold mb-2">Scheduled &amp; remote backup</h3>
+          <div className="space-y-3 text-sm">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={backupCfg.schedule_enabled}
+                onChange={e => setBackupCfg(prev => ({ ...prev, schedule_enabled: e.target.checked }))}
+              />
+              <span>Enable scheduled backup (in-app cron)</span>
+            </label>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Cron (minute hour day month day-of-week, UTC)</label>
+              <input
+                className="w-full max-w-md border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600"
+                value={backupCfg.cron_expression}
+                onChange={e => setBackupCfg(prev => ({ ...prev, cron_expression: e.target.value }))}
+                placeholder="0 3 * * *"
+              />
+            </div>
+            {!backupMeta.local_disk_available && (
+              <p className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
+                Saving backups on the server requires the deployment to set{' '}
+                <code className="text-[11px]">QUICKLY_LOCAL_DISK_BACKUPS</code> and a persistent{' '}
+                <code className="text-[11px]">backups</code> folder (all Docker Compose files in this project do). On cloud
+                hosts without that setup, use <strong>POST to webhook</strong> below.
+              </p>
+            )}
+            <label className={`flex items-center gap-2 ${backupMeta.local_disk_available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+              <input
+                type="checkbox"
+                disabled={!backupMeta.local_disk_available}
+                checked={backupCfg.save_local}
+                onChange={e => setBackupCfg(prev => ({ ...prev, save_local: e.target.checked }))}
+              />
+              <span>Save to server disk (keeps 10 newest files; older ones are removed)</span>
+            </label>
+            <div>
+              <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                Folder (under the app directory, default <code className="text-[11px]">backups</code>)
+              </label>
+              <input
+                className="w-full max-w-md border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600 disabled:opacity-50"
+                disabled={!backupMeta.local_disk_available}
+                value={backupCfg.local_relative_path}
+                onChange={e => setBackupCfg(prev => ({ ...prev, local_relative_path: e.target.value }))}
+                placeholder="backups"
+              />
+              {backupMeta.local_disk_available && backupMeta.local_backup_resolved && (
+                <p className="text-xs text-gray-400 mt-1 break-all">
+                  Resolves to: {backupMeta.local_backup_resolved}
+                </p>
+              )}
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={backupCfg.send_webhook}
+                onChange={e => setBackupCfg(prev => ({ ...prev, send_webhook: e.target.checked }))}
+              />
+              <span>POST backup file to webhook URL</span>
+            </label>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Webhook URL</label>
+              <input
+                type="url"
+                className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:border-gray-600"
+                value={backupCfg.webhook_url}
+                onChange={e => setBackupCfg(prev => ({ ...prev, webhook_url: e.target.value }))}
+                placeholder="https://example.com/hooks/backup"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-gray-500 mb-1">Authorization header (optional)</label>
+              <input
+                type="text"
+                name="backup_webhook_authorization"
+                autoComplete="off"
+                spellCheck={false}
+                data-1p-ignore
+                data-lpignore="true"
+                className="w-full border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600"
+                value={backupCfg.webhook_auth_header}
+                onChange={e => setBackupCfg(prev => ({ ...prev, webhook_auth_header: e.target.value }))}
+                placeholder={backupMeta.webhook_auth_configured ? `Leave blank to keep (${backupMeta.webhook_auth_header_masked})` : 'Bearer …'}
+              />
+            </div>
+            <Button
+              size="sm"
+              disabled={backupSaving}
+              onClick={async () => {
+                setBackupSaving(true);
+                try {
+                  const r = await api.put('/settings/backup/config', backupCfg);
+                  setBackupMeta({
+                    webhook_auth_configured: !!r.webhook_auth_configured,
+                    webhook_auth_header_masked: r.webhook_auth_header_masked || '',
+                    local_disk_available: !!r.local_disk_available,
+                    local_backup_resolved: r.local_backup_resolved || null,
+                  });
+                  setBackupCfg(prev => ({ ...prev, webhook_auth_header: '' }));
+                  notify({ type: 'success', message: 'Backup settings saved' });
+                } catch (e) {
+                  notify({ type: 'error', message: e.message });
+                } finally {
+                  setBackupSaving(false);
+                }
+              }}
+            >
+              {backupSaving ? 'Saving…' : 'Save backup settings'}
+            </Button>
+          </div>
+        </section>
+        )}
           </>
         )}
 

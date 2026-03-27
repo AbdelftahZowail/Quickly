@@ -107,11 +107,12 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 
 ---
 
-### Option B: Self-host on Any Linux VPS (Recommended for production)
+### Option B: Self-host on a VPS (Docker Compose)
 
 ```bash
-mkdir quickly && cd quickly
+docker volume create quickly_pgdata   # Postgres data — do once before first start
 
+mkdir quickly && cd quickly
 curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
 curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
 curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
@@ -132,7 +133,9 @@ docker compose up -d
 
 Caddy automatically provisions and renews a Let's Encrypt TLS certificate. Open `https://yourdomain.com` — Quickly is live.
 
-→ [Full VPS guide with firewall setup and nginx migration](docs/INSTALL.md#option-b-fresh-vps--caddy-recommended)
+**Already running Caddy on the server?** Download `docker-compose-not-host.yml` from the same release instead, start with `docker compose -f docker-compose-not-host.yml up -d`, and add `reverse_proxy 127.0.0.1:5050` for your domain in the host Caddyfile.
+
+→ [Full VPS guide, firewall, Postgres volume, and not-host layout](docs/INSTALL.md#option-b-vps-with-docker-compose)
 
 ---
 

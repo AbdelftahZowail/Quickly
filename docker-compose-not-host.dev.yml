@@ -1,9 +1,11 @@
+name: quickly-nothost-dev
+
 services:
   db:
     image: postgres:15-alpine
     restart: unless-stopped
     ports:
-      - "5433:5432"
+      - "5434:5432"
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -23,12 +25,14 @@ services:
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
     volumes:
       - ./:/app
+      - ./backups:/app/backups
     ports:
-      - "8000:8000"   # direct access
-***REMOVED***
-    env_file: .env
+      - "8001:8000"   # direct access
+      - "5051:8000"   # host Caddy: reverse_proxy 127.0.0.1:5051 (prod not-host uses 5050)
+    env_file: .env_dev
     environment:
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+      QUICKLY_LOCAL_DISK_BACKUPS: "1"
     depends_on:
       db:
         condition: service_healthy
@@ -42,8 +46,8 @@ services:
       - ./frontend:/app
       - /app/node_modules
     ports:
-      - "5173:5173"
-    env_file: .env
+      - "5174:5173"
+    env_file: .env_dev
     environment:
       VITE_API_URL: "http://backend:8000"
     depends_on:
@@ -55,4 +59,4 @@ services:
 volumes:
   pgdata:
     external: true
-    name: quickly_pgdata
+    name: quickly_pgdata_dev

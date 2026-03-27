@@ -89,10 +89,13 @@ async def engine():
         # ``:memory:?cache=shared`` alone does not reliably attach all pool
         # connections to the same database, which breaks background sessions.
         _mem = uuid.uuid4().hex
+        # ``uri=true`` is required: without it SQLAlchemy resolves ``file:...`` to a
+        # cwd-relative path and drops ``mode=memory`` from the connect string, so
+        # each test leaves a real on-disk file named ``file:qtest_<uuid>``.
         eng = create_async_engine(
-            f"sqlite+aiosqlite:///file:qtest_{_mem}?mode=memory&cache=shared",
+            f"sqlite+aiosqlite:///file:qtest_{_mem}?uri=true&mode=memory&cache=shared",
             echo=False,
-            connect_args={"check_same_thread": False, "uri": True, "timeout": 30.0},
+            connect_args={"check_same_thread": False, "timeout": 30.0},
             poolclass=AsyncAdaptedQueuePool,
             pool_size=5,
             max_overflow=10,
