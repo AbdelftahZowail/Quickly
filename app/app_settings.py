@@ -208,6 +208,9 @@ BACKUP_LOCAL_RELATIVE_PATH_KEY = "backup_local_relative_path"
 BACKUP_SEND_WEBHOOK_KEY = "backup_send_webhook"
 BACKUP_WEBHOOK_URL_KEY = "backup_webhook_url"
 BACKUP_WEBHOOK_AUTH_HEADER_KEY = "backup_webhook_auth_header"
+BACKUP_ENCRYPT_ENABLED_KEY = "backup_encrypt_enabled"
+BACKUP_ENCRYPT_PASSWORD_KEY = "backup_encrypt_password"
+BACKUP_ENCRYPT_HINT_KEY = "backup_encrypt_hint"
 
 
 def _is_truthy_setting(raw: str | None) -> bool:
@@ -228,6 +231,9 @@ async def get_backup_config(db: AsyncSession) -> dict:
         "send_webhook": _is_truthy_setting(await get_setting(db, BACKUP_SEND_WEBHOOK_KEY)),
         "webhook_url": (await get_setting(db, BACKUP_WEBHOOK_URL_KEY) or "").strip(),
         "webhook_auth_header": (await get_setting(db, BACKUP_WEBHOOK_AUTH_HEADER_KEY) or "").strip(),
+        "encrypt_backups": _is_truthy_setting(await get_setting(db, BACKUP_ENCRYPT_ENABLED_KEY)),
+        "backup_encryption_password": (await get_setting(db, BACKUP_ENCRYPT_PASSWORD_KEY) or "").strip(),
+        "backup_encryption_hint": (await get_setting(db, BACKUP_ENCRYPT_HINT_KEY) or "").strip(),
     }
 
 
@@ -241,6 +247,9 @@ async def save_backup_config(
     send_webhook: bool,
     webhook_url: str,
     webhook_auth_header: str,
+    encrypt_backups: bool,
+    backup_encryption_password: str,
+    backup_encryption_hint: str,
 ) -> None:
     """Persist backup settings (caller commits)."""
     from app.backup_pg import normalize_user_backup_path
@@ -252,4 +261,7 @@ async def save_backup_config(
     await put_setting(db, BACKUP_SEND_WEBHOOK_KEY, "true" if send_webhook else "false")
     await put_setting(db, BACKUP_WEBHOOK_URL_KEY, webhook_url.strip())
     await put_setting(db, BACKUP_WEBHOOK_AUTH_HEADER_KEY, webhook_auth_header.strip())
+    await put_setting(db, BACKUP_ENCRYPT_ENABLED_KEY, "true" if encrypt_backups else "false")
+    await put_setting(db, BACKUP_ENCRYPT_PASSWORD_KEY, backup_encryption_password.strip())
+    await put_setting(db, BACKUP_ENCRYPT_HINT_KEY, backup_encryption_hint.strip())
     await db.flush()

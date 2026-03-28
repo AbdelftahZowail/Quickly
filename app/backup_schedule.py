@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 from apscheduler.triggers.cron import CronTrigger
 
 from app.app_settings import get_backup_config
+from app.backup_delivery import wrap_pg_dump_for_backup_config
+from app.backup_manifest import collect_backup_manifest
 from app.backup_pg import (
     BackupUnsupportedError,
     dump_to_thread,
@@ -28,7 +30,7 @@ SCHEDULED_BACKUP_JOB_ID = "scheduled_pg_backup"
 async def deliver_backup_payload(data: bytes, cfg: dict) -> dict:
     """Write local file and/or POST to webhook per *cfg* (from :func:`get_backup_config`)."""
     out: dict = {"local_path": None, "local_skipped": None, "webhook_ok": False, "webhook_error": None}
-    fname = "quickly-backup.dump"
+    fname = "quickly-backup.qbk"
 
     if cfg.get("save_local"):
         if not local_disk_backups_enabled():
@@ -60,16 +62,23 @@ async def run_scheduled_backup_job() -> None:
     if not cfg["schedule_enabled"]:
         return
     try:
-        payload = await dump_to_thread(db_url)
+        raw_dump = await dump_to_thread(db_url)
     except BackupUnsupportedError:
         log.warning("Scheduled backup skipped: database is not PostgreSQL")
         return
     except Exception:
         log.exception("Scheduled backup: pg_dump failed")
         return
-    async with AsyncSessionLocal() as db:
-        cfg = await get_backup_config(db)
-    result = await deliver_backup_payload(payload, cfg)
+    try:
+        async with AsyncSessionLocal() as db:
+            cfg = await get_backup_config(db)
+            enc = bool(cfg.get("encrypt_backups") and (cfg.get("backup_encryption_password") or "").strip())
+            manifest = await collect_backup_manifest(db, encrypted=enc)
+            wrapped = wrap_pg_dump_for_backup_config(manifest, raw_dump, cfg)
+    except Exception:
+        log.exception("Scheduled backup: packaging failed")
+        return
+    result = await deliver_backup_payload(wrapped, cfg)
     log.info("Scheduled backup finished: %s", result)
 
 

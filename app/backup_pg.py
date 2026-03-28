@@ -17,7 +17,7 @@ import httpx
 log = logging.getLogger("quickly.backup_pg")
 
 BACKUP_FILENAME_PREFIX = "quickly-backup-"
-BACKUP_FILENAME_SUFFIX = ".dump"
+BACKUP_FILENAME_SUFFIX = ".qbk"
 BACKUP_GLOB = f"{BACKUP_FILENAME_PREFIX}*{BACKUP_FILENAME_SUFFIX}"
 DEFAULT_LOCAL_RETENTION = 10
 DEFAULT_RELATIVE_BACKUP_PATH = "backups"
@@ -126,7 +126,7 @@ def resolve_backup_directory(user_path: str | None) -> Path:
 
 
 def prune_local_backups(directory: str | Path, *, keep: int = DEFAULT_LOCAL_RETENTION) -> None:
-    """Keep the *keep* newest ``quickly-backup-*.dump`` files; delete older."""
+    """Keep the *keep* newest ``quickly-backup-*.qbk`` files; delete older."""
     root = Path(directory)
     if not root.is_dir():
         return
@@ -190,9 +190,43 @@ async def restore_from_path_to_thread(database_url: str, path: str | Path) -> No
     await asyncio.to_thread(pg_restore_replace, database_url, path)
 
 
+def validate_custom_format_dump_file(path: str | Path) -> None:
+    """Ensure *path* is readable by pg_restore (custom format)."""
+    path = str(path)
+    proc = subprocess.run(
+        ["pg_restore", "-l", path],
+        capture_output=True,
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode(errors="replace").strip() or "Invalid PostgreSQL dump"
+        raise BackupToolError(err)
+
+
+async def validate_dump_bytes_async(dump: bytes) -> None:
+    """Run :func:`validate_custom_format_dump_file` on *dump* via a temp file."""
+
+    def _run() -> None:
+        import os
+        import tempfile
+
+        fd, path = tempfile.mkstemp(suffix=".dump")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(dump)
+            validate_custom_format_dump_file(path)
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    await asyncio.to_thread(_run)
+
+
 async def restore_from_upload_to_thread(database_url: str, raw: bytes) -> None:
     def _run() -> None:
-        with tempfile.NamedTemporaryFile(suffix=BACKUP_FILENAME_SUFFIX, delete=False) as tmp:
+        with tempfile.NamedTemporaryFile(suffix=".dump", delete=False) as tmp:
             tmp.write(raw)
             tmp_path = tmp.name
         try:

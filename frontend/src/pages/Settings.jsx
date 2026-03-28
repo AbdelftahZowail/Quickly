@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
-import { api, apiCache } from '../api';
+import { api, apiCache, postJsonForDownload } from '../api';
 import { useDarkMode } from '../context/DarkModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
@@ -108,16 +108,132 @@ export default function Settings() {
     send_webhook: false,
     webhook_url: '',
     webhook_auth_header: '',
+    encrypt_backups: false,
+    backup_encryption_password: '',
+    backup_encryption_hint: '',
   });
   const [backupMeta, setBackupMeta] = useState({
     webhook_auth_configured: false,
     webhook_auth_header_masked: '',
     local_disk_available: false,
     local_backup_resolved: null,
+    backup_encryption_configured: false,
   });
   const [backupSaving, setBackupSaving] = useState(false);
   const [backupRunning, setBackupRunning] = useState(false);
+  const [backupDownloadBusy, setBackupDownloadBusy] = useState(false);
   const [restoreFile, setRestoreFile] = useState(null);
+  const [restoreFileKey, setRestoreFileKey] = useState(0);
+  const [restorePassword, setRestorePassword] = useState('');
+  const [restoreMeta, setRestoreMeta] = useState(null);
+  const [restoreMetaBusy, setRestoreMetaBusy] = useState(false);
+  const [restorePreview, setRestorePreview] = useState(null);
+  const [restorePreviewBusy, setRestorePreviewBusy] = useState(false);
+  const [restoreExecuteBusy, setRestoreExecuteBusy] = useState(false);
+
+  const BACKUP_MIN_PASSWORD_LEN = 8;
+
+  useEffect(() => {
+    if (!restoreFile) {
+      return undefined;
+    }
+    let cancelled = false;
+    setRestoreMetaBusy(true);
+    setRestoreMeta(null);
+    setRestorePreview(null);
+    (async () => {
+      try {
+        const data = await api.uploadMultipart('/settings/backup/restore/metadata', restoreFile, {});
+        if (!cancelled) {
+          setRestoreMeta(data);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          notify({ type: 'error', message: e.message });
+        }
+      } finally {
+        if (!cancelled) {
+          setRestoreMetaBusy(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [restoreFile]);
+
+  const clearRestoreWizard = () => {
+    setRestoreFile(null);
+    setRestoreFileKey(k => k + 1);
+    setRestorePassword('');
+    setRestoreMeta(null);
+    setRestorePreview(null);
+  };
+
+  const saveBackupSettings = useCallback(async () => {
+    if (backupCfg.encrypt_backups) {
+      const pw = (backupCfg.backup_encryption_password || '').trim();
+      if (!backupMeta.backup_encryption_configured && pw.length < BACKUP_MIN_PASSWORD_LEN) {
+        notify({
+          type: 'error',
+          message: `Enter a backup password (at least ${BACKUP_MIN_PASSWORD_LEN} characters) or turn off encryption.`,
+        });
+        return;
+      }
+      if (pw.length > 0 && pw.length < BACKUP_MIN_PASSWORD_LEN) {
+        notify({
+          type: 'error',
+          message: `Backup password must be at least ${BACKUP_MIN_PASSWORD_LEN} characters.`,
+        });
+        return;
+      }
+    }
+    setBackupSaving(true);
+    try {
+      const encR = await api.put('/settings/backup/encryption', {
+        encrypt_backups: backupCfg.encrypt_backups,
+        backup_encryption_password: (backupCfg.backup_encryption_password || '').trim(),
+        backup_encryption_hint: (backupCfg.backup_encryption_hint || '').trim(),
+      });
+      setBackupMeta(prev => ({
+        ...prev,
+        backup_encryption_configured: !!encR.backup_encryption_configured,
+      }));
+      setBackupCfg(prev => ({
+        ...prev,
+        backup_encryption_password: '',
+        backup_encryption_hint: encR.backup_encryption_hint ?? prev.backup_encryption_hint,
+        encrypt_backups: !!encR.encrypt_backups,
+      }));
+      const r = await api.put('/settings/backup/config', {
+        schedule_enabled: backupCfg.schedule_enabled,
+        cron_expression: backupCfg.cron_expression,
+        save_local: backupCfg.save_local,
+        local_relative_path: backupCfg.local_relative_path,
+        send_webhook: backupCfg.send_webhook,
+        webhook_url: backupCfg.webhook_url,
+        webhook_auth_header: backupCfg.webhook_auth_header,
+      });
+      setBackupMeta({
+        webhook_auth_configured: !!r.webhook_auth_configured,
+        webhook_auth_header_masked: r.webhook_auth_header_masked || '',
+        local_disk_available: !!r.local_disk_available,
+        local_backup_resolved: r.local_backup_resolved || null,
+        backup_encryption_configured: !!r.backup_encryption_configured,
+      });
+      setBackupCfg(prev => ({
+        ...prev,
+        webhook_auth_header: '',
+        encrypt_backups: !!r.encrypt_backups,
+        backup_encryption_hint: r.backup_encryption_hint ?? prev.backup_encryption_hint,
+      }));
+      notify({ type: 'success', message: 'Backup settings saved' });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    } finally {
+      setBackupSaving(false);
+    }
+  }, [backupCfg, backupMeta, notify]);
 
   // Known IPs
   const [knownIps, setKnownIps] = useState(() => apiCache.get('/settings/known-ips')?.known_ips || []);
@@ -187,12 +303,16 @@ export default function Settings() {
             send_webhook: !!b.send_webhook,
             webhook_url: b.webhook_url || '',
             webhook_auth_header: '',
+            encrypt_backups: !!b.encrypt_backups,
+            backup_encryption_password: '',
+            backup_encryption_hint: b.backup_encryption_hint || '',
           });
           setBackupMeta({
             webhook_auth_configured: !!b.webhook_auth_configured,
             webhook_auth_header_masked: b.webhook_auth_header_masked || '',
             local_disk_available: diskOn,
             local_backup_resolved: b.local_backup_resolved || null,
+            backup_encryption_configured: !!b.backup_encryption_configured,
           });
         } catch {
           /* non-admin or unavailable */
@@ -868,18 +988,229 @@ export default function Settings() {
             Backup and restore the database containing all your leads, campaigns, and other data.
           </p>
 
+          <div className="rounded-lg border border-amber-200 dark:border-amber-900/50 bg-amber-50/80 dark:bg-amber-950/20 px-3 py-2 text-xs text-amber-900 dark:text-amber-200 mb-4">
+            <strong>Password loss:</strong> if you encrypt a backup and lose the password, the file cannot be decrypted — your data is
+            unrecoverable from that file. The optional hint is stored in the file in plain text; it is not a secret.
+          </div>
+
+          <h3 className="text-sm font-semibold mb-2 text-gray-900 dark:text-gray-100">Backup settings</h3>
+          <div className="space-y-4 text-sm mb-8 rounded-lg border border-gray-200 dark:border-gray-700 p-4 bg-gray-50/50 dark:bg-gray-900/30">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={backupCfg.encrypt_backups}
+                onChange={e => {
+                  const on = e.target.checked;
+                  setBackupCfg(prev => ({
+                    ...prev,
+                    encrypt_backups: on,
+                    ...(on ? {} : { backup_encryption_password: '' }),
+                  }));
+                }}
+              />
+              <span>Encrypt backups with password (recommended)</span>
+            </label>
+            {!backupCfg.encrypt_backups && (
+              <p className="text-xs text-amber-700 dark:text-amber-400">
+                Unencrypted backups are readable by anyone with the file. Download, Run backup now, and scheduled backups will not use encryption.
+              </p>
+            )}
+            {backupCfg.encrypt_backups && (
+              <div className="space-y-2 max-w-md">
+                {backupMeta.backup_encryption_configured && (
+                  <p className="text-xs text-gray-600 dark:text-gray-400">
+                    A password is already saved. Leave the fields blank to keep it, or enter a new password to replace it.
+                  </p>
+                )}
+                <div>
+                  <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    Backup password (min. {BACKUP_MIN_PASSWORD_LEN} characters)
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:border-gray-600"
+                    value={backupCfg.backup_encryption_password}
+                    onChange={e => setBackupCfg(prev => ({ ...prev, backup_encryption_password: e.target.value }))}
+                    autoComplete="new-password"
+                    placeholder={backupMeta.backup_encryption_configured ? 'Leave blank to keep existing password' : ''}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    Password hint (optional, stored in plain text in each .qbk)
+                  </label>
+                  <input
+                    type="text"
+                    className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:border-gray-600"
+                    value={backupCfg.backup_encryption_hint}
+                    onChange={e => setBackupCfg(prev => ({ ...prev, backup_encryption_hint: e.target.value }))}
+                    maxLength={200}
+                  />
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Applies to downloads, Run backup now, and scheduled backups when encryption is enabled.
+                </p>
+              </div>
+            )}
+
+            <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-2 space-y-3">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={backupCfg.schedule_enabled}
+                  onChange={e => setBackupCfg(prev => ({ ...prev, schedule_enabled: e.target.checked }))}
+                />
+                <span>Enable scheduled backup</span>
+              </label>
+              {backupCfg.schedule_enabled && (
+                <div className="space-y-3 sm:border-l-2 border-gray-200 dark:border-gray-600 sm:pl-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      Cron (minute hour day month day-of-week, UTC)
+                    </label>
+                    <input
+                      className="w-full max-w-md border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600"
+                      value={backupCfg.cron_expression}
+                      onChange={e => setBackupCfg(prev => ({ ...prev, cron_expression: e.target.value }))}
+                      placeholder="0 3 * * *"
+                    />
+                  </div>
+                  {!backupMeta.local_disk_available && (
+                    <p className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
+                      Saving backups on the server requires the deployment to set{' '}
+                      <code className="text-[11px]">QUICKLY_LOCAL_DISK_BACKUPS</code> and a persistent{' '}
+                      <code className="text-[11px]">backups</code> folder (Docker Compose in this repo does). On hosts without that, use{' '}
+                      <strong>POST to webhook</strong> below.
+                    </p>
+                  )}
+                  <label className={`flex items-center gap-2 ${backupMeta.local_disk_available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+                    <input
+                      type="checkbox"
+                      disabled={!backupMeta.local_disk_available}
+                      checked={backupCfg.save_local}
+                      onChange={e => setBackupCfg(prev => ({ ...prev, save_local: e.target.checked }))}
+                    />
+                    <span>Save to server disk (keeps 10 newest files; older ones are removed)</span>
+                  </label>
+                  <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                      Folder (under the app directory, default <code className="text-[11px]">backups</code>)
+                    </label>
+                    <input
+                      className="w-full max-w-md border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600 disabled:opacity-50"
+                      disabled={!backupMeta.local_disk_available}
+                      value={backupCfg.local_relative_path}
+                      onChange={e => setBackupCfg(prev => ({ ...prev, local_relative_path: e.target.value }))}
+                      placeholder="backups"
+                    />
+                    {backupMeta.local_disk_available && backupMeta.local_backup_resolved && (
+                      <p className="text-xs text-gray-400 mt-1 break-all">
+                        Resolves to: {backupMeta.local_backup_resolved}
+                      </p>
+                    )}
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={backupCfg.send_webhook}
+                      onChange={e => setBackupCfg(prev => ({ ...prev, send_webhook: e.target.checked }))}
+                    />
+                    <span>POST backup file to webhook URL</span>
+                  </label>
+                  <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Webhook URL</label>
+                    <input
+                      type="url"
+                      className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:border-gray-600"
+                      value={backupCfg.webhook_url}
+                      onChange={e => setBackupCfg(prev => ({ ...prev, webhook_url: e.target.value }))}
+                      placeholder="https://example.com/hooks/backup"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">Authorization header (optional)</label>
+                    <input
+                      type="text"
+                      name="backup_webhook_authorization"
+                      autoComplete="off"
+                      spellCheck={false}
+                      data-1p-ignore
+                      data-lpignore="true"
+                      className="w-full border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600"
+                      value={backupCfg.webhook_auth_header}
+                      onChange={e => setBackupCfg(prev => ({ ...prev, webhook_auth_header: e.target.value }))}
+                      placeholder={backupMeta.webhook_auth_configured ? `Leave blank to keep existing password` : 'Bearer …'}
+                    />
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <Button size="sm" disabled={backupSaving} onClick={saveBackupSettings}>
+              {backupSaving ? 'Saving…' : 'Save settings'}
+            </Button>
+          </div>
+
+          <h3
+            id="settings-backup-manual"
+            className="text-sm font-semibold mb-2 scroll-mt-6 text-gray-900 dark:text-gray-100"
+          >
+            Download, run, or restore
+          </h3>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+            Uses encryption and schedule options from <strong>Backup settings</strong> above. Save settings before downloading if you changed them.
+          </p>
           <div className="space-y-4 mb-6">
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
                 variant="outline"
+                disabled={
+                  backupDownloadBusy ||
+                  (backupCfg.encrypt_backups &&
+                    !backupMeta.backup_encryption_configured &&
+                    (backupCfg.backup_encryption_password || '').trim().length < BACKUP_MIN_PASSWORD_LEN)
+                }
                 onClick={async () => {
+                  setBackupDownloadBusy(true);
                   try {
-                    const res = await api.download('/settings/backup/download');
+                    const wantEnc = backupCfg.encrypt_backups;
+                    const draftPw = (backupCfg.backup_encryption_password || '').trim();
+                    let payload;
+                    if (!wantEnc) {
+                      payload = {
+                        use_saved_encryption: false,
+                        encrypt: false,
+                        password: '',
+                        password_hint: '',
+                      };
+                    } else if (draftPw.length >= BACKUP_MIN_PASSWORD_LEN) {
+                      payload = {
+                        use_saved_encryption: false,
+                        encrypt: true,
+                        password: draftPw,
+                        password_hint: (backupCfg.backup_encryption_hint || '').trim(),
+                      };
+                    } else if (backupMeta.backup_encryption_configured) {
+                      payload = {
+                        use_saved_encryption: true,
+                        encrypt: true,
+                        password: '',
+                        password_hint: '',
+                      };
+                    } else {
+                      payload = {
+                        use_saved_encryption: false,
+                        encrypt: false,
+                        password: '',
+                        password_hint: '',
+                      };
+                    }
+                    const res = await postJsonForDownload('/settings/backup/download', payload);
                     const blob = await res.blob();
                     const dispo = res.headers.get('Content-Disposition');
                     const m = dispo && dispo.match(/filename="([^"]+)"/);
-                    const name = m ? m[1] : 'quickly-backup.dump';
+                    const name = m ? m[1] : 'quickly-backup.qbk';
                     const a = document.createElement('a');
                     a.href = URL.createObjectURL(blob);
                     a.download = name;
@@ -888,11 +1219,16 @@ export default function Settings() {
                     notify({ type: 'success', message: 'Backup downloaded' });
                   } catch (e) {
                     notify({ type: 'error', message: e.message || 'Download failed' });
+                  } finally {
+                    setBackupDownloadBusy(false);
                   }
                 }}
               >
-                Download backup
+                {backupDownloadBusy ? 'Preparing…' : 'Download backup'}
               </Button>
+            </div>
+
+            <div className="flex flex-wrap gap-2">
               <Button
                 size="sm"
                 variant="outline"
@@ -918,156 +1254,230 @@ export default function Settings() {
               </Button>
             </div>
 
-            <div className="border-t border-gray-200 dark:border-gray-700 pt-4">
+            <div className="border-t border-gray-200 dark:border-gray-700 pt-4 mt-4">
               <p className="text-sm font-medium mb-2">Restore from file</p>
               <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
-                Caution: This will delete all your current data and replace it with the backup.
+                Restoring replaces the entire database. After you choose a file, we show what is in the backup before you enter a password (if encrypted).
               </p>
-              <FileUploadArea
-                size="full"
-                className="mb-2"
-                accept=".dump,application/octet-stream"
-                onChange={e => setRestoreFile(e.target.files?.[0] || null)}
-              >
+              <div className="flex items-stretch gap-2 mb-2">
+                <FileUploadArea
+                  key={restoreFileKey}
+                  size="full"
+                  className="flex-1 min-w-0"
+                  accept=".qbk,application/octet-stream"
+                  disabled={restoreMetaBusy || restorePreviewBusy || restoreExecuteBusy}
+                  onChange={e => {
+                    setRestoreFile(e.target.files?.[0] || null);
+                    setRestorePreview(null);
+                  }}
+                >
+                  {restoreFile ? (
+                    <span className="truncate text-gray-900 dark:text-gray-100">{restoreFile.name}</span>
+                  ) : (
+                    <span className="text-gray-500 dark:text-gray-400">Choose backup file (.qbk)</span>
+                  )}
+                </FileUploadArea>
                 {restoreFile ? (
-                  <span className="truncate text-gray-900 dark:text-gray-100">{restoreFile.name}</span>
-                ) : (
-                  <span className="text-gray-500 dark:text-gray-400">Choose backup file (.dump)</span>
-                )}
-              </FileUploadArea>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!restoreFile}
-                onClick={async () => {
-                  const ok = await confirm(
-                    'Restore will replace the entire database with this file. This cannot be undone. Continue?',
-                  );
-                  if (!ok) return;
-                  try {
-                    await api.upload('/settings/backup/restore', restoreFile);
-                    notify({ type: 'success', message: 'Restore completed. Reloading…' });
-                    setTimeout(() => window.location.reload(), 1500);
-                  } catch (e) {
-                    notify({ type: 'error', message: e.message });
-                  }
-                }}
-              >
-                Restore from upload
-              </Button>
-            </div>
-          </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="shrink-0 px-3"
+                    title="Remove file"
+                    disabled={restoreMetaBusy || restorePreviewBusy || restoreExecuteBusy}
+                    onClick={clearRestoreWizard}
+                  >
+                    ×
+                  </Button>
+                ) : null}
+              </div>
 
-          <h3 className="text-sm font-semibold mb-2">Scheduled &amp; remote backup</h3>
-          <div className="space-y-3 text-sm">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={backupCfg.schedule_enabled}
-                onChange={e => setBackupCfg(prev => ({ ...prev, schedule_enabled: e.target.checked }))}
-              />
-              <span>Enable scheduled backup (in-app cron)</span>
-            </label>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Cron (minute hour day month day-of-week, UTC)</label>
-              <input
-                className="w-full max-w-md border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600"
-                value={backupCfg.cron_expression}
-                onChange={e => setBackupCfg(prev => ({ ...prev, cron_expression: e.target.value }))}
-                placeholder="0 3 * * *"
-              />
-            </div>
-            {!backupMeta.local_disk_available && (
-              <p className="text-xs text-gray-600 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700 rounded-lg px-3 py-2">
-                Saving backups on the server requires the deployment to set{' '}
-                <code className="text-[11px]">QUICKLY_LOCAL_DISK_BACKUPS</code> and a persistent{' '}
-                <code className="text-[11px]">backups</code> folder (all Docker Compose files in this project do). On cloud
-                hosts without that setup, use <strong>POST to webhook</strong> below.
-              </p>
-            )}
-            <label className={`flex items-center gap-2 ${backupMeta.local_disk_available ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
-              <input
-                type="checkbox"
-                disabled={!backupMeta.local_disk_available}
-                checked={backupCfg.save_local}
-                onChange={e => setBackupCfg(prev => ({ ...prev, save_local: e.target.checked }))}
-              />
-              <span>Save to server disk (keeps 10 newest files; older ones are removed)</span>
-            </label>
-            <div>
-              <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
-                Folder (under the app directory, default <code className="text-[11px]">backups</code>)
-              </label>
-              <input
-                className="w-full max-w-md border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600 disabled:opacity-50"
-                disabled={!backupMeta.local_disk_available}
-                value={backupCfg.local_relative_path}
-                onChange={e => setBackupCfg(prev => ({ ...prev, local_relative_path: e.target.value }))}
-                placeholder="backups"
-              />
-              {backupMeta.local_disk_available && backupMeta.local_backup_resolved && (
-                <p className="text-xs text-gray-400 mt-1 break-all">
-                  Resolves to: {backupMeta.local_backup_resolved}
-                </p>
+              {restoreMetaBusy && (
+                <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">Reading backup…</p>
+              )}
+
+              {restoreMeta && !restoreMetaBusy && !restorePreview && (
+                <div className="rounded-lg border border-gray-200 dark:border-gray-600 p-3 text-sm space-y-3 mb-3 bg-gray-50 dark:bg-gray-900/40">
+                  {restoreMeta.password_hint ? (
+                    <p className="text-xs text-gray-600 dark:text-gray-400">
+                      Hint: <span className="font-mono">{restoreMeta.password_hint}</span>
+                    </p>
+                  ) : null}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <p className="font-semibold text-gray-700 dark:text-gray-300 mb-1">This backup</p>
+                      <ul className="space-y-0.5 text-gray-600 dark:text-gray-400">
+                        <li>Backed up: {restoreMeta.backup_preview?.backed_up_at ? new Date(restoreMeta.backup_preview.backed_up_at).toLocaleString() : '—'}</li>
+                        <li>Leads: {restoreMeta.backup_preview?.lead_count ?? '—'}</li>
+                        <li>Inboxes: {restoreMeta.backup_preview?.inbox_count ?? '—'}</li>
+                        <li>Campaigns: {restoreMeta.backup_preview?.campaign_count ?? '—'}</li>
+                        <li>Users: {restoreMeta.backup_preview?.user_count ?? '—'}</li>
+                        <li>Admins: {(restoreMeta.backup_preview?.admin_emails || []).join(', ') || '—'}</li>
+                        <li>Encrypted: {restoreMeta.encrypted ? 'yes' : 'no'}</li>
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-gray-700 dark:text-gray-300 mb-1">Current database (will be replaced)</p>
+                      <ul className="space-y-0.5 text-gray-600 dark:text-gray-400">
+                        <li>Leads: {restoreMeta.current_database?.lead_count ?? '—'}</li>
+                        <li>Inboxes: {restoreMeta.current_database?.inbox_count ?? '—'}</li>
+                        <li>Campaigns: {restoreMeta.current_database?.campaign_count ?? '—'}</li>
+                        <li>Users: {restoreMeta.current_database?.user_count ?? '—'}</li>
+                        <li>Admins: {(restoreMeta.current_database?.admin_emails || []).join(', ') || '—'}</li>
+                      </ul>
+                    </div>
+                  </div>
+                  <p className="text-xs text-amber-800 dark:text-amber-200">
+                    For encrypted backups, admin emails stay masked until the password is verified.
+                  </p>
+                </div>
+              )}
+
+              {restoreMeta && !restorePreview && restoreMeta.encrypted && (
+                <div className="max-w-md mb-2">
+                  <label className="block text-xs text-gray-500 dark:text-gray-400 mb-1">
+                    Backup password
+                  </label>
+                  <input
+                    type="password"
+                    className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:border-gray-600"
+                    placeholder={`At least ${BACKUP_MIN_PASSWORD_LEN} characters`}
+                    value={restorePassword}
+                    onChange={e => setRestorePassword(e.target.value)}
+                    disabled={restorePreviewBusy || restoreExecuteBusy}
+                    autoComplete="off"
+                  />
+                </div>
+              )}
+
+              <div className="flex flex-wrap gap-2 mb-3">
+                {restoreMeta && !restorePreview && !restoreMeta.encrypted && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={!restoreFile || restorePreviewBusy || restoreMetaBusy}
+                    onClick={async () => {
+                      setRestorePreviewBusy(true);
+                      setRestorePreview(null);
+                      try {
+                        const data = await api.uploadMultipart('/settings/backup/restore/preview', restoreFile, {});
+                        setRestorePreview(data);
+                      } catch (e) {
+                        notify({ type: 'error', message: e.message });
+                      } finally {
+                        setRestorePreviewBusy(false);
+                      }
+                    }}
+                  >
+                    {restorePreviewBusy ? 'Checking…' : 'Verify backup'}
+                  </Button>
+                )}
+                {restoreMeta && !restorePreview && restoreMeta.encrypted && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={
+                      !restoreFile ||
+                      restorePreviewBusy ||
+                      restoreMetaBusy ||
+                      restorePassword.length < BACKUP_MIN_PASSWORD_LEN
+                    }
+                    onClick={async () => {
+                      setRestorePreviewBusy(true);
+                      setRestorePreview(null);
+                      try {
+                        const data = await api.uploadMultipart('/settings/backup/restore/preview', restoreFile, {
+                          password: restorePassword,
+                        });
+                        setRestorePreview(data);
+                      } catch (e) {
+                        notify({ type: 'error', message: e.message });
+                      } finally {
+                        setRestorePreviewBusy(false);
+                      }
+                    }}
+                  >
+                    {restorePreviewBusy ? 'Checking…' : 'Verify password'}
+                  </Button>
+                )}
+              </div>
+
+              {restorePreview && (
+                <div className="rounded-lg border border-gray-200 dark:border-gray-600 p-3 text-sm space-y-3 mb-3 bg-gray-50 dark:bg-gray-900/40">
+                  <p className="font-medium text-gray-900 dark:text-gray-100">Verified — confirm restore</p>
+                  {restorePreview.password_hint ? (
+                    <p className="text-xs text-gray-600 dark:text-gray-400">
+                      Hint: <span className="font-mono">{restorePreview.password_hint}</span>
+                    </p>
+                  ) : null}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <p className="font-semibold text-gray-700 dark:text-gray-300 mb-1">Backup snapshot</p>
+                      <ul className="space-y-0.5 text-gray-600 dark:text-gray-400">
+                        <li>Backed up: {restorePreview.backup?.backed_up_at ? new Date(restorePreview.backup.backed_up_at).toLocaleString() : '—'}</li>
+                        <li>Leads: {restorePreview.backup?.lead_count ?? '—'}</li>
+                        <li>Inboxes: {restorePreview.backup?.inbox_count ?? '—'}</li>
+                        <li>Campaigns: {restorePreview.backup?.campaign_count ?? '—'}</li>
+                        <li>Users: {restorePreview.backup?.user_count ?? '—'}</li>
+                        <li>Admins: {(restorePreview.backup?.admin_emails || []).join(', ') || '—'}</li>
+                        <li>Encrypted: {restorePreview.backup?.encrypted ? 'yes' : 'no'}</li>
+                      </ul>
+                    </div>
+                    <div>
+                      <p className="font-semibold text-gray-700 dark:text-gray-300 mb-1">Current database (will be replaced)</p>
+                      <ul className="space-y-0.5 text-gray-600 dark:text-gray-400">
+                        <li>Leads: {restorePreview.current_database?.lead_count ?? '—'}</li>
+                        <li>Inboxes: {restorePreview.current_database?.inbox_count ?? '—'}</li>
+                        <li>Campaigns: {restorePreview.current_database?.campaign_count ?? '—'}</li>
+                        <li>Users: {restorePreview.current_database?.user_count ?? '—'}</li>
+                        <li>Admins: {(restorePreview.current_database?.admin_emails || []).join(', ') || '—'}</li>
+                      </ul>
+                    </div>
+                  </div>
+                  {(restorePreview.current_database?.lead_count > 0 ||
+                    restorePreview.current_database?.user_count > 0) && (
+                    <div className="text-xs text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-2 py-2">
+                      You are about to overwrite existing data. Download a backup of your current state first if you need to keep it.
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="mt-2"
+                        onClick={() => document.getElementById('settings-backup-manual')?.scrollIntoView({ behavior: 'smooth' })}
+                      >
+                        Jump to download
+                      </Button>
+                    </div>
+                  )}
+                  <p className="text-xs text-red-700 dark:text-red-400">
+                    This cannot be undone. Encrypted backups are useless without the password.
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={restoreExecuteBusy}
+                    onClick={async () => {
+                      const ok = await confirm(
+                        'Replace the live database with this backup? This permanently deletes current data in the database.',
+                      );
+                      if (!ok) return;
+                      setRestoreExecuteBusy(true);
+                      try {
+                        await api.post('/settings/backup/restore/execute', {
+                          restore_token: restorePreview.restore_token,
+                        });
+                        notify({ type: 'success', message: 'Restore completed. Reloading…' });
+                      } catch (e) {
+                        notify({ type: 'error', message: e.message });
+                      } finally {
+                        setRestoreExecuteBusy(false);
+                      }
+                    }}
+                  >
+                    {restoreExecuteBusy ? 'Restoring…' : 'Confirm and restore'}
+                  </Button>
+                </div>
               )}
             </div>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={backupCfg.send_webhook}
-                onChange={e => setBackupCfg(prev => ({ ...prev, send_webhook: e.target.checked }))}
-              />
-              <span>POST backup file to webhook URL</span>
-            </label>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Webhook URL</label>
-              <input
-                type="url"
-                className="w-full border rounded-lg px-3 py-2 text-sm dark:bg-gray-900 dark:border-gray-600"
-                value={backupCfg.webhook_url}
-                onChange={e => setBackupCfg(prev => ({ ...prev, webhook_url: e.target.value }))}
-                placeholder="https://example.com/hooks/backup"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-gray-500 mb-1">Authorization header (optional)</label>
-              <input
-                type="text"
-                name="backup_webhook_authorization"
-                autoComplete="off"
-                spellCheck={false}
-                data-1p-ignore
-                data-lpignore="true"
-                className="w-full border rounded-lg px-3 py-2 text-sm font-mono dark:bg-gray-900 dark:border-gray-600"
-                value={backupCfg.webhook_auth_header}
-                onChange={e => setBackupCfg(prev => ({ ...prev, webhook_auth_header: e.target.value }))}
-                placeholder={backupMeta.webhook_auth_configured ? `Leave blank to keep (${backupMeta.webhook_auth_header_masked})` : 'Bearer …'}
-              />
-            </div>
-            <Button
-              size="sm"
-              disabled={backupSaving}
-              onClick={async () => {
-                setBackupSaving(true);
-                try {
-                  const r = await api.put('/settings/backup/config', backupCfg);
-                  setBackupMeta({
-                    webhook_auth_configured: !!r.webhook_auth_configured,
-                    webhook_auth_header_masked: r.webhook_auth_header_masked || '',
-                    local_disk_available: !!r.local_disk_available,
-                    local_backup_resolved: r.local_backup_resolved || null,
-                  });
-                  setBackupCfg(prev => ({ ...prev, webhook_auth_header: '' }));
-                  notify({ type: 'success', message: 'Backup settings saved' });
-                } catch (e) {
-                  notify({ type: 'error', message: e.message });
-                } finally {
-                  setBackupSaving(false);
-                }
-              }}
-            >
-              {backupSaving ? 'Saving…' : 'Save backup settings'}
-            </Button>
           </div>
         </section>
         )}

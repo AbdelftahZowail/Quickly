@@ -10,9 +10,10 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     File,
+    Form,
     HTTPException,
-    Response,
     Request,
+    Response,
     UploadFile,
     status,
 )
@@ -32,9 +33,24 @@ from app.auth import (
     require_admin,
     verify_password,
 )
-from app.backup_pg import BackupToolError, BackupUnsupportedError
-from app.backup_restore_ops import restore_database_from_bytes
+from app.backup_manifest import collect_backup_manifest
+from app.backup_package import (
+    BackupPackageError,
+    read_backup_metadata,
+    read_password_hint,
+    unpack_backup,
+)
+from app.backup_pg import BackupToolError, BackupUnsupportedError, validate_dump_bytes_async
+from app.backup_restore_ops import restore_database_from_path
+from app.backup_restore_staging import (
+    consume_staged_dump,
+    delete_staged_dump,
+    purge_expired_staging,
+    stage_decrypted_dump,
+)
+from app.client_ip import client_ip_from_request
 from app.database import AsyncSessionLocal, get_db
+from app.restore_preview_rate import allow_restore_preview
 from app.models import APIKey, User
 from app.time import utcnow
 
@@ -151,12 +167,25 @@ async def setup_status(db: AsyncSession = Depends(get_db)):
     return {"setup_complete": done}
 
 
-@router.post("/restore-setup")
-async def restore_setup(
-    background_tasks: BackgroundTasks,
+STAGING_KIND_RESTORE_SETUP = "restore-setup"
+
+
+class RestoreSetupExecuteBody(BaseModel):
+    restore_token: str = Field(..., min_length=10, max_length=256)
+
+
+@router.post("/restore-setup/metadata")
+async def restore_setup_metadata(
+    request: Request,
     file: UploadFile = File(...),
 ):
-    """Destructively restore PostgreSQL from a backup before any user exists."""
+    """Backup summary from file only (no password); same rate limit as restore preview."""
+    ip = client_ip_from_request(request) or "unknown"
+    if not allow_restore_preview(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many restore attempts. Try again later.",
+        )
     async with AsyncSessionLocal() as db:
         if await is_setup_complete(db):
             raise HTTPException(
@@ -164,15 +193,97 @@ async def restore_setup(
                 detail="Setup already complete. Sign in and use Settings → Backup to restore.",
             )
     raw = await file.read()
-    if not raw or len(raw) < 64:
+    if not raw or len(raw) < 32:
         raise HTTPException(status_code=400, detail="Invalid or empty backup file")
     try:
-        await restore_database_from_bytes(raw, background_tasks)
+        backup_preview, encrypted, hint = read_backup_metadata(raw)
+    except BackupPackageError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    async with AsyncSessionLocal() as db:
+        current = await collect_backup_manifest(db, encrypted=False)
+    return {
+        "backup_preview": backup_preview,
+        "encrypted": encrypted,
+        "password_required": encrypted,
+        "password_hint": hint or "",
+        "current_database": current,
+    }
+
+
+@router.post("/restore-setup/preview")
+async def restore_setup_preview(
+    request: Request,
+    file: UploadFile = File(...),
+    password: str = Form(""),
+):
+    """Validate backup and return manifest + token; does not modify the database."""
+    ip = client_ip_from_request(request) or "unknown"
+    if not allow_restore_preview(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many restore preview attempts. Try again later.",
+        )
+    async with AsyncSessionLocal() as db:
+        if await is_setup_complete(db):
+            raise HTTPException(
+                status_code=403,
+                detail="Setup already complete. Sign in and use Settings → Backup to restore.",
+            )
+    raw = await file.read()
+    if not raw or len(raw) < 32:
+        raise HTTPException(status_code=400, detail="Invalid or empty backup file")
+    purge_expired_staging()
+    pw = (password or "").strip() or None
+    try:
+        manifest, dump = unpack_backup(raw, password=pw)
+    except BackupPackageError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    try:
+        await validate_dump_bytes_async(dump)
+    except BackupToolError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    async with AsyncSessionLocal() as db:
+        current = await collect_backup_manifest(db, encrypted=False)
+    token, ttl = stage_decrypted_dump(dump, kind=STAGING_KIND_RESTORE_SETUP)
+    hint = read_password_hint(raw)
+    return {
+        "restore_token": token,
+        "expires_in_seconds": ttl,
+        "password_hint": hint or "",
+        "backup": manifest,
+        "current_database": current,
+    }
+
+
+@router.post("/restore-setup/execute")
+async def restore_setup_execute(
+    body: RestoreSetupExecuteBody,
+    background_tasks: BackgroundTasks,
+    response: Response,
+):
+    """Run restore after :func:`restore_setup_preview` returned a token."""
+    async with AsyncSessionLocal() as db:
+        if await is_setup_complete(db):
+            raise HTTPException(
+                status_code=403,
+                detail="Setup already complete. Sign in and use Settings → Backup to restore.",
+            )
+    path = consume_staged_dump(body.restore_token, expected_kind=STAGING_KIND_RESTORE_SETUP)
+    if path is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid or expired restore confirmation. Run preview again.",
+        )
+    try:
+        await restore_database_from_path(path, background_tasks)
     except BackupUnsupportedError:
         raise HTTPException(status_code=501, detail="Restore requires PostgreSQL.")
     except BackupToolError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    finally:
+        delete_staged_dump(path)
     log.warning("Database restored from backup during pre-setup flow")
+    response.headers["X-Quickly-Reload"] = "1"
     return {"ok": True, "detail": "Database restored; you can sign in or create an admin account."}
 
 
