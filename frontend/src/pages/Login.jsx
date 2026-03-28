@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { FileUploadArea } from '../components/ui/FileUploadArea';
 
 export default function Login() {
   const { setupComplete } = useAuth();
@@ -75,16 +76,22 @@ export default function Login() {
                 Upload a PostgreSQL custom-format backup (<code className="text-[11px]">.dump</code>).
                 This replaces all data in the database. Only available before the first account exists.
               </p>
-              <input
-                type="file"
+              <FileUploadArea
+                size="full"
+                className="text-xs"
                 accept=".dump,application/octet-stream"
-                className="block w-full text-xs text-gray-600"
                 disabled={restoreBusy}
                 onChange={e => {
                   setRestoreMsg(null);
                   setRestoreFile(e.target.files?.[0] || null);
                 }}
-              />
+              >
+                {restoreFile ? (
+                  <span className="truncate text-gray-800">{restoreFile.name}</span>
+                ) : (
+                  <span className="text-gray-500">Choose backup file (.dump)</span>
+                )}
+              </FileUploadArea>
               <button
                 type="button"
                 disabled={restoreBusy || !restoreFile}

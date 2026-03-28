@@ -77,8 +77,9 @@ async def list_leads(
     q: str = "",
     status: str = "",
     bad_only: bool = False,
+    interest: str = "",
 ) -> str:
-    """List leads with optional filters (search text, exact status, or bounced/invalid only)."""
+    """List leads with optional filters (search, enrollment status, bad_only, interest); filters stack with AND."""
     headers = _outbound_headers(ctx)
     headers["Content-Type"] = "application/json"
     params: dict[str, str] = {}
@@ -88,6 +89,8 @@ async def list_leads(
         params["status"] = status.strip()
     if bad_only:
         params["bad_only"] = "true"
+    if interest.strip():
+        params["interest"] = interest.strip()
     url = f"{_api_base()}/api/leads"
     async with httpx.AsyncClient(timeout=120.0) as client:
         r = await client.get(url, headers=headers, params=params)

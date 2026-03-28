@@ -4,6 +4,7 @@ import { useNotify } from '../context/NotificationContext';
 import { useLoading } from '../context/LoadingContext';
 import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
+import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
 import DatePicker from '../components/ui/DatePicker';
 import { useConfirm } from '../context/ConfirmContext';
@@ -149,7 +150,7 @@ export default function CampaignDetail() {
               <table className="w-full text-sm border-collapse mb-3">
                 <thead>
                   <tr className="bg-gray-50">
-                    {['Date','Time','Lead','Sequence','Subject'].map(h => (
+                    {['Date','Time','From','Lead','Sequence','Subject'].map(h => (
                       <th key={h} className="px-3 py-2 text-left font-semibold text-gray-600">{h}</th>
                     ))}
                   </tr>
@@ -157,10 +158,11 @@ export default function CampaignDetail() {
                 <tbody>
                   {Object.keys(sent.reduce((acc,s)=>{const d=s.sent_date||'?'; (acc[d]=acc[d]||[]).push(s); return acc;},{})).sort()
                     .flatMap(d => sent.filter(s=>(s.sent_date||'')=== d).map((s,i)=>(
-                      <tr key={s.id} className={`border-b ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
+                      <tr key={s.log_id} className={`border-b ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
                         onClick={()=>!filter&&setQueueFilter(s.lead_email)}>
                         <td className="px-3 py-1.5">{i===0?d:''}</td>
                         <td className="px-3 py-1.5">{formatTime(s.sent_at)}</td>
+                        <td className="px-3 py-1.5 font-mono text-xs max-w-[200px] truncate" title={s.inbox_email || ''}>{s.inbox_email || '—'}</td>
                         <td className="px-3 py-1.5 font-mono">{s.lead_email}</td>
                         <td className="px-3 py-1.5">Seq {s.sequence_index+1}</td>
                         <td className="px-3 py-1.5">{s.subject||''}</td>
@@ -191,12 +193,12 @@ export default function CampaignDetail() {
                       const isPast = d < today;
                       const t = q.scheduled_date?.includes('T') ? formatTime(q.scheduled_date) : estimatedTime(q.position_in_day);
                       return (
-                        <tr key={q.id} className={`border-b ${isPast?'text-gray-400':''} ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
+                        <tr key={q.slot_id} className={`border-b ${isPast?'text-gray-400':''} ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
                           onClick={()=>!filter&&setQueueFilter(q.lead_email)}>
                           <td className="px-3 py-1.5">{i===0?d:''}</td>
                           <td className="px-3 py-1.5">{t}</td>
                           <td className="px-3 py-1.5">{q.position_in_day}</td>
-                          <td className="px-3 py-1.5 font-mono">{q.inbox_email||''}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs max-w-[200px] truncate" title={q.inbox_email || ''}>{q.inbox_email || '—'}</td>
                           <td className="px-3 py-1.5 font-mono">{q.lead_email}</td>
                           <td className="px-3 py-1.5">Seq {q.sequence_index+1}</td>
                         </tr>
@@ -403,8 +405,15 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const fileInputRef = useRef(null);
   const [verifying, setVerifying] = useState(false);
   const [verificationSummary, setVerificationSummary] = useState(null);
-  // filters: { status, opened, replied, clicked, verification }
-  const [filters, setFilters] = useState({ status: 'all', opened: 'all', replied: 'all', clicked: 'all', verification: 'all' });
+  // filters: { status, interest, opened, replied, clicked, verification }
+  const [filters, setFilters] = useState({
+    status: 'all',
+    interest: 'all',
+    opened: 'all',
+    replied: 'all',
+    clicked: 'all',
+    verification: 'all',
+  });
   const setFilter = (key, val) => setFilters(prev => ({ ...prev, [key]: val }));
   const hasActiveFilter = Object.values(filters).some(v => v !== 'all');
 
@@ -425,6 +434,12 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         if (filters.status === 'unsubscribed' && l.status !== 'unsubscribed') return false;
         if (filters.status === 'wrong_person' && l.status !== 'wrong_person') return false;
         if (filters.status === 'completed' && l.status !== 'completed') return false;
+      }
+      if (filters.interest !== 'all') {
+        const intr = l.interest ?? l.interest_status ?? '';
+        if (filters.interest === 'unset') {
+          if (intr) return false;
+        } else if (intr !== filters.interest) return false;
       }
       if (filters.opened === 'yes' && !l.opened) return false;
       if (filters.opened === 'no' && l.opened) return false;
@@ -666,6 +681,9 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     try {
       const params = new URLSearchParams();
       if (filters.status !== 'all') params.set('status', filters.status);
+      if (filters.interest !== 'all') {
+        params.set('interest', filters.interest === 'unset' ? 'unset' : filters.interest);
+      }
       if (filters.verification !== 'all' && filters.verification !== 'unverified') {
         params.set('verification_status', filters.verification);
       }
@@ -694,11 +712,18 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V3" /></svg>
           Export{hasActiveFilter ? ' (filtered)' : ''} CSV
         </Button>
-        <input ref={fileInputRef} type="file" accept=".csv,.tsv,.txt" className="hidden" onChange={handleFileImport} />
-        <Button size="sm" variant="outline" onClick={() => fileInputRef.current?.click()} disabled={importing}>
-          <svg className="w-4 h-4 mr-1.5 inline" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 8l-4-4m0 0L8 8m4-4v12" /></svg>
+        <FileUploadArea
+          ref={fileInputRef}
+          size="sm"
+          accept=".csv,.tsv,.txt"
+          disabled={importing}
+          onChange={handleFileImport}
+        >
+          <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M16 8l-4-4m0 0L8 8m4-4v12" />
+          </svg>
           {importing ? 'Importing…' : 'Import CSV'}
-        </Button>
+        </FileUploadArea>
         {emailVerifEnabled && (
           <Button size="sm" variant="outline" onClick={verifyAllLeads} disabled={verifying}>
             {verifying ? 'Verifying…' : 'Verify All Emails'}
@@ -710,7 +735,16 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         {hasActiveFilter && (
           <button
             className="text-xs text-teal-600 hover:underline ml-1"
-            onClick={() => setFilters({ status: 'all', opened: 'all', replied: 'all', clicked: 'all', verification: 'all' })}
+            onClick={() =>
+              setFilters({
+                status: 'all',
+                interest: 'all',
+                opened: 'all',
+                replied: 'all',
+                clicked: 'all',
+                verification: 'all',
+              })
+            }
           >Clear filters</button>
         )}
       </div>
@@ -843,6 +877,31 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
               }`}>{o.l}</button>
           ))}
         </div>
+        {/* Interest (per-campaign enrollment) */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <span className="font-medium text-gray-500 whitespace-nowrap">Interest:</span>
+          {[
+            { v: 'all', l: 'All' },
+            { v: 'unset', l: 'None' },
+            { v: 'interested', l: 'Interested' },
+            { v: 'not_interested', l: 'Not interested' },
+            { v: 'out_of_office', l: 'OOO' },
+            { v: 'auto_reply', l: 'Auto-reply' },
+          ].map(o => (
+            <button
+              key={o.v}
+              type="button"
+              onClick={() => setFilter('interest', o.v)}
+              className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
+                filters.interest === o.v
+                  ? 'bg-emerald-600 text-white'
+                  : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-emerald-400'
+              }`}
+            >
+              {o.l}
+            </button>
+          ))}
+        </div>
         {/* Opened */}
         <div className="flex items-center gap-1.5">
           <span className="font-medium text-gray-500 whitespace-nowrap">Opened:</span>
@@ -915,6 +974,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Name</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Stage</th>
+                <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Inbox</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Provider</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Enrolled</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Sending</th>
@@ -947,6 +1007,16 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
                   </td>
                   {/* stage */}
                   <td className="px-4 py-2.5 text-gray-600 whitespace-nowrap">{l.stage || '—'}</td>
+                  {/* inbox that last sent or will send next */}
+                  <td className="px-4 py-2.5 whitespace-nowrap">
+                    {l.from_inbox_email ? (
+                      <span className="font-mono text-xs text-gray-700" title="Last sent from this inbox, or next scheduled sender if none sent yet">
+                        {l.from_inbox_email}
+                      </span>
+                    ) : (
+                      <span className="text-gray-300 text-xs">—</span>
+                    )}
+                  </td>
                   {/* provider */}
                   <td className="px-4 py-2.5 whitespace-nowrap">
                     {l.provider
@@ -1561,6 +1631,7 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
             <thead className="sticky top-0 bg-white z-10">
               <tr className="border-b border-gray-200 bg-gray-50 text-gray-600 text-xs font-semibold uppercase tracking-wide">
                 <th className="px-3 py-2.5 text-left">Sent</th>
+                <th className="px-3 py-2.5 text-left">From</th>
                 <th className="px-3 py-2.5 text-left">Lead</th>
                 <th className="px-3 py-2.5 text-left">Step</th>
                 <th className="px-3 py-2.5 text-left">Subject</th>
@@ -1575,6 +1646,7 @@ function SentEmailsPanel({ sentData = [], filter, onFilterChange }) {
               {filtered.map(e => (
                 <tr key={e.log_id} className="border-b border-gray-100 hover:bg-gray-50/60">
                   <td className="px-3 py-2 whitespace-nowrap text-gray-500 text-xs">{fmt(e.sent_at)}</td>
+                  <td className="px-3 py-2 font-mono text-xs text-gray-700 max-w-[200px] truncate" title={e.inbox_email || ''}>{e.inbox_email || '—'}</td>
                   <td className="px-3 py-2 font-mono text-xs text-gray-800 max-w-[180px] truncate">{e.lead_email}</td>
                   <td className="px-3 py-2 text-xs text-gray-600 whitespace-nowrap">Step {(e.sequence_index ?? 0) + 1}</td>
                   <td className="px-3 py-2 text-xs text-gray-700 max-w-[200px] truncate">{e.subject || '—'}</td>

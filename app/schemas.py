@@ -19,6 +19,8 @@ class LeadCampaignInfo(BaseModel):
     clicked: bool = False
     replied: bool = False
     sending_paused: bool = False
+    # Inbox that last sent in this campaign, or the next scheduled sender if none yet
+    from_inbox_email: Optional[str] = None
 
     class Config:
         from_attributes = True
