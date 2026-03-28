@@ -1,0 +1,14 @@
+import type { ILoadOptionsFunctions, INodeListSearchResult } from 'n8n-workflow';
+export declare function searchCampaigns(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchInboxes(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchLeads(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchSequencesForCampaign(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchVariantsForSequence(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchLeadsForCampaign(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchWebhooks(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchKnownIps(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchAiFeatures(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchGmailAccounts(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchOffice365Accounts(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchUniboxThreads(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;
+export declare function searchScheduleSentLogs(this: ILoadOptionsFunctions, filter?: string): Promise<INodeListSearchResult>;

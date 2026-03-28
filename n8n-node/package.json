@@ -1,0 +1,50 @@
+{
+  "name": "n8n-nodes-quickly",
+  "version": "1.0.0",
+  "description": "n8n community node for the Quickly email outreach REST API",
+  "license": "MIT",
+  "homepage": "https://github.com/your-org/Quickly",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "quickly",
+    "email",
+    "campaigns",
+    "leads"
+  ],
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-org/Quickly.git"
+  },
+  "main": "dist/nodes/Quickly/Quickly.node.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "watch": "tsc -p tsconfig.json --watch",
+    "lint": "eslint nodes credentials --ext .ts || true"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/QuicklyApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Quickly/Quickly.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "eslint": "^8.56.0",
+    "n8n-workflow": "^1.82.0",
+    "typescript": "^5.3.3"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "dependencies": {
+    "form-data": "^4.0.0"
+  }
+}

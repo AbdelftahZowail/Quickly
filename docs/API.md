@@ -6,6 +6,8 @@ All request/response bodies use `Content-Type: application/json`.
 
 **MCP (Model Context Protocol):** Quickly also serves a **Streamable HTTP** MCP endpoint at **`GET/POST /api/mcp`** for AI agents (leads tools). It uses the same API key or Bearer authentication as the REST API. See **[docs/MCP.md](MCP.md)** for client setup (`mcp-remote`, Cursor) and tool list.
 
+**n8n:** To drive this API from **self-hosted n8n** with a built-in node (resources, operations, credentials), see **[N8N.md](N8N.md)** and the **[n8n package README](../n8n-node/README.md)** for install and usage.
+
 > **Base URL:** `http://localhost:8000` (or your configured domain)
 
 ### Authentication Header
@@ -34,6 +36,7 @@ The tracking endpoints (`/o/`, `/c/`, `/u/`) are **public** (no auth) — they a
 - [Schedule](#schedule)
 - [Settings](#settings)
 - [Model Context Protocol (MCP)](#model-context-protocol-mcp)
+- [n8n (workflow automation)](N8N.md)
 - [Webhooks](#webhooks)
 - [Gmail OAuth](#gmail-oauth)
 - [Microsoft / Office 365 OAuth](#microsoft--office-365-oauth)

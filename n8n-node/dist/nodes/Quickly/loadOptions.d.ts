@@ -1,0 +1,17 @@
+import type { ILoadOptionsFunctions, INodePropertyOptions } from 'n8n-workflow';
+export declare function loadOperations(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getCampaigns(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getInboxes(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getLeads(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getSequencesForCampaign(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getVariantsForSequence(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getLeadsForPreview(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getLeadsForCampaign(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getWebhooks(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getWebhookEventTypes(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getKnownIps(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getAiFeatureIds(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getGmailAccounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getOffice365Accounts(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getUniboxThreads(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
+export declare function getScheduleSentLogs(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]>;
