@@ -12,8 +12,9 @@ from sqlalchemy import delete, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.campaign_lead_status import normalize_enrollment_status, normalize_interest
+from app.campaign_lead_status import LEAD_INTERESTS, normalize_enrollment_status, normalize_interest
 from app.database import get_db
+from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.models import (
     Campaign,
     CampaignLead,
@@ -75,8 +76,10 @@ def _lead_to_response(
     replied: set[tuple[int, int]],
     *,
     interactions: list[dict] | None = None,
+    inbox_by_pair: dict[tuple[int, int], str] | None = None,
 ) -> LeadResponse:
     camps = []
+    ib = inbox_by_pair or {}
     for cl in lead.campaign_leads:
         c = cl.campaign
         pair = (lead.id, cl.campaign_id)
@@ -92,6 +95,7 @@ def _lead_to_response(
                 clicked=pair in clicked,
                 replied=pair in replied,
                 sending_paused=cl.sending_paused,
+                from_inbox_email=ib.get(pair),
             )
         )
     return LeadResponse(
@@ -113,11 +117,46 @@ def _lead_query_with_campaigns():
     )
 
 
+# Parsed interest query: None = no filter; "__unset__" = interest_status IS NULL; else a value in LEAD_INTERESTS.
+_INTEREST_FILTER_UNSET = "__unset__"
+
+
+def _parse_interest_filter_param(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    s = raw.strip().lower()
+    if not s or s in ("none", "null", "unset", "clear", "empty"):
+        return _INTEREST_FILTER_UNSET
+    if s in LEAD_INTERESTS:
+        return s
+    raise HTTPException(
+        status_code=400,
+        detail=f"Invalid interest filter {raw!r}; use one of: unset, {', '.join(sorted(LEAD_INTERESTS))}",
+    )
+
+
+def _campaign_lead_interest_predicate(parsed: str):
+    if parsed == _INTEREST_FILTER_UNSET:
+        return CampaignLead.interest_status.is_(None)
+    return CampaignLead.interest_status == parsed
+
+
+def _optional_interest_for_stmt(interest: str | None) -> str | None:
+    """None = no interest filter. Empty string after strip = no filter."""
+    if interest is None:
+        return None
+    s = interest.strip()
+    if not s:
+        return None
+    return _parse_interest_filter_param(s)
+
+
 def _build_leads_stmt(
     *,
     q: str | None,
     status: str | None,
     bad_only: bool,
+    interest: str | None,
 ):
     stmt = _lead_query_with_campaigns().order_by(Lead.id)
     if bad_only:
@@ -134,28 +173,53 @@ def _build_leads_stmt(
                 bounced_enrollment,
             )
         )
-    elif status:
-        st = status.strip().lower()
-        if st == "invalid":
-            stmt = stmt.where(
-                or_(
-                    Lead.email_verification_status == "invalid",
-                    Lead.status == "invalid",
+
+    st = (status or "").strip().lower() or None
+    intr = interest
+
+    merged_enrollment_interest = False
+    if st and st not in ("invalid", "replied") and intr is not None:
+        stmt = stmt.where(
+            exists(
+                select(1).select_from(CampaignLead).where(
+                    CampaignLead.lead_id == Lead.id,
+                    CampaignLead.enrollment_status == st,
+                    _campaign_lead_interest_predicate(intr),
                 )
             )
-        elif st == "replied":
-            stmt = stmt.where(
-                exists(select(1).select_from(LeadReply).where(LeadReply.lead_id == Lead.id))
+        )
+        merged_enrollment_interest = True
+    elif st == "invalid":
+        stmt = stmt.where(
+            or_(
+                Lead.email_verification_status == "invalid",
+                Lead.status == "invalid",
             )
-        else:
-            stmt = stmt.where(
-                exists(
-                    select(1).select_from(CampaignLead).where(
-                        CampaignLead.lead_id == Lead.id,
-                        CampaignLead.enrollment_status == st,
-                    )
+        )
+    elif st == "replied":
+        stmt = stmt.where(
+            exists(select(1).select_from(LeadReply).where(LeadReply.lead_id == Lead.id))
+        )
+    elif st:
+        stmt = stmt.where(
+            exists(
+                select(1).select_from(CampaignLead).where(
+                    CampaignLead.lead_id == Lead.id,
+                    CampaignLead.enrollment_status == st,
                 )
             )
+        )
+
+    if intr is not None and not merged_enrollment_interest:
+        stmt = stmt.where(
+            exists(
+                select(1).select_from(CampaignLead).where(
+                    CampaignLead.lead_id == Lead.id,
+                    _campaign_lead_interest_predicate(intr),
+                )
+            )
+        )
+
     if q and q.strip():
         pat = f"%{q.strip()}%"
         stmt = stmt.where(or_(Lead.email.ilike(pat), Lead.name.ilike(pat)))
@@ -332,28 +396,43 @@ async def list_leads(
     status: str | None = Query(None),
     bad_only: bool = Query(
         False,
-        description="If true, only bounced and invalid leads (ignores single status filter).",
+        description="If true, narrow to bounced/invalid-style leads; stacks with status and interest when those are set.",
+    ),
+    interest: str | None = Query(
+        None,
+        description="Filter by per-enrollment interest: interested, not_interested, out_of_office, auto_reply, or unset (cleared / null). Stacks with status and bad_only.",
     ),
     q: str | None = Query(None, description="Search email or name (substring)"),
     db: AsyncSession = Depends(get_db),
 ):
-    stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only)
+    intr = _optional_interest_for_stmt(interest)
+    stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only, interest=intr)
     result = await db.execute(stmt)
     leads = result.scalars().all()
     ids = [x.id for x in leads]
     opened, clicked, replied = await _engagement_pair_sets(db, ids)
-    return [_lead_to_response(x, opened, clicked, replied) for x in leads]
+    pairs: set[tuple[int, int]] = set()
+    for x in leads:
+        for cl in x.campaign_leads:
+            pairs.add((x.id, cl.campaign_id))
+    inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
+    return [_lead_to_response(x, opened, clicked, replied, inbox_by_pair=inbox_by_pair) for x in leads]
 
 
 @router.get("/export")
 async def export_leads_csv(
     status: str | None = Query(None),
     bad_only: bool = Query(False),
+    interest: str | None = Query(
+        None,
+        description="Same as GET /api/leads: per-enrollment interest filter; stacks with other query params.",
+    ),
     q: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """CSV export aligned with the Leads UI: core columns plus all custom_data keys."""
-    stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only)
+    intr = _optional_interest_for_stmt(interest)
+    stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only, interest=intr)
     result = await db.execute(stmt)
     leads = list(result.scalars().all())
     ids = [x.id for x in leads]
@@ -633,7 +712,16 @@ async def get_lead(lead_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Lead not found")
     opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
     interactions = await _fetch_lead_interactions(db, lead_id)
-    return _lead_to_response(lead, opened, clicked, replied, interactions=interactions)
+    pairs = {(lead.id, cl.campaign_id) for cl in lead.campaign_leads}
+    inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
+    return _lead_to_response(
+        lead,
+        opened,
+        clicked,
+        replied,
+        interactions=interactions,
+        inbox_by_pair=inbox_by_pair,
+    )
 
 
 @router.patch("/{lead_id}", response_model=LeadResponse)
@@ -679,7 +767,9 @@ async def update_lead(
     # End read transaction so a queued global recalc (separate session on
     # SQLite StaticPool) is not blocked waiting for this connection.
     await db.commit()
-    return _lead_to_response(lead_loaded, opened, clicked, replied)
+    pairs = {(lead_loaded.id, cl.campaign_id) for cl in lead_loaded.campaign_leads}
+    inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
+    return _lead_to_response(lead_loaded, opened, clicked, replied, inbox_by_pair=inbox_by_pair)
 
 
 @router.post("/{lead_id}/recover", response_model=LeadResponse)
@@ -726,7 +816,9 @@ async def recover_lead(
     lead_out = result3.scalar_one()
     opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
     await db.commit()
-    return _lead_to_response(lead_out, opened, clicked, replied)
+    pairs = {(lead_out.id, cl.campaign_id) for cl in lead_out.campaign_leads}
+    inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
+    return _lead_to_response(lead_out, opened, clicked, replied, inbox_by_pair=inbox_by_pair)
 
 
 @router.delete("/{lead_id}")

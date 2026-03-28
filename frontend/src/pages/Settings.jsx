@@ -6,6 +6,7 @@ import { useNotify } from '../context/NotificationContext';
 import { useAppMode } from '../context/AppModeContext';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/Button';
+import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
 import EmailVerificationSettings from '../components/EmailVerificationSettings';
 
@@ -922,12 +923,18 @@ export default function Settings() {
               <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
                 Caution: This will delete all your current data and replace it with the backup.
               </p>
-              <input
-                type="file"
+              <FileUploadArea
+                size="full"
+                className="mb-2"
                 accept=".dump,application/octet-stream"
-                className="block text-sm mb-2"
                 onChange={e => setRestoreFile(e.target.files?.[0] || null)}
-              />
+              >
+                {restoreFile ? (
+                  <span className="truncate text-gray-900 dark:text-gray-100">{restoreFile.name}</span>
+                ) : (
+                  <span className="text-gray-500 dark:text-gray-400">Choose backup file (.dump)</span>
+                )}
+              </FileUploadArea>
               <Button
                 size="sm"
                 variant="outline"
@@ -1663,7 +1670,7 @@ export default function Settings() {
             </p>
             <h3 className="text-sm font-semibold pt-2">2. Tools exposed to the agent</h3>
             <ul className="text-sm text-gray-600 dark:text-gray-400 list-disc pl-5 space-y-1">
-              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">list_leads</code> — search / filter (q, status, bad_only)</li>
+              <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">list_leads</code> — search / filter (q, status, bad_only, interest; stack)</li>
               <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">get_lead</code> — one lead by id</li>
               <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">update_lead</code> — patch name, status, custom_data</li>
               <li><code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">delete_lead</code> — remove a lead</li>

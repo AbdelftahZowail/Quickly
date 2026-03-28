@@ -47,6 +47,7 @@ from app.schemas import (
     SequenceVariantUpdate,
     SequenceVariantResponse,
 )
+from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.queue_logic import reserve_slots_for_new_leads_bulk
 
 log = logging.getLogger("quickly.routes")
@@ -926,6 +927,9 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
     )
     total_sequences = seq_count_result.scalar() or 0
 
+    inbox_pairs = {(lead.id, campaign_id) for _cl, lead in rows}
+    inbox_by_lead = await from_inbox_email_by_lead_campaign(db, inbox_pairs)
+
     def stage_label(lead_id: int) -> str:
         last_index = last_sent_map.get(lead_id, -1)
         if total_sequences == 0:
@@ -952,6 +956,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "sending_paused": cl.sending_paused,
             "email_verification_status": lead.email_verification_status,
             "provider": lead.provider,
+            "from_inbox_email": inbox_by_lead.get((lead.id, campaign_id)),
         }
         for cl, lead in rows
     ]
@@ -1372,13 +1377,14 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
     """Return sent email history for this campaign with full status details."""
     from sqlalchemy.orm import selectinload as _sl
     result = await db.execute(
-        select(EmailLog, Lead, CampaignLead)
+        select(EmailLog, Lead, CampaignLead, Inbox)
         .join(Lead, EmailLog.lead_id == Lead.id)
         .outerjoin(
             CampaignLead,
             (CampaignLead.lead_id == EmailLog.lead_id)
             & (CampaignLead.campaign_id == EmailLog.campaign_id),
         )
+        .outerjoin(Inbox, EmailLog.inbox_id == Inbox.id)
         .options(
             _sl(EmailLog.variant),
         )
@@ -1413,8 +1419,9 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
             "replied": el.lead_id in replied_ids,
             "variant_id": el.variant_id,
             "variant_label": (el.variant.label if el.variant else None),
+            "inbox_email": inbox.email if inbox else None,
         }
-        for el, lead, cl in rows
+        for el, lead, cl, inbox in rows
     ]
 
 
@@ -1955,11 +1962,29 @@ async def get_verification_status(
 
 
 # ---- Export leads as CSV ----
+def _campaign_export_interest_where(interest: str | None):
+    if interest is None or not str(interest).strip():
+        return None
+    s = interest.strip().lower()
+    if s in ("none", "null", "unset", "clear", "empty"):
+        return CampaignLead.interest_status.is_(None)
+    if s in LEAD_INTERESTS:
+        return CampaignLead.interest_status == s
+    raise HTTPException(
+        400,
+        detail=f"Invalid interest filter {interest!r}; use unset or one of: {', '.join(sorted(LEAD_INTERESTS))}",
+    )
+
+
 @router.get("/{campaign_id}/leads/export")
 async def export_campaign_leads(
     campaign_id: int,
     verification_status: str | None = Query(None, description="Filter by email verification status"),
     status: str | None = Query(None, description="Filter by per-campaign enrollment status"),
+    interest: str | None = Query(
+        None,
+        description="Filter by interest on this enrollment (unset = null / cleared)",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """Export leads for a campaign as a CSV file, with optional filtering."""
@@ -1980,6 +2005,9 @@ async def export_campaign_leads(
             query = query.where(Lead.email_verification_status == verification_status)
     if status:
         query = query.where(CampaignLead.enrollment_status == status.strip().lower())
+    interest_where = _campaign_export_interest_where(interest)
+    if interest_where is not None:
+        query = query.where(interest_where)
     query = query.order_by(CampaignLead.enrolled_at.desc())
 
     result = await db.execute(query)

@@ -467,8 +467,11 @@ List leads with optional filters. Each item includes enrollments and verificatio
 | Param | Type | Description |
 |---|---|---|
 | `q` | string | Substring match on **email** or **name** (case-insensitive). |
-| `status` | string | Filter leads that have **any** enrollment with this **enrollment** status: `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person`. Use `invalid` for `email_verification_status == invalid`, `replied` for leads with any `LeadReply`. Ignored when `bad_only` is true. |
-| `bad_only` | bool | When `true`, leads with **invalid/risky** verification **or** **any** enrollment with status **`bounced`**. Default `false`. |
+| `status` | string | Filter leads that have **any** enrollment with this **enrollment** status: `active`, `contacted`, `completed`, `bounced`, `unsubscribed`, `wrong_person`. Use `invalid` for `email_verification_status == invalid` (or legacy lead `status`), `replied` for leads with any `LeadReply`. |
+| `bad_only` | bool | When `true`, keep only leads with **invalid/risky** verification **or** legacy **`invalid`/`bounced`** lead status **or** **any** enrollment with status **`bounced`**. Default `false`. |
+| `interest` | string | Filter by **per-enrollment** reply intent on **some** campaign: `interested`, `not_interested`, `out_of_office`, `auto_reply`. Use **`unset`** (or `none`, `clear`, etc.) for enrollments where **`interest_status` is null** (no interest set). Invalid values return **400**. |
+
+**Filter stacking:** `q`, `bad_only`, `status`, and `interest` are combined with **AND** when more than one is set. When both **`status`** (enrollment) and **`interest`** are set, the match is a **single** enrollment that satisfies **both** (same `CampaignLead` row). When **`status`** is `invalid` or `replied`, the interest condition still applies via a separate enrollment `EXISTS` (any campaign).
 
 **Response:** Array of lead objects:
 
@@ -484,7 +487,7 @@ List leads with optional filters. Each item includes enrollments and verificatio
 
 #### `GET /api/leads/export`
 
-Download leads as **CSV** (`text/csv`). Uses the **same filters** as `GET /api/leads` (`q`, `status`, `bad_only`).
+Download leads as **CSV** (`text/csv`). Uses the **same filters** as `GET /api/leads` (`q`, `status`, `bad_only`, `interest`), with the same stacking rules.
 
 **Columns:** `id`, `email`, `name`, `email_verification_status`, `campaigns` (semicolon-separated names), **`enrollments_json`** (JSON array of per-campaign enrollment slices: `campaign_id`, `campaign_public_id`, `campaign_name`, `status`, `interest`, `opened`, `clicked`, `replied`, `sending_paused`), `enrolled_earliest` (ISO date), then every **`custom_data` key** (sorted alphabetically). Object/array values in `custom_data` are JSON-encoded in the cell.
 
@@ -752,7 +755,7 @@ Return a summary count of leads grouped by their `email_verification_status`.
 
 Export the campaign's leads as a CSV file.
 
-**Query params:** `verification_status` (filter), `status` (filter on **enrollment** status for this campaign)
+**Query params:** `verification_status` (filter), `status` (filter on **enrollment** status for this campaign), `interest` (filter on this campaign’s enrollment: same values as **`GET /api/leads`** — `interested`, `not_interested`, `out_of_office`, `auto_reply`, or **`unset`** / `none` / `clear` for null interest). Params **stack** with AND. Invalid `interest` returns **400**.
 
 **Response:** `text/csv` with columns: `email`, `name`, **`status`** (enrollment), **`interest`**, `email_verification_status`, **`opened`**, **`clicked`**, **`replied`** (`0`/`1`), then any `custom_data` keys.
 
@@ -997,7 +1000,7 @@ Unauthenticated requests receive **401**. Tool execution forwards these headers 
 
 | Tool | Maps to |
 |------|--------|
-| `list_leads` | `GET /api/leads` (optional `q`, `status`, `bad_only`) |
+| `list_leads` | `GET /api/leads` (optional `q`, `status`, `bad_only`, `interest`; filters stack) |
 | `get_lead` | `GET /api/leads/{id}` |
 | `update_lead` | `PATCH /api/leads/{id}` |
 | `delete_lead` | `DELETE /api/leads/{id}` |

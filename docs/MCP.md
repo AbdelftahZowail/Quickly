@@ -34,7 +34,7 @@ MCP requests are checked before the MCP session runs. Tool calls that proxy to `
 
 | Tool | Purpose |
 |------|--------|
-| `list_leads` | List leads (`q`, `status`, `bad_only`) — same filters as `GET /api/leads` |
+| `list_leads` | List leads (`q`, `status`, `bad_only`, `interest`) — same filters as `GET /api/leads`; all combine with AND when set |
 | `get_lead` | `GET /api/leads/{id}` |
 | `update_lead` | `PATCH /api/leads/{id}` (`name`, `enrollment_status`, `custom_data`) |
 | `delete_lead` | `DELETE /api/leads/{id}` |

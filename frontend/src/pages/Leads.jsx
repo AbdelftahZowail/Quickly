@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { api } from '../api';
 import { Button } from '../components/ui/Button';
+import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
 import { Input } from '../components/ui/Input';
 import { useNotify } from '../context/NotificationContext';
@@ -19,6 +20,15 @@ const STATUS_OPTIONS = [
   { value: 'wrong_person', label: 'Enrollment: wrong_person' },
   { value: 'invalid', label: 'Verify: invalid' },
   { value: 'replied', label: 'Has reply' },
+];
+
+const INTEREST_FILTER_OPTIONS = [
+  { value: 'all', label: 'All interest' },
+  { value: 'unset', label: 'No interest set' },
+  { value: 'interested', label: 'Interested' },
+  { value: 'not_interested', label: 'Not interested' },
+  { value: 'out_of_office', label: 'Out of office' },
+  { value: 'auto_reply', label: 'Auto-reply' },
 ];
 
 const TAB_ALL = 'all';
@@ -57,13 +67,17 @@ function leadRowSummary(lead) {
   return bits.slice(0, 3).join(' · ') + (bits.length > 3 ? '…' : '');
 }
 
-function buildLeadsQueryParams({ tab, debouncedSearch, statusFilter }) {
+function buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter }) {
   const params = new URLSearchParams();
   if (debouncedSearch) params.set('q', debouncedSearch);
   if (tab === TAB_BOUNCED) {
     params.set('bad_only', 'true');
-  } else if (statusFilter !== 'all') {
+  }
+  if (tab === TAB_ALL && statusFilter !== 'all') {
     params.set('status', statusFilter);
+  }
+  if (interestFilter && interestFilter !== 'all') {
+    params.set('interest', interestFilter);
   }
   return params;
 }
@@ -82,6 +96,7 @@ export default function Leads() {
   const [leads, setLeads] = useState([]);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [interestFilter, setInterestFilter] = useState('all');
   const [selected, setSelected] = useState(() => new Set());
   const [emailDrafts, setEmailDrafts] = useState({});
   const [bulkEnrollmentStatus, setBulkEnrollmentStatus] = useState('active');
@@ -99,7 +114,7 @@ export default function Leads() {
   const loadLeads = useCallback(async () => {
     loading.start();
     try {
-      const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter });
+      const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter });
       const qs = params.toString();
       const data = await api.get('/leads' + (qs ? `?${qs}` : ''));
       const rows = Array.isArray(data) ? data : [];
@@ -117,7 +132,7 @@ export default function Leads() {
     } finally {
       loading.stop();
     }
-  }, [debouncedSearch, statusFilter, tab, loading, notify]);
+  }, [debouncedSearch, statusFilter, interestFilter, tab, loading, notify]);
 
   useEffect(() => {
     loadLeads();
@@ -256,7 +271,7 @@ export default function Leads() {
   };
 
   const exportCsv = async () => {
-    const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter });
+    const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter });
     const qs = params.toString();
     loading.start();
     try {
@@ -320,21 +335,17 @@ export default function Leads() {
           <Button type="button" variant="outline" size="sm" onClick={exportCsv} disabled={!leads.length}>
             Export CSV
           </Button>
-          <label className="inline-flex">
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              className="hidden"
-              onChange={(e) => {
-                const f = e.target.files?.[0];
-                e.target.value = '';
-                if (f) importRecoverCsv(f);
-              }}
-            />
-            <Button as="span" variant="outline" size="sm" className="cursor-pointer">
-              Import recovery CSV
-            </Button>
-          </label>
+          <FileUploadArea
+            size="sm"
+            accept=".csv,text/csv"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              e.target.value = '';
+              if (f) importRecoverCsv(f);
+            }}
+          >
+            Import recovery CSV
+          </FileUploadArea>
         </div>
       </div>
 
@@ -385,6 +396,25 @@ export default function Leads() {
           ))}
         </div>
       )}
+
+      <div className="flex flex-wrap gap-2 items-center">
+        <span className="text-sm text-gray-500">Interest:</span>
+        {INTEREST_FILTER_OPTIONS.map((o) => (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => setInterestFilter(o.value)}
+            className={cn(
+              'rounded-full border text-xs font-medium px-3 py-1',
+              interestFilter === o.value
+                ? 'bg-emerald-600 text-white border-emerald-600'
+                : 'bg-white text-gray-600 border-gray-300 hover:border-emerald-400 hover:bg-emerald-50',
+            )}
+          >
+            {o.label}
+          </button>
+        ))}
+      </div>
 
       {tab === TAB_BOUNCED && (
         <Card className="p-4 bg-amber-50/80 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800">
@@ -459,6 +489,7 @@ export default function Leads() {
               <th className="p-2">Name</th>
               <th className="p-2">Verify / enrollments</th>
               <th className="p-2">Campaigns</th>
+              <th className="p-2">Sending inbox</th>
               <th className="p-2">Enrolled</th>
               {tab === TAB_BOUNCED && <th className="p-2 min-w-[200px]">New email</th>}
               {tab === TAB_BOUNCED && <th className="p-2 w-44">Actions</th>}
@@ -467,7 +498,7 @@ export default function Leads() {
           <tbody>
             {leads.length === 0 ? (
               <tr>
-                <td colSpan={tab === TAB_BOUNCED ? 8 : 6} className="p-8 text-center text-gray-500">
+                <td colSpan={tab === TAB_BOUNCED ? 9 : 7} className="p-8 text-center text-gray-500">
                   No leads match this view.
                 </td>
               </tr>
@@ -530,6 +561,22 @@ export default function Leads() {
                         </Link>
                       ))}
                       {!(l.campaigns || []).length && <span className="text-gray-400">—</span>}
+                    </div>
+                  </td>
+                  <td className="p-2 align-top">
+                    <div className="flex flex-col gap-1 max-w-xs">
+                      {(l.campaigns || []).map((c) => (
+                        <div key={c.campaign_id} className="text-xs">
+                          {c.from_inbox_email ? (
+                            <span className="font-mono text-gray-700" title={`${c.campaign_name}: sent from ${c.from_inbox_email}`}>
+                              {c.from_inbox_email}
+                            </span>
+                          ) : (
+                            <span className="text-gray-400">—</span>
+                          )}
+                        </div>
+                      ))}
+                      {!(l.campaigns || []).length && <span className="text-gray-400 text-xs">—</span>}
                     </div>
                   </td>
                   <td className="p-2 align-top text-gray-600">{formatEnrolled(l.campaigns)}</td>
