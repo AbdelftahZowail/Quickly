@@ -13,6 +13,7 @@
   <a href="#quick-start">Deploy in 5 minutes →</a> &nbsp;|&nbsp;
   <a href="INSTALL.md">Installation Guide</a> &nbsp;|&nbsp;
   <a href="API.md">API Docs</a> &nbsp;|&nbsp;
+  <a href="N8N.md">n8n</a> &nbsp;|&nbsp;
   <a href="WEBHOOKS.md">Webhooks</a> &nbsp;|&nbsp;
   <a href="CONTRIBUTORS.md">Contributing</a>
 </p>
@@ -87,7 +88,7 @@ Verify lead addresses before sending via mailtester.ninja or any custom HTTP pro
 Drag campaigns to reorder send priority. Choose **priority-first** (exhaust the top campaign's slots first) or **round-robin** (spread sends evenly). Set a timezone per campaign so emails land during your recipients' business hours, not yours.
 
 ### CSV Import / Export, Full REST API & n8n Integration
-Bulk-import leads from CSV in seconds. Export any campaign's leads with full open/click/reply status at any time. Automate everything with 90+ REST API endpoints secured by JWT auth and API keys — every UI action has an API equivalent. For no-code automation, Quickly ships with a **custom n8n node** that exposes all API endpoints directly in your n8n workflows, making it trivial to wire Quickly into any automation pipeline without writing a line of code.
+Bulk-import leads from CSV in seconds. Export any campaign's leads with full open/click/reply status at any time. Automate everything with 90+ REST API endpoints secured by JWT auth and API keys — every UI action has an API equivalent. For workflow automation, Quickly ships with a **custom n8n node** so you can build pipelines in n8n without hand-coding HTTP for every call — see **[Automating with n8n](#automating-with-n8n)** and the dedicated **[N8N.md](N8N.md)** guide.
 
 ### Onboarding & Deliverability Tips
 A guided onboarding checklist walks new users through connecting inboxes, building their first campaign, and configuring tracking. A dedicated **Deliverability Tips** page covers DNS setup, warm-up best practices, and sending guidelines to maximize inbox placement.
@@ -166,7 +167,7 @@ Yes. Quickly integrates with 19 AI providers (OpenAI, Anthropic, Gemini, Groq, M
 Yes. There are no seat limits. Deploy once, give your entire team access.
 
 **Is there an API? Can I use it with n8n?**
-Yes — 90+ REST endpoints covering every feature in the UI, all secured via JWT auth. Quickly also ships with a **custom n8n node** that wraps all API endpoints, so you can build automation workflows in n8n without writing any code. See [API.md](API.md) for the full reference.
+Yes — 90+ REST endpoints covering every feature in the UI, all secured via JWT and API keys. Quickly also ships with a **custom n8n node** for drag-and-drop workflows. Start with [N8N.md](N8N.md) (overview and link to the full package README); HTTP details are in [API.md](API.md).
 
 **How does authentication work?**
 Quickly has a built-in user system. On first run, visit the login page and register your admin account. Log in with username/password, or with Google/Microsoft OAuth. For automation, generate API keys from the Settings page.
@@ -207,7 +208,7 @@ The `.env` file is intentionally minimal. All runtime settings (test mode, time 
 | Deployment | Docker, Docker Compose — Railway, Render, Fly.io, or any VPS |
 | Scheduling | APScheduler (in-process background jobs, PostgreSQL job store) |
 | Auth | JWT (HS256), bcrypt passwords, HMAC API keys, Fernet token encryption |
-| Automation | Custom n8n node (all endpoints) |
+| Automation | Custom n8n node — [N8N.md](N8N.md) |
 
 ---
 
@@ -237,6 +238,7 @@ The `.env` file is intentionally minimal. All runtime settings (test mode, time 
 | [INSTALL.md](INSTALL.md) | **Interactive installation guide** — choose Railway, fresh VPS, nginx, or local dev, then follow step-by-step through Gmail/Office 365 OAuth setup and first campaign |
 | [OFFICE365_SETUP.md](OFFICE365_SETUP.md) | Full Azure portal walkthrough for connecting Office 365 / Outlook inboxes |
 | [API.md](API.md) | Complete REST API reference — all endpoints including auth, system health, provider matching, notifications |
+| [N8N.md](N8N.md) | **n8n automation** — custom Quickly node, credentials, pointers to install and [full package README](../n8n-node/README.md) |
 | [WEBHOOKS.md](WEBHOOKS.md) | All 15 event types, payload schemas, auth setup |
 | [CONTRIBUTORS.md](CONTRIBUTORS.md) | How to contribute, dev environment setup |
 
@@ -267,19 +269,21 @@ curl http://localhost:8000/api/status \
 
 ---
 
-## Automation with n8n
+## Automating with n8n
 
-Quickly ships with a **custom n8n node** that gives you drag-and-drop access to every Quickly API endpoint inside your n8n workflows. No custom HTTP request nodes, no manual auth setup — just connect and build.
+Self-hosted Quickly pairs naturally with **self-hosted n8n**: the same API keys and base URL you use for scripts work in workflows. Quickly ships a **community node package** (`n8n-nodes-quickly`) that maps the REST API into a single **Quickly** node—choose a **resource** (Campaign, Lead, Inbox, Webhook, Unibox, …) and an **operation**, then fill the fields n8n shows for that pair. Credentials are stored once (**Quickly API**: base URL + API key or Bearer token), and the connection test hits `GET /api/auth/me` so you know n8n can reach your instance before you run a workflow.
 
-Common automation patterns people build with the Quickly n8n node:
+You still use **[API.md](API.md)** whenever you need exact request shapes, query parameters, or response fields; the node is a typed UI on top of those routes. Outbound **webhooks** from Quickly into n8n (or anything else) are documented in **[WEBHOOKS.md](WEBHOOKS.md)**.
 
-- Sync interested leads directly into your CRM (HubSpot, Pipedrive, Notion)
-- Post Slack notifications when a lead replies as `interested`
-- Trigger follow-up sequences based on webhook events
-- Pull campaign analytics into Google Sheets on a schedule
-- Add leads from form submissions or enrichment tools automatically
+**Common patterns** people build with the Quickly n8n node:
 
-> Full API reference: [API.md](API.md) · Webhook event reference: [WEBHOOKS.md](WEBHOOKS.md)
+- Sync interested leads into a CRM (HubSpot, Pipedrive, Notion)
+- Slack or Telegram alerts when a lead is classified as `interested`
+- Chain **Webhook** triggers from Quickly into enrichment, then **Campaign Lead → Add** to enroll new contacts
+- Scheduled pulls of campaign analytics into Sheets or a data warehouse
+- Form → n8n → **Lead** / **Campaign Lead** flows without maintaining raw `curl` in Code nodes
+
+**Next step:** read **[N8N.md](N8N.md)** for a short overview and a direct link to the **[full package README](../n8n-node/README.md)** (build, `N8N_CUSTOM_EXTENSIONS`, Docker layout, CSV/binary behavior, manual IDs, troubleshooting).
 
 ---
 
