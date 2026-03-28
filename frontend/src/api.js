@@ -23,6 +23,15 @@ function _authHeaders() {
 // all but the first to fail because token rotation invalidates the previous cookie).
 let _refreshPromise = null;
 
+/** Set by server on successful POST /settings/backup/restore/execute so the SPA reloads with fresh data. */
+const RELOAD_AFTER_RESTORE_HEADER = 'X-Quickly-Reload';
+
+function scheduleReloadIfRestoreComplete(res) {
+  if (res.headers.get(RELOAD_AFTER_RESTORE_HEADER) === '1') {
+    setTimeout(() => window.location.reload(), 300);
+  }
+}
+
 async function _refreshAccessToken() {
   if (_refreshPromise) return _refreshPromise;
   _refreshPromise = fetch(API_ROOT + '/auth/refresh', {
@@ -65,6 +74,7 @@ async function request(path, options = {}) {
         throw err;
       }
       const retryData = await retryRes.json();
+      scheduleReloadIfRestoreComplete(retryRes);
       if (method === 'GET') _memCache.set(path, retryData);
       return retryData;
     } catch {
@@ -80,6 +90,7 @@ async function request(path, options = {}) {
     throw err;
   }
   const data = await res.json();
+  scheduleReloadIfRestoreComplete(res);
   if (method === 'GET') _memCache.set(path, data);
   return data;
 }
@@ -116,6 +127,52 @@ async function downloadRequest(path) {
     throw err;
   }
   return res;
+}
+
+
+/** POST that returns a blob (e.g. encrypted backup download). */
+async function downloadPostRequest(path, data) {
+  const headers = { ..._authHeaders(), 'Content-Type': 'application/json' };
+  let res = await fetch(API_ROOT + path, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(data),
+    cache: 'no-store',
+  });
+  if (res.status === 401) {
+    try {
+      const newToken = await _refreshAccessToken();
+      res = await fetch(API_ROOT + path, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${newToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+        cache: 'no-store',
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const err = new Error(text || res.statusText);
+        err.status = res.status;
+        throw err;
+      }
+      return res;
+    } catch (e) {
+      if (e.status) throw e;
+      window.location.href = '/login';
+      throw new Error('Session expired');
+    }
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    const err = new Error(text || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+
+/** POST JSON, return raw Response (e.g. file download). Named export avoids stale `api` bundles missing `downloadPost`. */
+export async function postJsonForDownload(path, data) {
+  return downloadPostRequest(path, data);
 }
 
 export const api = {
@@ -155,4 +212,41 @@ export const api = {
     return res.json();
   },
   download: (path) => downloadRequest(path),
+  downloadPost: (path, data) => postJsonForDownload(path, data),
+  /** Multipart upload with optional password field (restore preview). */
+  uploadMultipart: async (path, file, fields = {}) => {
+    const form = new FormData();
+    form.append('file', file);
+    if (fields.password != null && fields.password !== '') {
+      form.append('password', fields.password);
+    }
+    const res = await fetch(API_ROOT + path, { method: 'POST', body: form, headers: _authHeaders() });
+    if (res.status === 401) {
+      try {
+        const newToken = await _refreshAccessToken();
+        const retryRes = await fetch(API_ROOT + path, {
+          method: 'POST',
+          body: form,
+          headers: { Authorization: `Bearer ${newToken}` },
+        });
+        if (!retryRes.ok) {
+          const text = await retryRes.text();
+          const err = new Error(text || retryRes.statusText);
+          err.status = retryRes.status;
+          throw err;
+        }
+        return retryRes.json();
+      } catch {
+        window.location.href = '/login';
+        throw new Error('Session expired');
+      }
+    }
+    if (!res.ok) {
+      const text = await res.text();
+      const err = new Error(text || res.statusText);
+      err.status = res.status;
+      throw err;
+    }
+    return res.json();
+  },
 };

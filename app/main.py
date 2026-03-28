@@ -169,6 +169,8 @@ app.add_middleware(
         "mcp-session-id",
         "mcp-protocol-version",
     ],
+    # Restore responses set this so the SPA can reload after DB replace (cross-origin dev).
+    expose_headers=["X-Quickly-Reload"],
 )
 
 # ---------------------------------------------------------------------------
