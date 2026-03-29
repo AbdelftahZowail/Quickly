@@ -77,7 +77,7 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 
 ### Tracking & Analytics
 
-* **Open & click tracking** — Pixel tracking and link wrapping with custom domain support (automatic HTTPS via Caddy)
+* **Open & click tracking** — Pixel tracking and link wrapping; **Quickly Beacon** for custom tracking hostnames on prebuilt / Docker deployments (legacy CNAME-to-Quickly optional for advanced host-Caddy setups)
 * **Full analytics** — Per-campaign stats, per-step performance, open/click/reply rates, and timeline charts
 * **System health dashboard** — Live status for inbox token health, tracking domain reachability, and AI provider connectivity
 
@@ -133,9 +133,9 @@ docker compose up -d
 
 Caddy automatically provisions and renews a Let's Encrypt TLS certificate. Open `https://yourdomain.com` — Quickly is live.
 
-**Already running Caddy on the server?** Download `docker-compose-not-host.yml` from the same release instead, start with `docker compose -f docker-compose-not-host.yml up -d`, and add `reverse_proxy 127.0.0.1:5050` for your domain in the host Caddyfile.
+**Already running Caddy on the server?** Download `docker-compose-not-host.yml` from the same release instead, start with `docker compose -f docker-compose-not-host.yml up -d`, and add `reverse_proxy 127.0.0.1:5050` for your domain in the host Caddyfile. That path is for operators who want **one** app behind host Caddy with on-demand TLS for tracking domains; it is **not** the default recommendation — prefer [**Quickly Beacon**](docs/INSTALL.md#quickly-beacon-recommended-custom-tracking-hostnames) for `track.yourdomain.com`–style links.
 
-→ [Full VPS guide, firewall, Postgres volume, and not-host layout](docs/INSTALL.md#option-b-vps-with-docker-compose)
+→ [Full VPS guide, firewall, Postgres volume, not-host layout, and Beacon](docs/INSTALL.md#option-b-vps-with-docker-compose)
 
 ---
 

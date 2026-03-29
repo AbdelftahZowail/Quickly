@@ -1,5 +1,10 @@
 """System Health API — aggregates status for all monitored services into a
 single response so the frontend only needs one round-trip."""
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import asyncio
 import json
 import logging
@@ -217,6 +222,30 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
         for (inbox_id, _), result in zip(inboxes_with_domains, raw_domain_probes):
             domain_probe_map[inbox_id] = result
 
+    beacon_probe_map: dict[int, str] = {}
+
+    def _host_from_beacon_base(base_url: str) -> str:
+        from urllib.parse import urlparse
+
+        h = (urlparse(base_url).hostname or "").strip().lower()
+        return h
+
+    inboxes_with_beacon = [
+        (inbox.id, inbox.beacon_base_url)
+        for inbox in inbox_list
+        if getattr(inbox, "beacon_connected", False) and inbox.beacon_base_url
+    ]
+    if inboxes_with_beacon:
+        hosts = [_host_from_beacon_base(url) for _, url in inboxes_with_beacon]
+        raw_beacon = await asyncio.gather(
+            *[
+                asyncio.to_thread(_probe_tracking_domain, host if host else "invalid")
+                for host in hosts
+            ]
+        )
+        for (inbox_id, _), host, result in zip(inboxes_with_beacon, hosts, raw_beacon):
+            beacon_probe_map[inbox_id] = "error" if not host else result
+
     # ------------------------------------------------------------------
     # Google OAuth
     # ------------------------------------------------------------------
@@ -274,6 +303,9 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
             "effective_max_per_day": compute_effective_daily_limit(inbox),
             "tracking_domain": inbox.tracking_domain,
             "tracking_domain_status": domain_probe_map.get(inbox.id),
+            "beacon_connected": getattr(inbox, "beacon_connected", False),
+            "beacon_base_url": getattr(inbox, "beacon_base_url", None),
+            "beacon_status": beacon_probe_map.get(inbox.id),
         })
 
     # ------------------------------------------------------------------

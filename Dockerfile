@@ -49,6 +49,9 @@ EXPOSE 8000
 # production builds default to production mode; override with
 # QUICKLY_MODE=development in your .env / environment if needed.
 ENV QUICKLY_MODE=production
+# Inbox UI hides CNAME-to-Quickly custom domains; use Beacon instead. Dev compose
+# and host-Caddy stacks set QUICKLY_PREBUILT_IMAGE=0 (or QUICKLY_TRACKING_CNAME_UI=1).
+ENV QUICKLY_PREBUILT_IMAGE=1
 
 # default command; environment variables (DATABASE_URL etc.) are supplied
 # at runtime rather than baked into the image

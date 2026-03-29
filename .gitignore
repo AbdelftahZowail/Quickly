@@ -29,3 +29,7 @@ caddy_data/
 caddy_config/
 caddy_data_dev/
 caddy_config_dev/
+Caddyfile.host
+
+# quickly-beacon
+quickly-beacon/

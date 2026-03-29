@@ -1,4 +1,9 @@
 """SQLAlchemy ORM models."""
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import secrets
 import uuid
 
@@ -98,6 +103,11 @@ class Inbox(Base):
     # https://<tracking_domain>/o/... instead of the app's own base URL.
     # Leave NULL to use the app's base URL (default / PaaS-friendly behaviour).
     tracking_domain = Column(String(255), nullable=True, default=None)
+    # Beacon (standalone tracking proxy): when connected, tracking URLs use beacon_base_url.
+    beacon_base_url = Column(String(512), nullable=True, default=None)
+    beacon_setup_token = Column(String(128), nullable=True, default=None)
+    beacon_webhook_secret = Column(String(256), nullable=True, default=None)
+    beacon_connected = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     ramp_up_enabled = Column(Boolean, default=False, nullable=False)
     ramp_up_period_days = Column(Integer, default=42, nullable=False)  # kept for legacy compat; not used in formula

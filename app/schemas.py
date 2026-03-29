@@ -114,6 +114,12 @@ class InboxUpdate(BaseModel):
     ramp_up_start: Optional[int] = None
     paused: Optional[bool] = None
 
+
+class BeaconConnectRequest(BaseModel):
+    """Full setup URL from Beacon, e.g. https://track.example.com/?token=...."""
+
+    setup_url: str = Field(..., min_length=12)
+
 class InboxResponse(BaseModel):
     id: int
     email: str
@@ -123,6 +129,8 @@ class InboxResponse(BaseModel):
     max_jitter_seconds: int = 180
     provider: str
     tracking_domain: Optional[str] = None
+    beacon_connected: bool = False
+    beacon_base_url: Optional[str] = None
     created_at: datetime
     ramp_up_enabled: bool = False
     ramp_up_period_days: int = 42

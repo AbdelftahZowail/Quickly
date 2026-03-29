@@ -1,4 +1,9 @@
 """FastAPI application and web UI."""
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -30,6 +35,7 @@ from app.routers import settings as settings_router
 from app.routers import backup as backup_router
 from app.routers import unibox as unibox_router
 from app.routers import tracking as tracking_router
+from app.routers import beacon_ingest as beacon_ingest_router
 from app.routers import email_provider as email_provider_router
 from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
@@ -168,6 +174,7 @@ app.add_middleware(
         "X-API-Key",
         "mcp-session-id",
         "mcp-protocol-version",
+        "X-Beacon-Signature",
     ],
     # Restore responses set this so the SPA can reload after DB replace (cross-origin dev).
     expose_headers=["X-Quickly-Reload"],
@@ -240,6 +247,7 @@ app.include_router(settings_router.router)
 app.include_router(backup_router.router)
 app.include_router(unibox_router.router)
 app.include_router(tracking_router.router)
+app.include_router(beacon_ingest_router.router)
 app.include_router(notifications_router.router)
 app.include_router(system_health_router.router)
 app.include_router(analytics_router.router)

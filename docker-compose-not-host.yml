@@ -36,6 +36,8 @@ services:
     environment:
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
       QUICKLY_LOCAL_DISK_BACKUPS: "1"
+      # Host Caddy + :443 on-demand TLS to this app — keep CNAME custom-domain UI.
+      QUICKLY_PREBUILT_IMAGE: "0"
     volumes:
       - ./backups:/app/backups
 

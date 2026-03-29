@@ -42,6 +42,13 @@ bt.shortformfunnels.com {
 	}
 }
 
+# Quickly Beacon (standalone tracking proxy on host — see beacon/README.md).
+beacon.shortformfunnels.com {
+	reverse_proxy 127.0.0.1:8090 {
+		header_up X-Real-IP {remote_host}
+	}
+}
+
 # Inbox custom tracking domains (CNAME → this server). Certificates: on_demand, approved
 # only by production Quickly on 5050 (see global ask above). Other hostnames match blocks above first.
 :443 {

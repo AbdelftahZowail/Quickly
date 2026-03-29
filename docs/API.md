@@ -962,7 +962,15 @@ Debug utility: attach a synthetic open event to every sent email log.
 
 ### `GET /api/settings/server-info`
 
-Get the server's base URL and CNAME target (used for custom tracking domain setup).
+Get the server's base URL, CNAME target (when the legacy custom-domain workflow applies), and whether the inbox UI should offer that CNAME flow.
+
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `base_url` | string | Configured application base URL |
+| `cname_target` | string | Hostname derived from `base_url` for CNAME instructions |
+| `custom_tracking_cname_ui_enabled` | boolean | `false` on prebuilt image deployments (`QUICKLY_PREBUILT_IMAGE=1`) unless `QUICKLY_TRACKING_CNAME_UI=1` — operators use Beacon for custom tracking hostnames instead |
 
 ### `GET /api/settings/verify-tracking-domain`
 

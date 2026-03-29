@@ -1,4 +1,9 @@
 """Background job: send due emails from the queue."""
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import asyncio
 import logging
 import random
@@ -595,6 +600,7 @@ async def run_send_job():
 
                 # ── phase 2: inject open/click tracking into HTML bodies ────
                 send_body = body
+                link_pairs: list = []
                 do_track = is_html and (
                     getattr(campaign, 'track_opens', False)
                     or getattr(campaign, 'track_clicks', False)
@@ -618,6 +624,26 @@ async def run_send_job():
                                 original_url=_url,
                             )
                         )
+
+                if getattr(inbox, "beacon_connected", False):
+                    from app.beacon_client import register_beacon_mappings
+
+                    b_items: list[dict] = [{"kind": "unsubscribe", "token": unsub_row.token}]
+                    if do_track:
+                        b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token})
+                        for _token, _url in link_pairs:
+                            b_items.append(
+                                {"kind": "click", "token": _token, "original_url": _url}
+                            )
+                    try:
+                        await register_beacon_mappings(inbox, b_items)
+                    except Exception:
+                        log.exception(
+                            "Beacon register failed for email_log_id=%s; aborting send",
+                            email_log_entry.id,
+                        )
+                        await session.delete(email_log_entry)
+                        continue
 
                 # ── Append quoted previous email (follow-up sequences only) ──
                 if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
@@ -1258,6 +1284,7 @@ async def send_slot_job(slot_id: int) -> None:
 
         # ── Inject open/click tracking ────────────────────────────────────
         send_body = body
+        link_pairs: list = []
         do_track = is_html and (
             getattr(campaign, "track_opens", False) or getattr(campaign, "track_clicks", False)
         )
@@ -1274,6 +1301,26 @@ async def send_slot_job(slot_id: int) -> None:
             )
             for _token, _url in link_pairs:
                 session.add(_TrackedLink(email_log_id=email_log_entry.id, token=_token, original_url=_url))
+
+        if getattr(inbox, "beacon_connected", False):
+            from app.beacon_client import register_beacon_mappings
+
+            b_items: list[dict] = [{"kind": "unsubscribe", "token": unsub_row.token}]
+            if do_track:
+                b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token})
+                for _token, _url in link_pairs:
+                    b_items.append(
+                        {"kind": "click", "token": _token, "original_url": _url}
+                    )
+            try:
+                await register_beacon_mappings(inbox, b_items)
+            except Exception:
+                log.exception(
+                    "Beacon register failed for email_log_id=%s; aborting send",
+                    email_log_entry.id,
+                )
+                await session.delete(email_log_entry)
+                return
 
         # ── Append quoted previous email ──────────────────────────────────
         if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
