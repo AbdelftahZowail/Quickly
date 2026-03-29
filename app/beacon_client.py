@@ -15,6 +15,17 @@ from app.models import Inbox
 
 log = logging.getLogger("quickly.beacon_client")
 
+# Large inboxes: Beacon register accepts batches to avoid huge single POST bodies.
+BEACON_REGISTER_BATCH_SIZE = 250
+
+
+async def register_beacon_mappings_batched(inbox: Inbox, items: list[dict[str, Any]]) -> None:
+    """POST /api/v1/register in chunks of ``BEACON_REGISTER_BATCH_SIZE``."""
+    if not items:
+        return
+    for i in range(0, len(items), BEACON_REGISTER_BATCH_SIZE):
+        await register_beacon_mappings(inbox, items[i : i + BEACON_REGISTER_BATCH_SIZE])
+
 
 async def register_beacon_mappings(inbox: Inbox, items: list[dict[str, Any]]) -> None:
     """POST /api/v1/register on Beacon. Raises on HTTP error."""

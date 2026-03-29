@@ -300,6 +300,19 @@ async def beacon_connect(
     await _maybe_complete_ramp_up(inbox, db)
     await db.commit()
     log.info("beacon_connect: inbox_id=%s base=%s", inbox_id, base)
+
+    from app.beacon_sync import sync_inbox_tracking_to_beacon
+
+    try:
+        n = await sync_inbox_tracking_to_beacon(db, inbox)
+        if n:
+            log.info("beacon_connect: synced %s prior tracking row(s) for inbox_id=%s", n, inbox_id)
+    except Exception:
+        log.exception(
+            "beacon_connect: historical sync failed for inbox_id=%s (inbox is connected; retry by disconnect/reconnect or resend)",
+            inbox_id,
+        )
+
     return inbox
 
 
