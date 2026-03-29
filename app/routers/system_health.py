@@ -150,6 +150,41 @@ def _probe_tracking_domain(domain: str) -> str:
     return "error"
 
 
+def _probe_beacon_health(base_url: str, setup_token: str | None) -> str:
+    """Return 'ok' if Beacon's authenticated health reports connected.
+
+    Calls ``GET <base>/api/v1/health`` with ``Authorization: Bearer <setup_token>``.
+    Requires HTTP 200, JSON ``ok`` true, and ``connected`` true (Beacon wired to Quickly).
+    """
+    import httpx
+
+    if not base_url or not (setup_token or "").strip():
+        return "error"
+    base = base_url.strip().rstrip("/")
+    url = f"{base}/api/v1/health"
+    headers = {"Authorization": f"Bearer {setup_token.strip()}"}
+    for verify_ssl in (True, False):
+        try:
+            with httpx.Client(timeout=15, follow_redirects=True, verify=verify_ssl) as client:
+                resp = client.get(url, headers=headers)
+            if resp.status_code == 200:
+                try:
+                    data = resp.json()
+                    if not data.get("ok"):
+                        return "error"
+                    return "ok" if data.get("connected") else "error"
+                except Exception:
+                    return "error"
+            return "error"
+        except httpx.ConnectError:
+            pass
+        except httpx.TimeoutException:
+            return "error"
+        except Exception:
+            pass
+    return "error"
+
+
 # ---------------------------------------------------------------------------
 # Main endpoint
 # ---------------------------------------------------------------------------
@@ -224,27 +259,20 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
 
     beacon_probe_map: dict[int, str] = {}
 
-    def _host_from_beacon_base(base_url: str) -> str:
-        from urllib.parse import urlparse
-
-        h = (urlparse(base_url).hostname or "").strip().lower()
-        return h
-
     inboxes_with_beacon = [
-        (inbox.id, inbox.beacon_base_url)
+        (inbox.id, inbox.beacon_base_url, getattr(inbox, "beacon_setup_token", None))
         for inbox in inbox_list
         if getattr(inbox, "beacon_connected", False) and inbox.beacon_base_url
     ]
     if inboxes_with_beacon:
-        hosts = [_host_from_beacon_base(url) for _, url in inboxes_with_beacon]
         raw_beacon = await asyncio.gather(
             *[
-                asyncio.to_thread(_probe_tracking_domain, host if host else "invalid")
-                for host in hosts
+                asyncio.to_thread(_probe_beacon_health, url, token)
+                for _, url, token in inboxes_with_beacon
             ]
         )
-        for (inbox_id, _), host, result in zip(inboxes_with_beacon, hosts, raw_beacon):
-            beacon_probe_map[inbox_id] = "error" if not host else result
+        for (inbox_id, _, _), result in zip(inboxes_with_beacon, raw_beacon):
+            beacon_probe_map[inbox_id] = result
 
     # ------------------------------------------------------------------
     # Google OAuth
