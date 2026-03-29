@@ -1,89 +1,9 @@
 """Database connection and session."""
-from __future__ import annotations
-
-import ipaddress
-import os
-import ssl
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import declarative_base
 
 from app.settings_manager import settings
-
-# Query keys handled by libpq/SQLAlchemy ssl logic; we drop these when supplying
-# our own asyncpg ``ssl`` context (e.g. Railway proxy / internal hostnames).
-_LIBPQ_SSL_QUERY_KEYS = frozenset({"sslmode", "ssl", "sslfactory", "channel_binding"})
-
-
-def _strip_libpq_ssl_query(url: str) -> str:
-    p = urlparse(url)
-    pairs = [
-        (k, v)
-        for k, v in parse_qsl(p.query, keep_blank_values=True)
-        if k.lower() not in _LIBPQ_SSL_QUERY_KEYS
-    ]
-    return urlunparse(p._replace(query=urlencode(pairs)))
-
-
-def _parse_pg_url_hostname(url: str) -> str:
-    h = urlparse(url).hostname or ""
-    return h.strip("[]").lower()
-
-
-def _railway_like_db_host(url: str) -> bool:
-    host = _parse_pg_url_hostname(url)
-    if not host:
-        return False
-    return (
-        "rlwy.net" in host
-        or "railway.internal" in host
-        or host.endswith(".railway.app")
-    )
-
-
-def _railway_env_db_numeric_host(url: str) -> bool:
-    """Private DB URLs on Railway sometimes use a bare IP; certs never match that host."""
-    if not os.getenv("RAILWAY_ENVIRONMENT", "").strip():
-        return False
-    host = _parse_pg_url_hostname(url)
-    if not host:
-        return False
-    if host in ("postgres", "db"):
-        return False
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return not ip.is_loopback
-
-
-def _env_truthy(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
-
-
-def _non_verifying_tls_context() -> ssl.SSLContext:
-    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return ctx
-
-
-def _asyncpg_relaxed_ssl_connect_args(url: str) -> dict | None:
-    """Use TLS to the server but skip certificate hostname verification.
-
-    Needed when the DB is behind a PaaS proxy (hostname ≠ cert SAN), e.g. Railway.
-    Other hosts: set ``QUICKLY_DATABASE_SSL_RELAXED=1`` (or ``true`` / ``yes`` / ``on``).
-    """
-    if not url.startswith("postgresql+asyncpg"):
-        return None
-    if not (
-        _env_truthy("QUICKLY_DATABASE_SSL_RELAXED")
-        or _railway_like_db_host(url)
-        or _railway_env_db_numeric_host(url)
-    ):
-        return None
-    return {"ssl": _non_verifying_tls_context()}
+import os
 
 # use TEST_DATABASE_URL during testing, otherwise fall back to configured URL
 # in settings.  The application expects a PostgreSQL compatible URI; old
@@ -98,10 +18,6 @@ if db_url.startswith("postgres://"):
     db_url = db_url.replace("postgres://", "postgresql+asyncpg://", 1)
 elif db_url.startswith("postgresql://"):
     db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-relaxed_ssl = _asyncpg_relaxed_ssl_connect_args(db_url)
-if relaxed_ssl is not None:
-    db_url = _strip_libpq_ssl_query(db_url)
 
 # If the database URL refers to SQLite we need the StaticPool/"
 # check_same_thread" combination so that an in-memory database survives
@@ -119,8 +35,6 @@ if db_url.startswith("sqlite"):
             "poolclass": StaticPool,
         }
     )
-elif relaxed_ssl is not None:
-    engine_kwargs["connect_args"] = relaxed_ssl
 
 engine = create_async_engine(
     db_url,
