@@ -916,7 +916,10 @@ export default function Inboxes() {
                           onDisconnectBeacon={disconnectBeacon}
                           beaconConnecting={beaconConnecting}
                         />
-                        <div className="border-t border-gray-200 pt-3 space-y-2">
+                      </div>
+                      <div className="border rounded p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Warm-up</p>
+                        <div className="space-y-2">
                           <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-gray-700">
                             <input
                               type="checkbox"
@@ -1177,7 +1180,10 @@ export default function Inboxes() {
                   onDisconnectBeacon={() => {}}
                   beaconConnecting={false}
                 />
-                <div className="border-t border-gray-200 pt-3 space-y-2">
+              </div>
+              <div className="border rounded p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Warm-up</p>
+                <div className="space-y-2">
                   <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-700">
                     <input
                       type="checkbox"

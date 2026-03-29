@@ -1,0 +1,64 @@
+# Dev: Postgres + hot-reload backend + Vite. No Caddy in Compose (same idea as
+# docker-compose.no-caddy.yml). QUICKLY_PREBUILT_IMAGE=1 matches the prebuilt
+# Docker Hub image — inbox UI steers to Beacon, not legacy CNAME-to-Quickly.
+
+name: quickly-no-caddy-dev
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: quickly
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --reload-dir app
+    volumes:
+      - ./:/app
+      - ./backups:/app/backups
+    ports:
+      - "8001:8000"
+    env_file: .env_dev
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+      QUICKLY_LOCAL_DISK_BACKUPS: "1"
+      QUICKLY_PREBUILT_IMAGE: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    command: npm run dev -- --host
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "5174:5173"
+    env_file: .env_dev
+    environment:
+      VITE_API_URL: "http://backend:8000"
+    depends_on:
+      backend:
+        condition: service_started
+
+volumes:
+  pgdata:
+    external: true
+    name: quickly_pgdata_dev

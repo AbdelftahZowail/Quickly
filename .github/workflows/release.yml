@@ -138,7 +138,7 @@ jobs:
         with:
           tag: ${{ steps.tagger.outputs.TAG }}
           name: ${{ steps.tagger.outputs.TAG }}
-          artifacts: "docker-compose.yml,docker-compose-not-host.yml,.env.example,Caddyfile"
+          artifacts: "docker-compose.yml,docker-compose-not-host.yml,docker-compose.no-caddy.yml,.env.example,Caddyfile"
           artifactErrorsFailBuild: true
           draft: ${{ github.event_name == 'workflow_dispatch' }}
           prerelease: false
@@ -171,6 +171,8 @@ jobs:
             ```
 
             **Already using Caddy on the server?** Download `docker-compose-not-host.yml` instead of `docker-compose.yml` (no Caddyfile in Docker). Point your host Caddy at `127.0.0.1:5050`. See [INSTALL.md](https://github.com/azowail/quickly/blob/main/docs/INSTALL.md).
+
+            **No reverse proxy in Docker (any TLS/proxy on the host):** Use `docker-compose.no-caddy.yml` — Postgres + app on port 8000, managed data volume (no `docker volume create`). Set `BASE_URL` in `.env` to match how users reach the app.
 
             Caddy handles HTTPS automatically with Let's Encrypt. Open `https://yourdomain.com`.
 

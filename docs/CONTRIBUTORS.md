@@ -99,7 +99,9 @@ Quickly/
 ├── tests/                  # pytest test suite
 ├── smoke_test/             # Development utilities
 ├── docs/                   # Documentation
-├── docker-compose.yml      # Production Docker Compose
+├── docker-compose.yml      # Production Docker Compose (Postgres + app + Caddy)
+├── docker-compose.no-caddy.yml  # Postgres + app only (recommended with Beacon-only tracking)
+├── docker-compose.no-caddy.dev.yml  # Dev: no Caddy, prebuilt UI (Beacon)
 ├── Dockerfile              # Multi-stage build
 └── Caddyfile               # Caddy reverse proxy config
 ```

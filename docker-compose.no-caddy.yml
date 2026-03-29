@@ -1,0 +1,40 @@
+# Quickly without Caddy: Postgres + prebuilt app image only (QUICKLY_PREBUILT_IMAGE=1).
+# Use your own reverse proxy (nginx, Traefik, host Caddy, etc.) or open http://localhost:8000.
+# For host Caddy with on-demand TLS to custom tracking domains, prefer docker-compose-not-host.yml.
+
+name: quickly-no-caddy
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: quickly
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: azowail/quickly:latest
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
+      QUICKLY_LOCAL_DISK_BACKUPS: "1"
+      QUICKLY_PREBUILT_IMAGE: "1"
+    volumes:
+      - ./backups:/app/backups
+
+volumes:
+  pgdata:

@@ -128,6 +128,21 @@ Click the button above to spin up Quickly on [Railway](https://railway.com) in s
 
 **Option 2: Self-host with Docker (any VPS or PaaS)**
 
+If you plan to use **only [Quickly Beacon](INSTALL.md#quickly-beacon-recommended-custom-tracking-hostnames)** for custom tracking (recommended on the prebuilt image), use **`docker-compose.no-caddy.yml`** — Postgres + Quickly on port **8000**, no Caddy in Compose; put your own reverse proxy in front for HTTPS. See [INSTALL.md — Beacon-only](INSTALL.md#beacon-only-docker-compose-no-caddy).
+
+```bash
+mkdir quickly && cd quickly
+
+curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.no-caddy.yml
+curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+mv .env.example .env
+# Set BASE_URL and your OAuth credentials; terminate HTTPS with nginx, Traefik, host Caddy, etc.
+
+docker compose -f docker-compose.no-caddy.yml up -d
+```
+
+**All-in-one with Caddy in Docker** (Let's Encrypt for your main app domain in one stack):
+
 ```bash
 mkdir quickly && cd quickly
 
@@ -141,7 +156,7 @@ mv .env.example .env
 docker compose up -d
 ```
 
-**That's it.** Open `https://yourdomain.com` — Caddy provisions HTTPS automatically.
+**That's it** for the Caddy stack — open `https://yourdomain.com` and Caddy provisions HTTPS automatically.
 
 Quickly is optimized to run on any Docker-compatible platform: Railway, Render, Fly.io, a bare VPS, or your own machine. There's no mandatory infrastructure cost.
 
