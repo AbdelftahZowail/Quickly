@@ -194,8 +194,11 @@ The `.env` file is intentionally minimal. All runtime settings — AI providers,
 | `OFFICE365_TENANT_ID`     | No             | Defaults to `common` (multi-tenant); set to your tenant ID for single-tenant orgs |
 | `QUICKLY_SECRET_KEY`      | Recommended    | JWT signing secret                                                                |
 | `CORS_ORIGINS`            | No             | Comma-separated allowed origins                                                   |
+| `QUICKLY_DATABASE_SSL_RELAXED` | No        | Set to `1` / `true` / `yes` / `on` on non-Railway PaaS if Postgres TLS fails at startup ([details](docs/INSTALL.md#paas-postgresql-and-tls)) |
 
 See [`.env.example`](.env.example) for the full annotated reference.
+
+**PaaS Postgres (Railway, Render, Fly.io, etc.):** Put `DATABASE_URL` on the **application** service (not only the database). Railway-style hosts are detected automatically for relaxed TLS hostname checks; other platforms may need `QUICKLY_DATABASE_SSL_RELAXED=1`. Full explanation: [docs/INSTALL.md — PaaS PostgreSQL and TLS](docs/INSTALL.md#paas-postgresql-and-tls).
 
 ---
 
