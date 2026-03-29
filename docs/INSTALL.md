@@ -8,6 +8,7 @@
 
 - [Step 1: Choose Your Deployment Path](#step-1-choose-your-deployment-path)
     - [Option A: Railway / PaaS (No server needed)](#option-a-railway--paas-no-server-needed)
+    - [PaaS PostgreSQL and TLS](#paas-postgresql-and-tls)
     - [Option B: VPS with Docker Compose](#option-b-vps-with-docker-compose)
     - [Beacon-only (recommended): `docker-compose.no-caddy.yml`](#beacon-only-docker-compose-no-caddy)
     - [Already running Caddy on the host (not-host)](#already-running-caddy-on-the-host-not-host)
@@ -63,7 +64,7 @@ In Railway: **New Project → Deploy a Docker image**
 
 In your Railway project, click **+ New → Database → Add PostgreSQL**.
 
-Railway automatically injects `DATABASE_URL` as an environment variable — Quickly picks this up with no extra configuration.
+Railway automatically exposes `DATABASE_URL` on the **PostgreSQL** service. **Reference it from your Quickly service** (Variables → add `DATABASE_URL` = `${{ Postgres.DATABASE_URL }}` or your plugin’s name) so the app container actually receives it. See [PaaS PostgreSQL and TLS](#paas-postgresql-and-tls) if the app fails to start with database or SSL errors.
 
 **3. Set your environment variables.**
 
@@ -97,6 +98,24 @@ Railway deploys automatically when you save variables. The Docker image pull tak
 In the Railway dashboard, go to **Settings → Domains** and copy the generated URL (e.g. `https://quickly-production.up.railway.app`). If this differs from the `BASE_URL` you set above, update `BASE_URL` to match exactly, then redeploy.
 
 **6. Custom tracking hostname (optional).** The prebuilt image is meant to use [**Quickly Beacon**](#quickly-beacon-recommended-custom-tracking-hostnames) on a separate URL for `track.yourbrand.com`–style links. Run Beacon there, paste its setup URL under **Inboxes → Connect Beacon**. You do not CNAME a tracking host directly to Railway’s Quickly service for that workflow.
+
+---
+
+### PaaS PostgreSQL and TLS
+
+Quickly uses **SQLAlchemy + asyncpg** with `DATABASE_URL` (`postgres://` / `postgresql://` is rewritten to `postgresql+asyncpg://` automatically).
+
+**Connection refused at startup** usually means the app service does not have `DATABASE_URL` (e.g. it was only defined on the database service). Point `DATABASE_URL` at your provider’s Postgres URL on the **same service that runs the Quickly image**.
+
+**TLS / SSL errors at startup** (e.g. asyncpg `TargetServerAttributeNotMatched` or failures inside `_create_ssl_connection`) often happen when Postgres is behind a **proxy** or **pooler**: the TCP host you connect to is not the name on the server certificate. Quickly handles that by using TLS **without verifying the certificate hostname** (traffic is still encrypted).
+
+| Situation | What to do |
+| --- | --- |
+| **Railway** — host contains `rlwy.net` or ends with `.railway.internal` | Automatic. No extra variable. |
+| **Other PaaS** (Render, Fly.io, Neon, Supabase pooler, DigitalOcean, etc.) | Set **`QUICKLY_DATABASE_SSL_RELAXED=1`** (or `true`, `yes`, `on`) on the **app** service. |
+| **Your own Postgres** (Docker Compose, VPS, hostname matches cert) | Leave **`QUICKLY_DATABASE_SSL_RELAXED` unset** so certificate verification stays strict. |
+
+When relaxed TLS is applied, Quickly also strips `sslmode` / related query parameters from the URL so they do not conflict with asyncpg’s SSL settings.
 
 ---
 
@@ -860,6 +879,7 @@ The PostgreSQL Docker volume keeps your data across updates (`quickly_pgdata` fo
 |`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo (including **`docker-compose.no-caddy.yml`**) set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest backup files (`.qbk` wrapper format). PaaS without a volume: use **webhook** instead.|
 |`QUICKLY_PREBUILT_IMAGE`|No|`1` in Docker image|When `1`/`true`/`yes`, the inbox UI hides CNAME-to-Quickly custom tracking setup so operators use **Beacon** instead. **`docker-compose.dev.yml`** sets `0` (CNAME UI visible while hacking). Production **`docker-compose-not-host.yml`** sets `0` for legacy host-Caddy + CNAME tracking. **`docker-compose.no-caddy.yml`**, **`docker-compose.no-caddy.dev.yml`**, and **`docker-compose-not-host.dev.yml`** set `1` to mirror the prebuilt image.|
 |`QUICKLY_TRACKING_CNAME_UI`|No|_(off)_|Set to `1`/`true`/`yes` to **show** the CNAME custom tracking UI even when `QUICKLY_PREBUILT_IMAGE=1` (advanced / host-Caddy setups).|
+|`QUICKLY_DATABASE_SSL_RELAXED`|No|_(off)_|Set to `1`/`true`/`yes`/`on` when hosted Postgres uses a proxy hostname that breaks TLS cert verification (Render, Fly.io, Neon, etc.). **Railway** (`*.rlwy.net`, `*.railway.internal`) is detected automatically. See [PaaS PostgreSQL and TLS](#paas-postgresql-and-tls).|
 
 **Backup and restore:** Backups are packaged as **`.qbk`** files (current format embeds a manifest plus a PostgreSQL custom-format dump). **Encrypted** backups include a small **plaintext preview** of the manifest (admin emails masked) so the UI can show what you are restoring before you enter the password; the dump itself stays encrypted. Older `.qbk` files from previous Quickly versions are not accepted — export a new backup from a current instance. You can download an encrypted backup from Settings (password required to restore; losing the password makes the file unrecoverable). If you enable **Encrypt automatic backups** in Settings, scheduled and “run now” backups use the same saved password (stored in the database, like webhook secrets). Restore uses **read metadata → verify password (if encrypted) → confirm** steps. The app uses `pg_dump` / `pg_restore` internally. The production Docker image includes the PostgreSQL client tools. If you run the backend directly on the host (e.g. `uvicorn` without Docker), install the client package for your OS (e.g. `postgresql-client` on Debian/Ubuntu). Compose dev files mount `./backups` to `/app/backups` so the default folder is persisted on the host. For multi-process deployments, set **`QUICKLY_RESTORE_STAGING_DIR`** to a shared directory so restore confirmation tokens work across workers.
 
@@ -890,6 +910,8 @@ python -c "import secrets; print(secrets.token_urlsafe(64))"
 
 - `DATABASE_URL` is set automatically by `docker-compose.yml` — don't override it unless you have a custom PostgreSQL setup
 - If you did override it, make sure the hostname is `db` (the Docker service name), not `localhost`
+- **PaaS:** Ensure `DATABASE_URL` is defined on the **application** service (reference your database plugin’s URL), not only on the Postgres service — otherwise the app falls back to `localhost` and you get **connection refused**
+- **PaaS TLS errors** at startup: see [PaaS PostgreSQL and TLS](#paas-postgresql-and-tls); set **`QUICKLY_DATABASE_SSL_RELAXED=1`** on non-Railway providers if needed
 
 ### Gmail OAuth errors
 
