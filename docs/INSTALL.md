@@ -9,6 +9,7 @@
 - [Step 1: Choose Your Deployment Path](#step-1-choose-your-deployment-path)
     - [Option A: Railway / PaaS (No server needed)](#option-a-railway--paas-no-server-needed)
     - [Option B: VPS with Docker Compose](#option-b-vps-with-docker-compose)
+    - [Beacon-only (recommended): `docker-compose.no-caddy.yml`](#beacon-only-docker-compose-no-caddy)
     - [Already running Caddy on the host (not-host)](#already-running-caddy-on-the-host-not-host)
     - [Option C: Existing Server with nginx](#option-c-existing-server-with-nginx)
     - [Option D: Local Development](#option-d-local-development)
@@ -30,7 +31,7 @@
 |Path|Best for|Difficulty|
 |---|---|---|
 |[**A — Railway / PaaS**](#option-a-railway--paas-no-server-needed)|Fastest setup, no DevOps experience needed|⭐ Easiest|
-|[**B — VPS + Docker Compose**](#option-b-vps-with-docker-compose)|Your own server: Postgres, app, and Caddy in one Compose stack|⭐⭐ Easy|
+|[**B — VPS + Docker Compose**](#option-b-vps-with-docker-compose)|Your own server: Postgres + app; **recommended** [`docker-compose.no-caddy.yml`](#beacon-only-docker-compose-no-caddy) if you use **only Beacon** for tracking, or all-in-one with Caddy|⭐⭐ Easy|
 |[**C — Existing server with nginx**](#option-c-existing-server-with-nginx)|You already have other sites on the same server|⭐⭐⭐ Medium|
 |[**D — Local development**](#option-d-local-development)|Contributing, testing, or hacking on the code|⭐⭐ Easy|
 
@@ -105,7 +106,66 @@ In the Railway dashboard, go to **Settings → Domains** and copy the generated 
 
 ## Option B: VPS with Docker Compose
 
-> **Best for:** **Your own VPS.** Docker Compose runs PostgreSQL, Quickly, and Caddy together. Caddy obtains and renews HTTPS certificates (Let's Encrypt) — no Certbot.
+> **Best for:** **Your own VPS** with Docker and PostgreSQL.
+
+### Which Compose file?
+
+| File | When to use |
+|---|---|
+| **`docker-compose.no-caddy.yml`** | **Recommended** if you plan to use **only [Quickly Beacon](#quickly-beacon-recommended-custom-tracking-hostnames)** for custom tracking hostnames (the usual path for the prebuilt image). Runs **Postgres + Quickly** on port **8000** with **no Caddy** in the stack — terminate HTTPS with nginx, Traefik, **host Caddy**, a cloud load balancer, or another reverse proxy in front. Creates its own Postgres volume automatically; no `docker volume create` step. |
+| **`docker-compose.yml`** | You want **Caddy inside Docker** to obtain and renew Let's Encrypt certificates for your main Quickly domain (single stack, minimal moving parts). |
+| **`docker-compose-not-host.yml`** | You already run **Caddy on the host** and may need the **legacy CNAME-to-Quickly** tracking flow with on-demand TLS — see [Already running Caddy on the host](#already-running-caddy-on-the-host-not-host). Not required for Beacon-only setups. |
+
+---
+
+<a id="beacon-only-docker-compose-no-caddy"></a>
+
+### Beacon-only (recommended): docker-compose.no-caddy.yml
+
+**What you'll need**
+
+- A Linux VPS (or any host) with [Docker Engine](https://docs.docker.com/engine/install/) and the Docker Compose plugin  
+  Quick install: `curl -fsSL https://get.docker.com | sh`
+- A way to expose the app over **HTTPS** in production (reverse proxy, tunnel, or TLS at the edge) — Compose publishes Quickly on **8000** by default
+- A domain is typical: point DNS at your proxy, which forwards to Quickly on the host (e.g. `127.0.0.1:8000`)
+
+**Steps**
+
+**1. SSH into your server** (if applicable) and create a working directory.
+
+```bash
+mkdir quickly && cd quickly
+```
+
+**2. Download Compose and env template.**
+
+```bash
+curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.no-caddy.yml
+curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+mv .env.example .env
+```
+
+**3. Edit `.env`.** Set at minimum **`BASE_URL`** (the full public URL users open — must match your reverse proxy), **`QUICKLY_SECRET_KEY`**, and OAuth variables when you connect inboxes (same idea as below in the all-in-one path). **`CADDY_HOST`** can stay empty; this stack does not run the project’s Caddy container.
+
+> `DATABASE_URL` is set in `docker-compose.no-caddy.yml` for the bundled PostgreSQL service.
+
+**4. Start Quickly.**
+
+```bash
+docker compose -f docker-compose.no-caddy.yml up -d
+```
+
+**5. Point your reverse proxy** at `127.0.0.1:8000` (or change the published port in the file if you prefer). Reload the proxy.
+
+**6. Custom tracking:** run [Quickly Beacon](#quickly-beacon-recommended-custom-tracking-hostnames) on its own origin and connect it under **Inboxes → Connect Beacon**.
+
+> **Next step (Beacon-only path):** [Step 2: First Login & User Setup](#step-2-first-login--user-setup). Skip the all-in-one Caddy section below if this file is what you deployed.
+
+---
+
+### All-in-one: Postgres + Quickly + Caddy (`docker-compose.yml`)
+
+> **Best for:** One Compose stack where **Caddy** obtains and renews HTTPS certificates (Let's Encrypt) for your main Quickly domain — no Certbot.
 
 ### What you'll need
 
@@ -220,7 +280,9 @@ docker compose logs app  # check for any startup errors
 
 Choose this if **Caddy is already on your VPS** for other sites and you **do not** want another Caddy container in Docker.
 
-> **Not the default path.** Prefer [**Quickly Beacon**](#quickly-beacon-recommended-custom-tracking-hostnames) for custom tracking domains so Quickly and TLS stay simple. Use this layout only if you intentionally run **one** Quickly stack behind **host** Caddy (see `docker-compose-not-host.yml` and the sample `Caddyfile.host` in the repo) and you understand on-demand TLS and DNS. The Compose file sets `QUICKLY_PREBUILT_IMAGE=0` so the legacy **CNAME to Quickly** controls stay available in the inbox UI.
+> **Planning to use only Beacon for tracking?** Use **`docker-compose.no-caddy.yml`** instead ([Beacon-only path](#beacon-only-docker-compose-no-caddy)) — that is the **recommended** Compose layout; you do not need this not-host file unless you want **host Caddy** plus the legacy flow below.
+
+> **Not the default path for tracking.** Prefer [**Quickly Beacon**](#quickly-beacon-recommended-custom-tracking-hostnames) for custom tracking domains so Quickly and TLS stay simple. Use **this** not-host layout only if you intentionally run **one** Quickly stack behind **host** Caddy (see `docker-compose-not-host.yml` and the sample `Caddyfile.host` in the repo) and you understand on-demand TLS and DNS — for example **legacy CNAME-to-Quickly** tracking. The Compose file sets `QUICKLY_PREBUILT_IMAGE=0` so the legacy **CNAME to Quickly** controls stay available in the inbox UI.
 
 **Compared to the Compose + Caddy layout above**
 
@@ -380,6 +442,8 @@ docker compose -f docker-compose.dev.yml up
 ```
 
 Open `http://localhost:5173` — the frontend hot-reloads on changes; the backend reloads on Python changes.
+
+**No Caddy in Compose (prebuilt-style UI):** `docker compose -f docker-compose.no-caddy.dev.yml up` uses **`.env_dev`**, Postgres on host **5435**, API on **8002**, Vite on **5175**, and **`QUICKLY_PREBUILT_IMAGE=1`** like the Docker Hub image. **`docker-compose-not-host.dev.yml`** is similar but keeps port **5051** for a local host Caddy `reverse_proxy` and uses the external **`quickly_pgdata_dev`** volume.
 
 ---
 
@@ -715,6 +779,8 @@ All AI settings are stored in the database — no restart required.
 
 Use **Quickly Beacon** when you want open, click, and unsubscribe links to use **your own hostname** (for example `track.yourbrand.com`) without pointing that DNS name at the main Quickly app.
 
+**Self-hosted Docker:** If you plan to use **only Beacon** (and not the legacy CNAME-to-Quickly tracking flow), **`docker-compose.no-caddy.yml` is the recommended Compose file** — Postgres plus the Quickly image on port **8000**, no Caddy in the stack. Put your own reverse proxy in front for HTTPS. See [Beacon-only (recommended)](#beacon-only-docker-compose-no-caddy) under Option B.
+
 **How it works:** Beacon is a small tracking proxy. It serves pixels and redirects on the domain you choose, then posts signed events back to Quickly. Your main app URL stays on Railway, VPS Compose, etc.
 
 **Typical setup**
@@ -764,7 +830,14 @@ docker compose -f docker-compose-not-host.yml pull
 docker compose -f docker-compose-not-host.yml up -d
 ```
 
-The PostgreSQL Docker volume (`quickly_pgdata`) keeps your data across updates. Quickly applies schema changes on startup — no manual migrations needed.
+**`docker-compose.no-caddy.yml`** (Beacon-only / no in-compose Caddy):
+
+```bash
+docker compose -f docker-compose.no-caddy.yml pull
+docker compose -f docker-compose.no-caddy.yml up -d
+```
+
+The PostgreSQL Docker volume keeps your data across updates (`quickly_pgdata` for the Caddy and not-host stacks; a Compose-managed volume for **`docker-compose.no-caddy.yml`**). Quickly applies schema changes on startup — no manual migrations needed.
 
 ---
 
@@ -784,8 +857,8 @@ The PostgreSQL Docker volume (`quickly_pgdata`) keeps your data across updates. 
 |`OFFICE365_TENANT_ID`|No|`common`|Use `common` for multi-tenant, or your specific tenant ID — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
 |`QUICKLY_SECRET_KEY`|No|auto-generated|JWT signing key — **set this** or sessions reset on every restart|
 |`CORS_ORIGINS`|No|`http://localhost:5173,...`|Comma-separated allowed CORS origins|
-|`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest backup files (`.qbk` wrapper format). PaaS without a volume: use **webhook** instead.|
-|`QUICKLY_PREBUILT_IMAGE`|No|`1` in Docker image|When `1`/`true`/`yes`, the inbox UI hides CNAME-to-Quickly custom tracking setup so operators use **Beacon** instead. Dev Compose and **docker-compose-not-host.yml** set `0`.|
+|`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo (including **`docker-compose.no-caddy.yml`**) set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest backup files (`.qbk` wrapper format). PaaS without a volume: use **webhook** instead.|
+|`QUICKLY_PREBUILT_IMAGE`|No|`1` in Docker image|When `1`/`true`/`yes`, the inbox UI hides CNAME-to-Quickly custom tracking setup so operators use **Beacon** instead. **`docker-compose.dev.yml`** sets `0` (CNAME UI visible while hacking). Production **`docker-compose-not-host.yml`** sets `0` for legacy host-Caddy + CNAME tracking. **`docker-compose.no-caddy.yml`**, **`docker-compose.no-caddy.dev.yml`**, and **`docker-compose-not-host.dev.yml`** set `1` to mirror the prebuilt image.|
 |`QUICKLY_TRACKING_CNAME_UI`|No|_(off)_|Set to `1`/`true`/`yes` to **show** the CNAME custom tracking UI even when `QUICKLY_PREBUILT_IMAGE=1` (advanced / host-Caddy setups).|
 
 **Backup and restore:** Backups are packaged as **`.qbk`** files (current format embeds a manifest plus a PostgreSQL custom-format dump). **Encrypted** backups include a small **plaintext preview** of the manifest (admin emails masked) so the UI can show what you are restoring before you enter the password; the dump itself stays encrypted. Older `.qbk` files from previous Quickly versions are not accepted — export a new backup from a current instance. You can download an encrypted backup from Settings (password required to restore; losing the password makes the file unrecoverable). If you enable **Encrypt automatic backups** in Settings, scheduled and “run now” backups use the same saved password (stored in the database, like webhook secrets). Restore uses **read metadata → verify password (if encrypted) → confirm** steps. The app uses `pg_dump` / `pg_restore` internally. The production Docker image includes the PostgreSQL client tools. If you run the backend directly on the host (e.g. `uvicorn` without Docker), install the client package for your OS (e.g. `postgresql-client` on Debian/Ubuntu). Compose dev files mount `./backups` to `/app/backups` so the default folder is persisted on the host. For multi-process deployments, set **`QUICKLY_RESTORE_STAGING_DIR`** to a shared directory so restore confirmation tokens work across workers.
