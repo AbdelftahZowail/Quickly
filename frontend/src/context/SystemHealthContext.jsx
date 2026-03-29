@@ -224,6 +224,36 @@ function buildChecks(d) {
     });
   }
 
+  /* ── Beacon tracking hosts ───────────────────────────────────────── */
+  const inboxesWithBeacon = inboxList.filter(i => i.beacon_connected && i.beacon_base_url);
+  if (inboxesWithBeacon.length > 0) {
+    let beaconStatLvl = 'ok';
+    const beaconIssues = [];
+    inboxesWithBeacon.forEach(inbox => {
+      if (inbox.beacon_status !== 'ok') {
+        beaconStatLvl = 'error';
+        const name = inbox.display_name || inbox.email;
+        beaconIssues.push({
+          level: 'error',
+          text: `Beacon at "${inbox.beacon_base_url}" for "${name}" is not responding to the tracking probe.`,
+          fix: 'Confirm the Beacon service is running and the URL matches your deployment.',
+          action: { label: 'Open Inboxes', to: '/inboxes' },
+        });
+      }
+    });
+    checks.push({
+      id: 'beacon_tracking',
+      label: 'Beacon tracking',
+      icon: 'domain',
+      status: beaconStatLvl,
+      issues: beaconIssues,
+      meta: { inboxesWithBeacon },
+      detail: inboxesWithBeacon.length === 1
+        ? `1 host — ${inboxesWithBeacon[0].beacon_base_url}`
+        : `${inboxesWithBeacon.length} Beacon hosts`,
+    });
+  }
+
   /* ── Unibox Sync ──────────────────────────────────────────────── */
   let uniboxStatLvl = 'ok';
   const uniboxIssues = [];

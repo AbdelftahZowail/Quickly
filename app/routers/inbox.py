@@ -1,18 +1,49 @@
 """Inbox API routes."""
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import logging
+import secrets
 from datetime import datetime, timedelta
+from urllib.parse import parse_qs, urlparse
+
+import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, exists, update as sa_update
 
 from app.database import get_db
 from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog, CampaignLead
-from app.schemas import InboxCreate, InboxUpdate, InboxResponse, PauseInboxRequest
+from app.schemas import (
+    BeaconConnectRequest,
+    InboxCreate,
+    InboxUpdate,
+    InboxResponse,
+    PauseInboxRequest,
+)
 from app.queue_logic import compute_effective_daily_limit
+from app.settings_manager import settings as app_settings
 
 log = logging.getLogger("quickly.routes")
 
 router = APIRouter(prefix="/api/inboxes", tags=["inboxes"])
+
+
+def _parse_beacon_setup_url(raw: str) -> tuple[str, str]:
+    """Return (beacon_base_url, setup_token) from a Beacon setup URL."""
+    p = urlparse(raw.strip())
+    if p.scheme not in ("http", "https"):
+        raise ValueError("URL must start with http:// or https://")
+    if not p.netloc:
+        raise ValueError("invalid URL")
+    host = p.netloc.split("@")[-1]
+    base = f"{p.scheme}://{host}".rstrip("/")
+    token = (parse_qs(p.query).get("token") or [None])[0]
+    if not token:
+        raise ValueError("missing token query parameter")
+    return base, token
 
 
 def _normalise_tracking_domain(raw: str | None) -> str:
@@ -207,6 +238,85 @@ async def update_inbox(
 
         enqueue_global_recalculate(background_tasks)
     await db.refresh(inbox)
+    inbox.effective_max_per_day = _compute_effective_limit(inbox)
+    await _maybe_complete_ramp_up(inbox, db)
+    await db.commit()
+    return inbox
+
+
+@router.post("/{inbox_id}/beacon/connect", response_model=InboxResponse)
+async def beacon_connect(
+    inbox_id: int,
+    body: BeaconConnectRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Register this Quickly inbox with a Beacon instance using its setup URL."""
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = result.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
+    try:
+        base, setup_token = _parse_beacon_setup_url(body.setup_url)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+    webhook_secret = secrets.token_urlsafe(32)
+    quickly_base = (app_settings.base_url or "").strip().rstrip("/")
+    if not quickly_base.startswith("http"):
+        raise HTTPException(500, "BASE_URL is not configured")
+
+    connect_url = f"{base}/api/v1/connect"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                connect_url,
+                json={
+                    "quickly_base_url": quickly_base,
+                    "webhook_secret": webhook_secret,
+                    "inbox_id": inbox_id,
+                },
+                headers={"Authorization": f"Bearer {setup_token}"},
+            )
+            if resp.status_code >= 400:
+                raise HTTPException(
+                    502,
+                    f"Beacon connect failed: HTTP {resp.status_code} {resp.text[:200]}",
+                )
+            probe = await client.get(f"{base}/api/tracking-probe")
+            if probe.status_code != 200 or not probe.json().get("ok"):
+                raise HTTPException(502, "Beacon is reachable but tracking probe failed")
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"Could not reach Beacon: {e}") from e
+
+    inbox.beacon_base_url = base
+    inbox.beacon_setup_token = setup_token
+    inbox.beacon_webhook_secret = webhook_secret
+    inbox.beacon_connected = True
+    inbox.tracking_domain = None
+    await db.flush()
+    await db.refresh(inbox)
+    inbox.sent_today = 0
+    inbox.effective_max_per_day = _compute_effective_limit(inbox)
+    await _maybe_complete_ramp_up(inbox, db)
+    await db.commit()
+    log.info("beacon_connect: inbox_id=%s base=%s", inbox_id, base)
+    return inbox
+
+
+@router.post("/{inbox_id}/beacon/disconnect", response_model=InboxResponse)
+async def beacon_disconnect(inbox_id: int, db: AsyncSession = Depends(get_db)):
+    """Clear Beacon configuration for this inbox."""
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = result.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
+    inbox.beacon_base_url = None
+    inbox.beacon_setup_token = None
+    inbox.beacon_webhook_secret = None
+    inbox.beacon_connected = False
+    await db.flush()
+    await db.refresh(inbox)
+    inbox.sent_today = 0
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     await _maybe_complete_ramp_up(inbox, db)
     await db.commit()

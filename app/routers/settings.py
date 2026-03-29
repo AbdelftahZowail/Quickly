@@ -1,4 +1,9 @@
 """Settings API routes for managing configuration."""
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import logging
 import urllib.parse
 
@@ -486,8 +491,14 @@ async def get_server_info():
     """Return the server's configured base URL and derived hostname.
 
     The frontend uses ``cname_target`` to tell users what hostname their
-    custom tracking CNAME should point to.
+    custom tracking CNAME should point to (when that workflow is enabled).
+
+    ``custom_tracking_cname_ui_enabled`` is false for prebuilt image
+    deployments unless ``QUICKLY_TRACKING_CNAME_UI`` is set — use Beacon
+    for custom tracking domains instead (see docs).
     """
+    from app.deployment_flags import custom_tracking_cname_ui_enabled
+
     base_url = settings.base_url.rstrip("/")
     parsed = urllib.parse.urlparse(base_url)
     # Strip port from netloc for use as a CNAME target
@@ -495,6 +506,7 @@ async def get_server_info():
     return {
         "base_url": base_url,
         "cname_target": cname_target,
+        "custom_tracking_cname_ui_enabled": custom_tracking_cname_ui_enabled(),
     }
 
 

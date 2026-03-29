@@ -6,6 +6,10 @@ at startup and cached in memory for fast synchronous access.
 Environment variables are still respected on startup (see README or
 SETUP_POSTGRES_WINDOWS.md). A `.env` file in the project root will be loaded by
 python-dotenv automatically.
+
+``BASE_URL``: if set in the environment (non-empty after stripping), it always
+wins over the value restored from the database (e.g. after a backup restore) and
+the database row is updated to match on each startup.
 """
 from dotenv import load_dotenv
 import logging
@@ -26,14 +30,16 @@ class Settings:
         # ``DATABASE_URL`` (or ``TEST_DATABASE_URL`` when running tests).
         import os
 
-        # some defaults can be overridden via environment variables; any values
-        # stored in the database will supersede these once the app has started.
+        # some defaults can be overridden via environment variables; most values
+        # stored in the database supersede these once settings are loaded, except
+        # ``BASE_URL`` when present in the environment (see ``initialize_settings``).
         self.database_url: str = os.getenv(
             "DATABASE_URL",
             "postgresql+asyncpg://postgres:postgres@localhost/quickly",
         )
         
-        # Base URL (used by Google redirect calculation, links, etc.)
+        # Base URL (used by Google redirect calculation, links, etc.). Initial
+        # default from env; DB restore may overwrite until startup reconciliation.
         self.base_url: str = os.getenv("BASE_URL", "http://localhost:8000")
         
         # Google OAuth (also stored in AppSetting for backward compat)
@@ -149,6 +155,23 @@ async def save_all_settings_to_db(db: AsyncSession, data: dict) -> None:
         await save_setting_to_db(db, key, str(value))
 
 
+async def _sync_base_url_from_environment(db: AsyncSession) -> None:
+    """Apply ``BASE_URL`` from the process environment over any DB value.
+
+    Restores from backup can reintroduce an old public URL; deployment config
+    (compose, platform env, ``.env``) should be authoritative whenever it is set.
+    """
+    import os
+
+    env_base = (os.getenv("BASE_URL") or "").strip()
+    if not env_base:
+        return
+    settings.base_url = env_base
+    await save_setting_to_db(db, "base_url", env_base)
+    await db.commit()
+    log.info("BASE_URL taken from environment (database value updated to match).")
+
+
 async def reload_settings(db: AsyncSession):
     """Reload settings from database into memory cache."""
     data = await load_settings_from_db(db)
@@ -191,6 +214,10 @@ async def initialize_settings(db: AsyncSession):
 
         settings.reload_from_dict(data)
         log.info("Settings loaded from database")
+
+    # When BASE_URL is configured in the environment, it overrides DB (including
+    # values from an older backup) and the stored setting is brought in sync.
+    await _sync_base_url_from_environment(db)
 
     # Ensure all persistent security secrets exist (generates + saves if absent).
     await _ensure_secrets(db)

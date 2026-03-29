@@ -109,6 +109,38 @@ async def test_add_opens_setting_endpoint(session):
 
 
 @pytest.mark.asyncio
+async def test_base_url_env_overrides_database_on_startup(engine, monkeypatch):
+    """Restored or stale ``base_url`` in ``app_setting`` must not beat ``BASE_URL`` env."""
+    monkeypatch.setenv("BASE_URL", "https://from-env.example")
+
+    from sqlalchemy import insert, select
+
+    from app.database import Base as _Base, engine as _engine
+    from app.database import AsyncSessionLocal
+    from app.models import AppSetting
+    from app.settings_manager import initialize_settings, settings
+
+    async with _engine.begin() as conn:
+        await conn.run_sync(_Base.metadata.create_all)
+
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            insert(AppSetting).values(key="base_url", value="https://from-database.example")
+        )
+        await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        await initialize_settings(db)
+
+    assert settings.base_url.rstrip("/") == "https://from-env.example"
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(AppSetting).where(AppSetting.key == "base_url"))
+        row = result.scalar_one()
+        assert row.value.rstrip("/") == "https://from-env.example"
+
+
+@pytest.mark.asyncio
 async def test_google_oauth_credentials_ignore_db(engine):
     """Even if the DB contains values, the helpers always honor the env.
 

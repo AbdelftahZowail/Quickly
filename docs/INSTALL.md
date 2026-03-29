@@ -17,7 +17,8 @@
 - [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
 - [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)
 - [Optional: AI Reply Classification](#optional-ai-reply-classification)
-- [Optional: Custom Tracking Domains](#optional-custom-tracking-domains)
+- [Quickly Beacon (recommended custom tracking hostnames)](#quickly-beacon-recommended-custom-tracking-hostnames)
+- [Optional: Advanced — CNAME custom domains to Quickly](#optional-advanced--cname-custom-domains-to-quickly)
 - [Updating Quickly](#updating-quickly)
 - [Environment Variables Reference](#environment-variables-reference)
 - [Troubleshooting](#troubleshooting)
@@ -32,6 +33,8 @@
 |[**B — VPS + Docker Compose**](#option-b-vps-with-docker-compose)|Your own server: Postgres, app, and Caddy in one Compose stack|⭐⭐ Easy|
 |[**C — Existing server with nginx**](#option-c-existing-server-with-nginx)|You already have other sites on the same server|⭐⭐⭐ Medium|
 |[**D — Local development**](#option-d-local-development)|Contributing, testing, or hacking on the code|⭐⭐ Easy|
+
+**Custom tracking links on your own domain:** use [**Quickly Beacon**](#quickly-beacon-recommended-custom-tracking-hostnames) (recommended for the prebuilt image and Railway). The inbox UI hides the legacy “CNAME to Quickly” flow on those deployments; advanced single-VPS setups with **host Caddy** can still use [CNAME + on-demand TLS](#optional-advanced--cname-custom-domains-to-quickly) if you know the moving parts.
 
 ---
 
@@ -91,6 +94,8 @@ Railway deploys automatically when you save variables. The Docker image pull tak
 **5. Confirm your public URL.**
 
 In the Railway dashboard, go to **Settings → Domains** and copy the generated URL (e.g. `https://quickly-production.up.railway.app`). If this differs from the `BASE_URL` you set above, update `BASE_URL` to match exactly, then redeploy.
+
+**6. Custom tracking hostname (optional).** The prebuilt image is meant to use [**Quickly Beacon**](#quickly-beacon-recommended-custom-tracking-hostnames) on a separate URL for `track.yourbrand.com`–style links. Run Beacon there, paste its setup URL under **Inboxes → Connect Beacon**. You do not CNAME a tracking host directly to Railway’s Quickly service for that workflow.
 
 ---
 
@@ -214,6 +219,8 @@ docker compose logs app  # check for any startup errors
 ### Already running Caddy on the host (not-host)
 
 Choose this if **Caddy is already on your VPS** for other sites and you **do not** want another Caddy container in Docker.
+
+> **Not the default path.** Prefer [**Quickly Beacon**](#quickly-beacon-recommended-custom-tracking-hostnames) for custom tracking domains so Quickly and TLS stay simple. Use this layout only if you intentionally run **one** Quickly stack behind **host** Caddy (see `docker-compose-not-host.yml` and the sample `Caddyfile.host` in the repo) and you understand on-demand TLS and DNS. The Compose file sets `QUICKLY_PREBUILT_IMAGE=0` so the legacy **CNAME to Quickly** controls stay available in the inbox UI.
 
 **Compared to the Compose + Caddy layout above**
 
@@ -704,18 +711,37 @@ All AI settings are stored in the database — no restart required.
 
 ---
 
-## Optional: Custom Tracking Domains
+## Quickly Beacon (recommended custom tracking hostnames)
 
-> Requires Caddy (Option B or C). Not available on PaaS deployments that don't support custom Caddy configurations.
+Use **Quickly Beacon** when you want open, click, and unsubscribe links to use **your own hostname** (for example `track.yourbrand.com`) without pointing that DNS name at the main Quickly app.
 
-Custom tracking domains make your open/click tracking links appear to come from your own domain (e.g. `track.yourdomain.com`) instead of your main app domain.
+**How it works:** Beacon is a small tracking proxy. It serves pixels and redirects on the domain you choose, then posts signed events back to Quickly. Your main app URL stays on Railway, VPS Compose, etc.
+
+**Typical setup**
+
+1. **Run Beacon** so it is reachable on the HTTPS origin you want for tracking (for example a small VM, Railway service, or a `reverse_proxy` on host Caddy to `127.0.0.1:8090`).
+2. Set **`BEACON_PUBLIC_BASE_URL`** to that public origin (with protocol, no trailing path) if Beacon must print correct setup links in logs or HTML.
+3. While Beacon is **not** connected yet, open its root URL and **copy the setup link** (includes `?token=…`).
+4. In Quickly → **Inboxes** → choose an inbox → **Connect Beacon**, paste the full URL. After a successful connect, Beacon stops showing the token on `/` and behaves like a normal tracking host.
+
+That is the full loop for most operators.
+
+**Prebuilt image / Docker Hub (`azowail/quickly:latest`)** sets `QUICKLY_PREBUILT_IMAGE=1`. The inbox UI **hides** the legacy “custom domain + CNAME to Quickly” section and steers you to Beacon instead. To show that CNAME workflow again (for example on a **host Caddy** deployment where Quickly terminates on-demand TLS for tracking hosts), set **`QUICKLY_TRACKING_CNAME_UI=1`** or **`QUICKLY_PREBUILT_IMAGE=0`** in the app environment and restart.
+
+---
+
+## Optional: Advanced — CNAME custom domains to Quickly
+
+> **Legacy / advanced.** Prefer [Quickly Beacon](#quickly-beacon-recommended-custom-tracking-hostnames). This path only applies when **Quickly’s Caddy** (Compose or **host** Caddy) terminates HTTPS for the tracking hostname via **on-demand TLS** and the `/api/caddy/ask` flow. It is **not** how Railway-only or minimal PaaS installs are expected to add a tracking domain.
+
+Requires Caddy with on-demand TLS (Option B, Option C after migrating to Caddy, or **not-host** + `Caddyfile.host`).
 
 **To configure:**
 
 1. In your DNS provider, add a CNAME record:
     - **Name:** `track` (or any subdomain you prefer)
-    - **Value:** your Quickly server's main domain (e.g. `mail.yourdomain.com`)
-2. In Quickly, go to **Settings → Tracking → Custom Tracking Domain**
+    - **Value:** the hostname Caddy uses for Quickly (often your main app host), as shown in the inbox UI when the CNAME workflow is enabled
+2. In Quickly → **Inboxes** → tracking section, choose **Custom domain**, verify DNS, and save
 3. Enter the full subdomain (e.g. `track.yourdomain.com`)
 
 Caddy automatically provisions a certificate for this domain on the first request.
@@ -759,6 +785,8 @@ The PostgreSQL Docker volume (`quickly_pgdata`) keeps your data across updates. 
 |`QUICKLY_SECRET_KEY`|No|auto-generated|JWT signing key — **set this** or sessions reset on every restart|
 |`CORS_ORIGINS`|No|`http://localhost:5173,...`|Comma-separated allowed CORS origins|
 |`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest backup files (`.qbk` wrapper format). PaaS without a volume: use **webhook** instead.|
+|`QUICKLY_PREBUILT_IMAGE`|No|`1` in Docker image|When `1`/`true`/`yes`, the inbox UI hides CNAME-to-Quickly custom tracking setup so operators use **Beacon** instead. Dev Compose and **docker-compose-not-host.yml** set `0`.|
+|`QUICKLY_TRACKING_CNAME_UI`|No|_(off)_|Set to `1`/`true`/`yes` to **show** the CNAME custom tracking UI even when `QUICKLY_PREBUILT_IMAGE=1` (advanced / host-Caddy setups).|
 
 **Backup and restore:** Backups are packaged as **`.qbk`** files (current format embeds a manifest plus a PostgreSQL custom-format dump). **Encrypted** backups include a small **plaintext preview** of the manifest (admin emails masked) so the UI can show what you are restoring before you enter the password; the dump itself stays encrypted. Older `.qbk` files from previous Quickly versions are not accepted — export a new backup from a current instance. You can download an encrypted backup from Settings (password required to restore; losing the password makes the file unrecoverable). If you enable **Encrypt automatic backups** in Settings, scheduled and “run now” backups use the same saved password (stored in the database, like webhook secrets). Restore uses **read metadata → verify password (if encrypted) → confirm** steps. The app uses `pg_dump` / `pg_restore` internally. The production Docker image includes the PostgreSQL client tools. If you run the backend directly on the host (e.g. `uvicorn` without Docker), install the client package for your OS (e.g. `postgresql-client` on Debian/Ubuntu). Compose dev files mount `./backups` to `/app/backups` so the default folder is persisted on the host. For multi-process deployments, set **`QUICKLY_RESTORE_STAGING_DIR`** to a shared directory so restore confirmation tokens work across workers.
 

@@ -87,6 +87,11 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_started_at TIMESTAMP WITHOUT TIME ZONE NULL",
         # 2026-03-25: per-campaign enrollment status (lead.status is no longer used for this)
         "ALTER TABLE campaign_lead ADD COLUMN IF NOT EXISTS enrollment_status VARCHAR(32) NOT NULL DEFAULT 'active'",
+        # 2026-03-29: Beacon standalone tracking proxy (per inbox)
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_base_url VARCHAR(512) NULL",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_setup_token VARCHAR(128) NULL",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_webhook_secret VARCHAR(256) NULL",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_connected BOOLEAN NOT NULL DEFAULT FALSE",
     ]
     for stmt in pg_alters:
         await conn.execute(text(stmt))

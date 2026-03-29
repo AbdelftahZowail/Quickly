@@ -11,6 +11,8 @@ import os
 # exercising real SQLAlchemy behavior.  Users may override by setting
 # TEST_DATABASE_URL in their environment.
 os.environ.setdefault("TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:?cache=shared")
+# Production Docker sets QUICKLY_PREBUILT_IMAGE=1; tests default to “source” layout unless overridden.
+os.environ.setdefault("QUICKLY_PREBUILT_IMAGE", "0")
 
 # tests rely on a Postgres (or other SQLAlchemy) database.  Specify a
 # connection string via TEST_DATABASE_URL; if unset the regular

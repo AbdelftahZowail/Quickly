@@ -8,6 +8,57 @@ import { useNotify } from '../context/NotificationContext';
 /** Backend stores jitter in seconds (cap 600). Forms show minutes and convert on change / save. */
 const JITTER_MAX_MINUTES = 10;
 
+/** Full Beacon setup guide in the Quickly repo (INSTALL.md). */
+const BEACON_SETUP_DOCS_URL =
+  'https://github.com/AbdelftahZowail/Quickly/blob/main/docs/INSTALL.md#quickly-beacon-recommended-custom-tracking-hostnames';
+
+function CollapsibleInfo({ children }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="text-xs font-medium text-gray-600 hover:text-gray-900 flex items-center gap-1.5 text-left"
+        aria-expanded={open}
+      >
+        <svg
+          className={`w-3.5 h-3.5 shrink-0 text-gray-500 transition-transform ${open ? 'rotate-90' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+          aria-hidden
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+        </svg>
+        {open ? 'Hide info' : 'Show info'}
+      </button>
+      {open && (
+        <div className="mt-2 pl-1 space-y-2 text-xs text-gray-600 border-l-2 border-gray-200 ml-0.5 py-0.5">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RedirectUriBlock({ uri, size = 'xs' }) {
+  if (!uri) return null;
+  const textCls = size === 'sm' ? 'text-sm' : 'text-xs';
+  const codeCls = size === 'sm' ? 'text-xs' : 'text-[11px]';
+  return (
+    <div className={`text-gray-500 ${textCls} mt-1 min-w-0 w-full max-w-full`}>
+      <span className="block text-[10px] font-medium uppercase tracking-wide text-gray-400 mb-0.5">Redirect URI</span>
+      <code
+        className={`block font-mono ${codeCls} leading-snug break-all whitespace-pre-wrap bg-gray-50 rounded px-1.5 py-1 border border-gray-100 max-w-full`}
+        title={uri}
+      >
+        {uri}
+      </code>
+    </div>
+  );
+}
+
 function clampJitterSeconds(s) {
   const n = Number(s);
   if (!Number.isFinite(n)) return 0;
@@ -33,59 +84,59 @@ function formatJitterMinutesLabel(seconds) {
 }
 
 /**
- * Reusable tracking-domain form section.
- * Lets the user choose between the app's default domain or a custom one,
- * and shows DNS setup instructions with the real CNAME target.
+ * Tracking: three choices — app URL, Beacon (setup URL + Connect), or DNS setup (CNAME + Verify).
+ * Long-form help is behind “Show info” for each option.
  */
-function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
-  const isCustom = Boolean(value && value.trim());
-  const [verifyState, setVerifyState] = useState(null); // null | 'checking' | 'ok' | {error}
+function InboxTrackingOptions({
+  variant,
+  wrapClassName = 'space-y-4',
+  radioName,
+  cnameUiEnabled,
+  cnameTarget,
+  uiMode,
+  onUiModeChange,
+  trackingDomain,
+  onTrackingDomainChange,
+  onDnsVerifyChange,
+  beaconConnected,
+  beaconBaseUrl,
+  beaconSetupUrl,
+  onBeaconSetupUrlChange,
+  onConnectBeacon,
+  onDisconnectBeacon,
+  beaconConnecting,
+}) {
+  const hostHint = cnameTarget || (typeof window !== 'undefined' ? window.location.hostname : '');
+  const dnsActive = uiMode === 'dns';
+  const beaconActive = uiMode === 'beacon';
+  const [verifyState, setVerifyState] = useState(null);
   const [verifyMsg, setVerifyMsg] = useState('');
-  // Ref used to abort an in-flight check when the domain changes mid-flight.
   const abortRef = useRef(false);
 
-  // Reset verification whenever the domain value changes
-  const handleChange = (v) => {
-    abortRef.current = true; // signal any in-flight check to stop
+  const handleDnsValue = (v) => {
+    abortRef.current = true;
     setVerifyState(null);
     setVerifyMsg('');
-    onVerifyChange?.(false);
-    onChange(v);
+    onDnsVerifyChange?.(false);
+    onTrackingDomainChange(v);
   };
 
-  const verify = async () => {
-    const domain = value.trim();
+  const verifyDns = async () => {
+    const domain = (trackingDomain || '').trim();
     if (!domain) return;
-
     abortRef.current = false;
     setVerifyState('checking');
     setVerifyMsg('Registering domain…');
-
-    // Step 1: tell the backend to whitelist this domain so Caddy can
-    // provision an SSL cert when it sees the first HTTPS connection.
     try {
       await api.post('/settings/register-tracking-domain-pending', { domain });
-    } catch (_) {
-      // Non-fatal — proceed to verify anyway.
-    }
-
+    } catch (_) { /* non-fatal */ }
     if (abortRef.current) return;
-
-    // Step 2: poll the verify endpoint.  Caddy may need a few seconds to
-    // complete ACME cert provisioning so we retry up to 5 times.
     const MAX_ATTEMPTS = 5;
     const RETRY_DELAY_MS = 8000;
     let lastError = 'Timed out waiting for SSL certificate to be provisioned';
-
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       if (abortRef.current) return;
-
-      if (attempt === 0) {
-        setVerifyMsg('Provisioning SSL certificate…');
-      } else {
-        setVerifyMsg(`Waiting for SSL certificate… (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
-      }
-
+      setVerifyMsg(attempt === 0 ? 'Provisioning SSL certificate…' : `Waiting for SSL certificate… (attempt ${attempt + 1}/${MAX_ATTEMPTS})`);
       try {
         const data = await api.get(
           `/settings/verify-tracking-domain?domain=${encodeURIComponent(domain)}`
@@ -94,7 +145,7 @@ function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
         if (data.ok) {
           setVerifyState('ok');
           setVerifyMsg('');
-          onVerifyChange?.(true);
+          onDnsVerifyChange?.(true);
           return;
         }
         lastError = data.error || 'Unknown error';
@@ -102,92 +153,199 @@ function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
         if (abortRef.current) return;
         lastError = e.message;
       }
-
       if (attempt < MAX_ATTEMPTS - 1) {
         await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
       }
     }
-
     if (!abortRef.current) {
       setVerifyState({ error: lastError });
       setVerifyMsg('');
-      onVerifyChange?.(false);
+      onDnsVerifyChange?.(false);
     }
   };
 
+  useEffect(() => {
+    if (uiMode !== 'dns') {
+      abortRef.current = true;
+      setVerifyState(null);
+      setVerifyMsg('');
+    }
+  }, [uiMode]);
+
+  const dnsInputDisabled = !dnsActive;
+  const beaconInputDisabled = variant === 'add' || !beaconActive || beaconConnected;
+  const canVerifyDns = dnsActive && (trackingDomain || '').trim().length > 0;
+
   return (
-    <div className="border rounded p-3 space-y-2 bg-gray-50">
-      <p className="text-sm font-medium text-gray-700">Tracking domain</p>
-      <label className="flex items-center gap-2 cursor-pointer text-sm">
-        <input
-          type="radio"
-          checked={!isCustom}
-          onChange={() => handleChange('')}
-        />
-        <span>
-          Use app domain <span className="text-gray-400 font-mono text-xs">({cnameTarget || window.location.hostname})</span>
-        </span>
-      </label>
-      <label className="flex items-center gap-2 cursor-pointer text-sm">
-        <input
-          type="radio"
-          checked={isCustom}
-          onChange={() => { if (!isCustom) handleChange(''); }}
-        />
-        <span>Custom domain</span>
-      </label>
-      {isCustom || (
-        <p className="text-xs text-gray-400">
-          Open and click tracking links will use the app's own URL.
-        </p>
-      )}
-      {(isCustom || value !== undefined) && (
-        <div className="space-y-2 pl-5">
-          <div className="flex gap-2 items-center">
+    <div className={`${wrapClassName} min-w-0 max-w-full`}>
+      {/* Use app domain */}
+      <div className="space-y-2 min-w-0 max-w-full">
+        <label className="flex items-start gap-2 cursor-pointer text-sm">
+          <input
+            type="radio"
+            name={radioName}
+            className="mt-0.5 shrink-0"
+            checked={uiMode === 'app'}
+            onChange={() => onUiModeChange('app')}
+          />
+          <span className="font-medium text-gray-800">Use app domain</span>
+        </label>
+        <div className="ml-6 min-w-0 max-w-full border-l-2 border-gray-200 pl-3 py-0.5">
+          <CollapsibleInfo>
+            <p>
+              Open, click, and unsubscribe links use your Quickly app URL{' '}
+              <span className="text-gray-500 font-mono break-all">({hostHint})</span>. No Beacon service and no extra DNS records are required.
+            </p>
+          </CollapsibleInfo>
+        </div>
+      </div>
+
+      {/* Beacon */}
+      <div className="space-y-2 min-w-0 max-w-full">
+        <label className="flex items-start gap-2 cursor-pointer text-sm min-w-0">
+          <input
+            type="radio"
+            name={radioName}
+            className="mt-0.5 shrink-0"
+            checked={uiMode === 'beacon'}
+            onChange={() => onUiModeChange('beacon')}
+          />
+          <span className="font-medium text-gray-800">Beacon (Recommended)</span>
+        </label>
+        <div className="ml-6 min-w-0 max-w-full space-y-2 border-l-2 border-gray-200 pl-3 py-0.5 box-border">
+          <div className="w-full min-w-0 max-w-full space-y-2">
+            {beaconConnected ? (
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between w-full min-w-0">
+                <p className="text-xs text-gray-700 min-w-0 break-words [overflow-wrap:anywhere]">
+                  Connected: <code className="text-teal-800 break-all">{beaconBaseUrl || ''}</code>
+                </p>
+                <Button type="button" size="sm" variant="outline" className="shrink-0 self-start" onClick={onDisconnectBeacon}>
+                  Disconnect
+                </Button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2 w-full min-w-0 max-w-full">
+                <input
+                  type="url"
+                  disabled={beaconInputDisabled}
+                  className="w-full min-w-0 max-w-full box-border border rounded px-2 py-1.5 font-mono text-xs bg-white disabled:bg-gray-100 disabled:text-gray-500"
+                  placeholder="https://track.example.com/?token=…"
+                  value={beaconSetupUrl}
+                  onChange={e => onBeaconSetupUrlChange(e.target.value)}
+                />
+                <button
+                  type="button"
+                  disabled={beaconInputDisabled || !beaconSetupUrl.trim() || beaconConnecting}
+                  onClick={onConnectBeacon}
+                  className="self-start shrink-0 px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+                >
+                  {beaconConnecting ? 'Connecting…' : 'Connect'}
+                </button>
+              </div>
+            )}
+          </div>
+          {variant === 'add' && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1">
+              Connect is available after the inbox exists — finish adding the inbox, then open <strong>Edit</strong> and choose Beacon (Recommended) here.
+            </p>
+          )}
+          <CollapsibleInfo>
+            <p className="font-medium text-gray-700">How Beacon works</p>
+            <p>
+              Run the Beacon service on the HTTPS hostname you want for tracking links. While Quickly is not connected yet, open Beacon&apos;s root URL in a browser and copy the <strong>setup URL</strong> (it includes{' '}
+              <code className="bg-gray-100 px-0.5 rounded">?token=</code>
+              ). Paste it above and click Connect. On Beacon, set{' '}
+              <code className="bg-gray-100 px-0.5 rounded">BEACON_PUBLIC_BASE_URL</code>
+              {' '}if printed links should use a specific public origin.
+            </p>
+            <p>
+              <a
+                href={BEACON_SETUP_DOCS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-700 hover:underline break-all"
+              >
+                Full setup guide (Quickly repo → INSTALL.md)
+              </a>
+            </p>
+          </CollapsibleInfo>
+        </div>
+      </div>
+
+      {/* DNS setup */}
+      {cnameUiEnabled && (
+        <div className="space-y-2 min-w-0 max-w-full">
+          <label className="flex items-start gap-2 cursor-pointer text-sm min-w-0">
             <input
-              type="text"
-              className="block flex-1 border rounded p-1 font-mono text-sm"
-              placeholder="mail.yourdomain.com"
-              value={value}
-              onChange={e => handleChange(e.target.value)}
-              onFocus={() => { if (!isCustom) handleChange(' '); }}
+              type="radio"
+              name={radioName}
+              className="mt-0.5 shrink-0"
+              checked={dnsActive}
+              onChange={() => onUiModeChange('dns')}
             />
-            {isCustom && (
+            <span className="font-medium text-gray-800">DNS setup</span>
+          </label>
+          <div className="ml-6 min-w-0 max-w-full space-y-2 border-l-2 border-gray-200 pl-3 py-0.5 box-border">
+            <div className="flex flex-col gap-2 w-full min-w-0 max-w-full">
+              <input
+                type="text"
+                disabled={dnsInputDisabled}
+                className="w-full min-w-0 max-w-full box-border border rounded px-2 py-1.5 font-mono text-sm bg-white disabled:bg-gray-100 disabled:text-gray-500"
+                placeholder="mail.yourdomain.com"
+                value={trackingDomain || ''}
+                onChange={e => handleDnsValue(e.target.value)}
+                onFocus={() => {
+                  if (!dnsActive) onUiModeChange('dns');
+                }}
+              />
               <button
                 type="button"
-                onClick={verify}
-                disabled={verifyState === 'checking'}
-                className="shrink-0 px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
+                disabled={!canVerifyDns || verifyState === 'checking'}
+                onClick={verifyDns}
+                className="self-start shrink-0 px-2 py-1 text-xs rounded border border-gray-300 bg-white hover:bg-gray-50 disabled:opacity-50"
               >
                 {verifyState === 'checking' ? 'Verifying…' : 'Verify'}
               </button>
+            </div>
+            {verifyState === 'checking' && verifyMsg && (
+              <p className="text-xs text-blue-600 flex items-center gap-1">
+                <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                {verifyMsg}
+              </p>
             )}
-          </div>
-          {verifyState === 'checking' && verifyMsg && (
-            <p className="text-xs text-blue-600 flex items-center gap-1">
-              <span className="inline-block w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
-              {verifyMsg}
-            </p>
-          )}
-          {verifyState === 'ok' && (
-            <p className="text-xs text-green-600 font-medium">✓ Domain is reachable and pointing to this server</p>
-          )}
-          {verifyState && verifyState !== 'checking' && verifyState !== 'ok' && (
-            <p className="text-xs text-red-600">✗ {verifyState.error}</p>
-          )}
-          {isCustom && cnameTarget && (
-            <div className="bg-white border rounded p-2 text-xs text-gray-500 space-y-1">
-              <p className="font-medium text-gray-700">DNS setup (one-time)</p>
-              <p>Add a <code>CNAME</code> record at your registrar:</p>
-              <pre className="bg-gray-50 rounded p-1 overflow-x-auto whitespace-pre-wrap break-all">
-{`${value.trim() || 'mail.yourdomain.com'}  CNAME  ${cnameTarget}.`}
+            {verifyState === 'ok' && (
+              <p className="text-xs text-green-600 font-medium">✓ Domain is reachable and pointing to this server</p>
+            )}
+            {verifyState && verifyState !== 'checking' && verifyState !== 'ok' && (
+              <p className="text-xs text-red-600">✗ {verifyState.error}</p>
+            )}
+            <CollapsibleInfo>
+              <p className="font-medium text-gray-700">DNS setup (CNAME)</p>
+              <p>Add a <code>CNAME</code> at your DNS host pointing your tracking hostname at this Quickly server:</p>
+              <pre className="bg-white border rounded p-2 overflow-x-auto whitespace-pre-wrap break-all text-gray-700 text-[11px]">
+                {`${(trackingDomain || '').trim() || 'mail.yourdomain.com'}  CNAME  ${cnameTarget || 'your-app-host'}.`}
               </pre>
               <p>
-                Caddy auto-provisions an SSL certificate on the first HTTPS request —
-                no manual cert management needed.
+                Caddy requests a certificate on the first HTTPS hit. Select <strong>DNS setup</strong>, enter the hostname, run <strong>Verify</strong>, then save the inbox.
               </p>
-            </div>
-          )}
+            </CollapsibleInfo>
+          </div>
+        </div>
+      )}
+
+      {!cnameUiEnabled && (trackingDomain || '').trim() && !beaconConnected && (
+        <div className="text-xs text-amber-800 space-y-2 bg-amber-50 border border-amber-200 rounded p-2">
+          <p>
+            Legacy CNAME tracking domain saved:{' '}
+            <code className="font-mono">{(trackingDomain || '').trim()}</code>. Prefer Beacon for new setups.
+          </p>
+          <button
+            type="button"
+            className="text-xs px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100"
+            onClick={() => { onTrackingDomainChange(''); onDnsVerifyChange?.(false); }}
+          >
+            Clear saved domain
+          </button>
         </div>
       )}
     </div>
@@ -197,6 +355,7 @@ function TrackingDomainField({ value, onChange, cnameTarget, onVerifyChange }) {
 export default function Inboxes() {
   const [inboxes, setInboxes] = useState(() => apiCache.get('/inboxes') || []);
   const [cnameTarget, setCnameTarget] = useState('');
+  const [customTrackingCnameUiEnabled, setCustomTrackingCnameUiEnabled] = useState(true);
   // state used for both add and edit forms
   const initialForm = {
     provider: 'gmail',
@@ -225,6 +384,10 @@ export default function Inboxes() {
   // require re-verification when the user actually changes the domain.
   const editOriginalDomain = useRef('');
   const [editDomainVerified, setEditDomainVerified] = useState(false);
+  const [beaconSetupUrl, setBeaconSetupUrl] = useState('');
+  const [beaconConnecting, setBeaconConnecting] = useState(false);
+  const [editTrackingMode, setEditTrackingMode] = useState('app');
+  const [addTrackingMode, setAddTrackingMode] = useState('app');
   const [addDomainVerified, setAddDomainVerified] = useState(false);
   const [showAdd, setShowAdd] = useState(false); // controls add modal
   const confirm = useConfirm();
@@ -269,7 +432,12 @@ export default function Inboxes() {
     // get server hostname for DNS instructions
     fetch('/api/settings/server-info')
       .then(r => r.json())
-      .then(d => setCnameTarget(d.cname_target || window.location.hostname))
+      .then((d) => {
+        setCnameTarget(d.cname_target || window.location.hostname);
+        if (typeof d.custom_tracking_cname_ui_enabled === 'boolean') {
+          setCustomTrackingCnameUiEnabled(d.custom_tracking_cname_ui_enabled);
+        }
+      })
       .catch(() => setCnameTarget(window.location.hostname));
   }, []);
 
@@ -319,9 +487,9 @@ export default function Inboxes() {
       window.location.href = '/oauth/office365/authorize?' + params;
       return;
     }
-    const addDomain = form.tracking_domain.trim();
+    const addDomain = addTrackingMode === 'dns' ? form.tracking_domain.trim() : '';
     if (addDomain && !addDomainVerified) {
-      setMessage({ type: 'error', text: 'Please verify the custom tracking domain before saving.' });
+      setMessage({ type: 'error', text: 'Please verify the DNS tracking domain before saving.' });
       return;
     }
     try {
@@ -331,6 +499,7 @@ export default function Inboxes() {
       });
       setMessage({ type: 'success', text: 'Inbox added' });
       setForm(initialForm);
+      setAddTrackingMode('app');
       setAddDomainVerified(false);
       load();
       setShowAdd(false);
@@ -345,6 +514,12 @@ export default function Inboxes() {
     setEditMsg(null);
     editOriginalDomain.current = inbox.tracking_domain || '';
     setEditDomainVerified(false);
+    setBeaconSetupUrl('');
+    setEditTrackingMode(
+      inbox.beacon_connected
+        ? 'beacon'
+        : (customTrackingCnameUiEnabled && (inbox.tracking_domain || '').trim() ? 'dns' : 'app'),
+    );
   };
   const closeEdit = () => {
     setEditing(null);
@@ -367,12 +542,35 @@ export default function Inboxes() {
       setSelectedInbox(null);
     }
   };
+  const applyEditTrackingMode = (mode) => {
+    if (!editing) return;
+    if (editing.beacon_connected && mode !== 'beacon') {
+      setEditMsg({ type: 'error', text: 'Disconnect Beacon before choosing another tracking option.' });
+      return;
+    }
+    setEditMsg(null);
+    setEditTrackingMode(mode);
+    if (mode === 'app' || mode === 'beacon') {
+      setEditing(prev => ({ ...prev, tracking_domain: '' }));
+      setEditDomainVerified(false);
+    }
+    setEditDirty(true);
+  };
+
+  const applyAddTrackingMode = (mode) => {
+    setAddTrackingMode(mode);
+    if (mode === 'app' || mode === 'beacon') {
+      setForm(f => ({ ...f, tracking_domain: '' }));
+      setAddDomainVerified(false);
+    }
+  };
+
   const doSave = async () => {
     if (!editing) return;
-    const newDomain = (editing.tracking_domain || '').trim();
+    const newDomain = editTrackingMode === 'dns' ? (editing.tracking_domain || '').trim() : '';
     const domainChanged = newDomain !== editOriginalDomain.current;
-    if (newDomain && domainChanged && !editDomainVerified) {
-      setEditMsg({ type: 'error', text: 'Please verify the custom tracking domain before saving.' });
+    if (editTrackingMode === 'dns' && newDomain && domainChanged && !editDomainVerified) {
+      setEditMsg({ type: 'error', text: 'Please verify the DNS tracking domain before saving.' });
       return;
     }
     setEditDirty(false); // save in progress — don't treat as unsaved
@@ -400,12 +598,63 @@ export default function Inboxes() {
     await doSave();
   };
 
+  const connectBeacon = async () => {
+    if (!editing) return;
+    const url = beaconSetupUrl.trim();
+    if (!url) {
+      setEditMsg({ type: 'error', text: 'Paste the full Beacon setup URL (includes ?token=…).' });
+      return;
+    }
+    setBeaconConnecting(true);
+    try {
+      await api.post(`/inboxes/${editing.id}/beacon/connect`, { setup_url: url });
+      setEditMsg({ type: 'success', text: 'Beacon connected. Custom Caddy tracking domain was cleared.' });
+      setBeaconSetupUrl('');
+      setEditTrackingMode('beacon');
+      const data = await api.get('/inboxes');
+      setInboxes(data);
+      const fresh = data.find(i => i.id === editing.id);
+      if (fresh) {
+        setEditing({ ...fresh });
+        setSelectedInbox(prev => (prev?.id === fresh.id ? fresh : prev));
+      }
+    } catch (err) {
+      setEditMsg({ type: 'error', text: err.message });
+    } finally {
+      setBeaconConnecting(false);
+    }
+  };
+
+  const disconnectBeacon = async () => {
+    if (!editing) return;
+    const ok = await confirm(
+      customTrackingCnameUiEnabled
+        ? 'Disconnect Beacon? Tracking links will use the app domain or a custom CNAME domain again.'
+        : 'Disconnect Beacon? Tracking links will use the app domain until you connect Beacon again or clear any legacy domain.',
+    );
+    if (!ok) return;
+    try {
+      await api.post(`/inboxes/${editing.id}/beacon/disconnect`);
+      setEditMsg({ type: 'success', text: 'Beacon disconnected.' });
+      setEditTrackingMode('app');
+      const data = await api.get('/inboxes');
+      setInboxes(data);
+      const fresh = data.find(i => i.id === editing.id);
+      if (fresh) {
+        setEditing({ ...fresh });
+        setSelectedInbox(prev => (prev?.id === fresh.id ? fresh : prev));
+      }
+    } catch (err) {
+      setEditMsg({ type: 'error', text: err.message });
+    }
+  };
+
   // Escape to close modals
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== 'Escape') return;
       if (showEditWarning) { setShowEditWarning(false); }
-      else if (showAdd) { setShowAdd(false); setMessage(null); }
+      else if (showAdd) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); }
       else if (editing) tryCloseEdit();
       else if (selectedInbox) setSelectedInbox(null);
     };
@@ -509,7 +758,7 @@ export default function Inboxes() {
       {/* header with add button */}
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Inboxes</h1>
-        <Button variant="default" onClick={() => { setForm(initialForm); setMessage(null); setShowAdd(true); }}>
+        <Button variant="default" onClick={() => { setForm(initialForm); setAddTrackingMode('app'); setMessage(null); setShowAdd(true); }}>
           Add Inbox
         </Button>
       </div>
@@ -586,7 +835,7 @@ export default function Inboxes() {
 
           {/* ── Detail panel ── */}
           {selectedInbox && (
-            <div className="w-72 shrink-0 bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col overflow-hidden sticky top-4" style={{ maxHeight: 'calc(100vh - 8rem)' }}>
+            <div className="w-[min(28rem,calc(100vw-2.5rem))] shrink-0 bg-white border border-gray-200 rounded-xl shadow-sm flex flex-col overflow-hidden sticky top-4" style={{ maxHeight: 'calc(100vh - 8rem)' }}>
               {editing && editing.id === selectedInbox.id ? (
                 <>
                   {/* Edit panel header */}
@@ -604,9 +853,9 @@ export default function Inboxes() {
                   </div>
 
                   {/* Edit form */}
-                  <div className="px-5 py-4 overflow-y-auto flex-1">
+                  <div className="px-5 py-4 overflow-y-auto flex-1 min-w-0">
                     {editMsg && <div className={`mb-3 text-sm ${editMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{editMsg.text}</div>}
-                    <form onSubmit={saveEdit} className="space-y-4">
+                    <form onSubmit={saveEdit} className="space-y-4 min-w-0 max-w-full">
                       <div>
                         <label className="block text-xs font-medium text-gray-700">Email (read-only)</label>
                         <input type="email" value={editing.email} disabled className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100 text-sm" />
@@ -622,16 +871,8 @@ export default function Inboxes() {
                           <option value="office365">Office 365 / Outlook</option>
                         </select>
                       </div>
-                      {editing.provider === 'gmail' && redirectUri && (
-                        <div className="text-gray-500 text-xs">
-                          Redirect URI: <code className="font-mono">{redirectUri}</code>
-                        </div>
-                      )}
-                      {editing.provider === 'office365' && o365RedirectUri && (
-                        <div className="text-gray-500 text-xs">
-                          Redirect URI: <code className="font-mono">{o365RedirectUri}</code>
-                        </div>
-                      )}
+                      {editing.provider === 'gmail' && <RedirectUriBlock uri={redirectUri} />}
+                      {editing.provider === 'office365' && <RedirectUriBlock uri={o365RedirectUri} />}
                       <div>
                         <label className="block text-xs font-medium text-gray-700">Max emails per day</label>
                         <input type="number" name="max_emails_per_day" value={editing.max_emails_per_day} onChange={e => { setEditing(prev => ({ ...prev, max_emails_per_day: +e.target.value })); setEditDirty(true); }} min={1} max={1000} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
@@ -653,40 +894,57 @@ export default function Inboxes() {
                         />
                         <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (stored as seconds on the server). Set to 0 to disable.</p>
                       </div>
-                      <TrackingDomainField
-                        value={editing.tracking_domain || ''}
-                        onChange={val => { setEditing(prev => ({ ...prev, tracking_domain: val })); setEditDirty(true); }}
-                        onVerifyChange={setEditDomainVerified}
-                        cnameTarget={cnameTarget}
-                      />
-                      <div className="border rounded p-3 space-y-2 bg-gray-50">
-                        <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-gray-700">
-                          <input
-                            type="checkbox"
-                            checked={!!editing.ramp_up_enabled}
-                            onChange={e => { setEditing(prev => ({ ...prev, ramp_up_enabled: e.target.checked })); setEditDirty(true); }}
-                          />
-                          Enable inbox warm-up (ramp-up)
-                        </label>
-                        {editing.ramp_up_enabled && (
-                          <div className="space-y-2">
-                            <div>
-                              <label className="block text-xs font-medium text-gray-700">Starting emails per day</label>
-                              <input
-                                type="number"
-                                value={editing.ramp_up_start ?? 1}
-                                onChange={e => { setEditing(prev => ({ ...prev, ramp_up_start: Math.max(1, +e.target.value) })); setEditDirty(true); }}
-                                min={1}
-                                max={editing.max_emails_per_day}
-                                className="mt-1 block w-full border-gray-300 rounded-md text-sm"
-                              />
+                      <div className="border rounded p-3 space-y-4 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Tracking</p>
+                        <InboxTrackingOptions
+                          key={editing.id}
+                          variant="edit"
+                          wrapClassName="space-y-4"
+                          radioName="inbox-tracking-edit"
+                          cnameUiEnabled={customTrackingCnameUiEnabled}
+                          cnameTarget={cnameTarget}
+                          uiMode={editTrackingMode}
+                          onUiModeChange={applyEditTrackingMode}
+                          trackingDomain={editing.tracking_domain || ''}
+                          onTrackingDomainChange={(val) => { setEditing(prev => ({ ...prev, tracking_domain: val })); setEditDirty(true); }}
+                          onDnsVerifyChange={setEditDomainVerified}
+                          beaconConnected={!!editing.beacon_connected}
+                          beaconBaseUrl={editing.beacon_base_url}
+                          beaconSetupUrl={beaconSetupUrl}
+                          onBeaconSetupUrlChange={(v) => { setBeaconSetupUrl(v); setEditDirty(true); }}
+                          onConnectBeacon={connectBeacon}
+                          onDisconnectBeacon={disconnectBeacon}
+                          beaconConnecting={beaconConnecting}
+                        />
+                        <div className="border-t border-gray-200 pt-3 space-y-2">
+                          <label className="flex items-center gap-2 cursor-pointer text-xs font-medium text-gray-700">
+                            <input
+                              type="checkbox"
+                              checked={!!editing.ramp_up_enabled}
+                              onChange={e => { setEditing(prev => ({ ...prev, ramp_up_enabled: e.target.checked })); setEditDirty(true); }}
+                            />
+                            Enable inbox warm-up (ramp-up)
+                          </label>
+                          {editing.ramp_up_enabled && (
+                            <div className="space-y-2">
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700">Starting emails per day</label>
+                                <input
+                                  type="number"
+                                  value={editing.ramp_up_start ?? 1}
+                                  onChange={e => { setEditing(prev => ({ ...prev, ramp_up_start: Math.max(1, +e.target.value) })); setEditDirty(true); }}
+                                  min={1}
+                                  max={editing.max_emails_per_day}
+                                  className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                                />
+                              </div>
+                              <p className="text-xs text-gray-500">
+                                Starts at {editing.ramp_up_start ?? 1} email{(editing.ramp_up_start ?? 1) !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {editing.max_emails_per_day}.
+                                Today's limit: <strong>{editing.effective_max_per_day ?? editing.ramp_up_start ?? 1}</strong> / {editing.max_emails_per_day}
+                              </p>
                             </div>
-                            <p className="text-xs text-gray-500">
-                              Starts at {editing.ramp_up_start ?? 1} email{(editing.ramp_up_start ?? 1) !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {editing.max_emails_per_day}.
-                              Today's limit: <strong>{editing.effective_max_per_day ?? editing.ramp_up_start ?? 1}</strong> / {editing.max_emails_per_day}
-                            </p>
-                          </div>
-                        )}
+                          )}
+                        </div>
                       </div>
                       <div className="flex gap-2 pt-1">
                         <Button type="submit" size="sm" variant="default">Save</Button>
@@ -803,15 +1061,20 @@ export default function Inboxes() {
 
                     <hr className="border-gray-100" />
 
-                    {/* Tracking domain */}
+                    {/* Tracking domain / Beacon */}
                     <div className="flex justify-between items-center text-sm">
-                      <span className="text-gray-600">Tracking domain</span>
-                      <span className="font-mono text-xs text-right max-w-[140px] truncate">
-                        {selectedInbox.tracking_domain
-                          ? <span className="text-teal-700">{selectedInbox.tracking_domain}</span>
-                          : <span className="text-gray-400">app default</span>}
+                      <span className="text-gray-600">Tracking</span>
+                      <span className="font-mono text-xs text-right max-w-[180px] truncate">
+                        {selectedInbox.beacon_connected && selectedInbox.beacon_base_url
+                          ? <span className="text-indigo-700" title={selectedInbox.beacon_base_url}>Beacon</span>
+                          : selectedInbox.tracking_domain
+                            ? <span className="text-teal-700">{selectedInbox.tracking_domain}</span>
+                            : <span className="text-gray-400">app default</span>}
                       </span>
                     </div>
+                    {selectedInbox.beacon_connected && selectedInbox.beacon_base_url && (
+                      <p className="text-xs text-gray-500 break-all">{selectedInbox.beacon_base_url}</p>
+                    )}
 
                     {/* Created */}
                     <div className="flex justify-between items-center text-sm">
@@ -854,12 +1117,12 @@ export default function Inboxes() {
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
           onMouseDown={e => { addBackdropDown.current = e.target === e.currentTarget; }}
-          onClick={() => { if (addBackdropDown.current) { setShowAdd(false); setMessage(null); } }}
+          onClick={() => { if (addBackdropDown.current) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); } }}
         >
-          <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full max-w-md max-h-[90vh] overflow-y-auto mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
+          <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full min-w-0 max-w-md max-h-[90vh] overflow-y-auto overflow-x-hidden mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
             <h2 className="text-xl font-semibold mb-2">Add Inbox</h2>
             {message && <div className={message.type === 'error' ? 'text-red-600' : 'text-green-600'}>{message.text}</div>}
-            <form onSubmit={submit} className="space-y-4">
+            <form onSubmit={submit} className="space-y-4 min-w-0 max-w-full">
               <div>
                 <label className="block text-sm font-medium text-gray-700">Provider</label>
                 <select name="provider" value={form.provider} onChange={handleProviderChange} className="mt-1 block w-full border-gray-300 rounded-md">
@@ -893,41 +1156,55 @@ export default function Inboxes() {
                 />
                 <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (default 3 min). Set to 0 to disable.</p>
               </div>
-              {/* Tracking domain */}
-              <TrackingDomainField
-                value={form.tracking_domain}
-                onChange={val => { setForm(f => ({ ...f, tracking_domain: val })); setAddDomainVerified(false); }}
-                onVerifyChange={setAddDomainVerified}
-                cnameTarget={cnameTarget}
-              />
-              {/* Ramp-up / warm-up */}
-              <div className="border rounded p-3 space-y-2 bg-gray-50">
-                <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-700">
-                  <input
-                    type="checkbox"
-                    checked={!!form.ramp_up_enabled}
-                    onChange={e => setForm(f => ({ ...f, ramp_up_enabled: e.target.checked }))}
-                  />
-                  Enable inbox warm-up (ramp-up)
-                </label>
-                {form.ramp_up_enabled && (
-                  <div className="space-y-2">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-700">Starting emails per day</label>
-                      <input
-                        type="number"
-                        value={form.ramp_up_start}
-                        onChange={e => setForm(f => ({ ...f, ramp_up_start: Math.max(1, +e.target.value) }))}
-                        min={1}
-                        max={form.max_emails_per_day}
-                        className="mt-1 block w-full border-gray-300 rounded-md text-sm"
-                      />
+              <div className="border rounded p-3 space-y-4 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Tracking</p>
+                <InboxTrackingOptions
+                  variant="add"
+                  wrapClassName="space-y-4"
+                  radioName="inbox-tracking-add"
+                  cnameUiEnabled={customTrackingCnameUiEnabled}
+                  cnameTarget={cnameTarget}
+                  uiMode={addTrackingMode}
+                  onUiModeChange={applyAddTrackingMode}
+                  trackingDomain={form.tracking_domain}
+                  onTrackingDomainChange={(val) => { setForm(f => ({ ...f, tracking_domain: val })); setAddDomainVerified(false); }}
+                  onDnsVerifyChange={setAddDomainVerified}
+                  beaconConnected={false}
+                  beaconBaseUrl=""
+                  beaconSetupUrl=""
+                  onBeaconSetupUrlChange={() => {}}
+                  onConnectBeacon={() => {}}
+                  onDisconnectBeacon={() => {}}
+                  beaconConnecting={false}
+                />
+                <div className="border-t border-gray-200 pt-3 space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer text-sm font-medium text-gray-700">
+                    <input
+                      type="checkbox"
+                      checked={!!form.ramp_up_enabled}
+                      onChange={e => setForm(f => ({ ...f, ramp_up_enabled: e.target.checked }))}
+                    />
+                    Enable inbox warm-up (ramp-up)
+                  </label>
+                  {form.ramp_up_enabled && (
+                    <div className="space-y-2">
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Starting emails per day</label>
+                        <input
+                          type="number"
+                          value={form.ramp_up_start}
+                          onChange={e => setForm(f => ({ ...f, ramp_up_start: Math.max(1, +e.target.value) }))}
+                          min={1}
+                          max={form.max_emails_per_day}
+                          className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                        />
+                      </div>
+                      <p className="text-xs text-gray-500">
+                        Starts at {form.ramp_up_start} email{form.ramp_up_start !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {form.max_emails_per_day}.
+                      </p>
                     </div>
-                    <p className="text-xs text-gray-500">
-                      Starts at {form.ramp_up_start} email{form.ramp_up_start !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {form.max_emails_per_day}.
-                    </p>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
               {form.provider === 'gmail' && (
                 <>
@@ -936,11 +1213,7 @@ export default function Inboxes() {
                       Google OAuth credentials are not configured. Set the appropriate environment variables (e.g. in `.env`) and restart the server before reloading.
                     </div>
                   )}
-                  {redirectUri && (
-                    <div className="text-gray-500 text-sm mt-1">
-                      Redirect URI: <code className="font-mono">{redirectUri}</code>
-                    </div>
-                  )}
+                  <RedirectUriBlock uri={redirectUri} size="sm" />
                 </>
               )}
               {form.provider === 'office365' && (
@@ -950,18 +1223,14 @@ export default function Inboxes() {
                       Office 365 OAuth credentials are not configured. Set OFFICE365_CLIENT_ID, OFFICE365_CLIENT_SECRET, and OFFICE365_TENANT_ID in your environment and restart the server.
                     </div>
                   )}
-                  {o365RedirectUri && (
-                    <div className="text-gray-500 text-sm mt-1">
-                      Redirect URI: <code className="font-mono">{o365RedirectUri}</code>
-                    </div>
-                  )}
+                  <RedirectUriBlock uri={o365RedirectUri} size="sm" />
                 </>
               )}
               <div className="flex gap-2">
                 <Button type="submit" disabled={!canSubmit()} variant="default">
                   {form.provider === 'gmail' ? 'Connect with Google' : form.provider === 'office365' ? 'Connect with Microsoft' : 'Add inbox'}
                 </Button>
-                <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); }}>
+                <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); }}>
                   Cancel
                 </Button>
               </div>

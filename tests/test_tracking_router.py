@@ -69,7 +69,7 @@ async def _noop_webhook(*args, **kwargs):
 @pytest.mark.asyncio
 async def test_open_pixel_returns_gif(session, monkeypatch):
     """Endpoint always returns a GIF regardless of whether the log exists."""
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     resp = await open_pixel(token="9999", request=_req(), db=session)
 
@@ -79,7 +79,7 @@ async def test_open_pixel_returns_gif(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_open_pixel_no_cache_header(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     resp = await open_pixel(token="9999", request=_req(), db=session)
 
@@ -88,7 +88,7 @@ async def test_open_pixel_no_cache_header(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_open_pixel_records_email_open(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -106,7 +106,7 @@ async def test_open_pixel_records_email_open(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_open_pixel_stores_ip_address(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -125,7 +125,7 @@ async def test_open_pixel_stores_ip_address(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_open_pixel_sets_opened_flag(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -143,7 +143,7 @@ async def test_open_pixel_sets_opened_flag(session, monkeypatch):
 @pytest.mark.asyncio
 async def test_open_pixel_unknown_log_id_still_returns_gif(session, monkeypatch):
     """If the log row does not exist the pixel must still be served (avoids 500s)."""
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     resp = await open_pixel(token="99999", request=_req(), db=session)
 
@@ -157,7 +157,7 @@ async def test_open_pixel_fires_webhook(session, monkeypatch):
     async def capture(db, event_type, data):
         events.append(event_type)
 
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", capture)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", capture)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -172,7 +172,7 @@ async def test_open_pixel_fires_webhook(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_open_pixel_prefers_cf_connecting_ip(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -198,7 +198,7 @@ async def test_open_pixel_prefers_cf_connecting_ip(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_click_redirect_unknown_token_returns_404(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     resp = await click_redirect(token="nonexistent", request=_req(), db=session)
 
@@ -207,7 +207,7 @@ async def test_click_redirect_unknown_token_returns_404(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_click_redirect_redirects_to_original_url(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -231,7 +231,7 @@ async def test_click_redirect_redirects_to_original_url(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_click_redirect_records_email_click(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -258,7 +258,7 @@ async def test_click_redirect_records_email_click(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_click_redirect_prefers_cf_connecting_ip(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -289,7 +289,7 @@ async def test_click_redirect_prefers_cf_connecting_ip(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_click_redirect_sets_clicked_flag(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -319,7 +319,7 @@ async def test_click_redirect_fires_webhook(session, monkeypatch):
     async def capture(db, event_type, data):
         events.append(event_type)
 
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", capture)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", capture)
 
     inbox = await make_inbox(session)
     campaign = await make_campaign(session)
@@ -364,7 +364,7 @@ async def _setup_unsubscribe(session):
 
 @pytest.mark.asyncio
 async def test_unsubscribe_invalid_token_returns_404(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     resp = await unsubscribe(token="no-such-token", db=session)
 
@@ -373,7 +373,7 @@ async def test_unsubscribe_invalid_token_returns_404(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unsubscribe_marks_enrollment_unsubscribed(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     lead, campaign, cl, token_str = await _setup_unsubscribe(session)
     assert cl.enrollment_status != "unsubscribed"
@@ -386,7 +386,7 @@ async def test_unsubscribe_marks_enrollment_unsubscribed(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unsubscribe_deletes_queue_slots(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     lead, campaign, cl, token_str = await _setup_unsubscribe(session)
 
@@ -411,7 +411,7 @@ async def test_unsubscribe_deletes_queue_slots(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unsubscribe_returns_html_page(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     _, _, _, token_str = await _setup_unsubscribe(session)
 
@@ -424,7 +424,7 @@ async def test_unsubscribe_returns_html_page(session, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_unsubscribe_already_unsubscribed_shows_different_page(session, monkeypatch):
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", _noop_webhook)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", _noop_webhook)
 
     lead, campaign, cl, token_str = await _setup_unsubscribe(session)
     cl.enrollment_status = "unsubscribed"
@@ -443,7 +443,7 @@ async def test_unsubscribe_fires_webhooks(session, monkeypatch):
     async def capture(db, event_type, data):
         events.append(event_type)
 
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", capture)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", capture)
 
     _, _, _, token_str = await _setup_unsubscribe(session)
 
@@ -460,7 +460,7 @@ async def test_unsubscribe_already_done_does_not_fire_webhooks(session, monkeypa
     async def capture(db, event_type, data):
         events.append(event_type)
 
-    monkeypatch.setattr("app.routers.tracking.fire_webhook_event", capture)
+    monkeypatch.setattr("app.tracking_events.fire_webhook_event", capture)
 
     lead, _, cl, token_str = await _setup_unsubscribe(session)
     cl.enrollment_status = "unsubscribed"

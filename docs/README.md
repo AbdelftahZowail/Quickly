@@ -60,7 +60,7 @@ Every reply is automatically classified by AI into one of six categories: `inter
 A built-in inbox sync layer gives you real-time reply detection, threaded conversation view, and compose/reply — all inside Quickly. Works across your Gmail and Microsoft accounts side-by-side. No tab-switching. No missed replies.
 
 ### Open & Click Tracking with Custom Domains
-Built-in pixel tracking and link wrapping capture every open and click. Bring your own tracking domain with automatic HTTPS via Caddy. Filter out your own opens and clicks by registering known IPs.
+Built-in pixel tracking and link wrapping capture every open and click. **Quickly Beacon** is the recommended way to use your own tracking hostname on prebuilt Docker / Railway-style deployments. Advanced self-hosters can still point a CNAME at Quickly when **host Caddy** or in-compose Caddy handles on-demand TLS (see [INSTALL.md](INSTALL.md#quickly-beacon-recommended-custom-tracking-hostnames)). Filter out your own opens and clicks by registering known IPs.
 
 ### Full Analytics Dashboard
 See aggregated metrics, per-campaign breakdowns, per-step performance, timeline charts, open rates, click rates, reply rates, bounces, and unsubscribes — all in one view.

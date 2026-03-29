@@ -33,6 +33,8 @@ services:
       DATABASE_URL: "postgresql+asyncpg://postgres:postgres@db:5432/quickly"
       # Server-side backup folder in Settings (default path backups/ under /app)
       QUICKLY_LOCAL_DISK_BACKUPS: "1"
+      # Source dev: show CNAME custom tracking UI (image defaults to prebuilt=1).
+      QUICKLY_PREBUILT_IMAGE: "0"
     depends_on:
       db:
         condition: service_healthy

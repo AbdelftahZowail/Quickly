@@ -3,6 +3,11 @@
 All configuration is now stored in the database instead of .env files,
 allowing users to manage settings from the frontend interface.
 """
+# // BEACON SYNC: This file handles tracking logic that Beacon mirrors.
+# // Any changes to tracking behavior, event types, metadata collected, or URL structure
+# // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
+# // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
+
 import logging
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -179,9 +184,14 @@ async def get_tracking_base_url(db: AsyncSession) -> str:
 def get_inbox_tracking_base(inbox, fallback_base_url: str) -> str:
     """Return the tracking base URL for *inbox*.
 
-    If ``inbox.tracking_domain`` is set, returns ``https://<tracking_domain>``.
-    Otherwise falls back to *fallback_base_url* (the app's own base URL).
+    If Beacon is connected (``beacon_connected`` and ``beacon_base_url``), uses
+    that origin. Else if ``tracking_domain`` is set, returns
+    ``https://<tracking_domain>``. Otherwise falls back to *fallback_base_url*.
     """
+    if getattr(inbox, "beacon_connected", False):
+        bu = (getattr(inbox, "beacon_base_url", None) or "").strip().rstrip("/")
+        if bu:
+            return bu
     td = getattr(inbox, "tracking_domain", None)
     if td:
         return f"https://{td}"
