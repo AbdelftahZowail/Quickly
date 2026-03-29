@@ -1,6 +1,7 @@
 """Database connection and session."""
 from __future__ import annotations
 
+import ipaddress
 import os
 import ssl
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -25,13 +26,47 @@ def _strip_libpq_ssl_query(url: str) -> str:
     return urlunparse(p._replace(query=urlencode(pairs)))
 
 
+def _parse_pg_url_hostname(url: str) -> str:
+    h = urlparse(url).hostname or ""
+    return h.strip("[]").lower()
+
+
 def _railway_like_db_host(url: str) -> bool:
-    host = (urlparse(url).hostname or "").lower()
-    return "rlwy.net" in host or host.endswith(".railway.internal")
+    host = _parse_pg_url_hostname(url)
+    if not host:
+        return False
+    return (
+        "rlwy.net" in host
+        or "railway.internal" in host
+        or host.endswith(".railway.app")
+    )
+
+
+def _railway_env_db_numeric_host(url: str) -> bool:
+    """Private DB URLs on Railway sometimes use a bare IP; certs never match that host."""
+    if not os.getenv("RAILWAY_ENVIRONMENT", "").strip():
+        return False
+    host = _parse_pg_url_hostname(url)
+    if not host:
+        return False
+    if host in ("postgres", "db"):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return not ip.is_loopback
 
 
 def _env_truthy(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _non_verifying_tls_context() -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
 
 
 def _asyncpg_relaxed_ssl_connect_args(url: str) -> dict | None:
@@ -42,12 +77,13 @@ def _asyncpg_relaxed_ssl_connect_args(url: str) -> dict | None:
     """
     if not url.startswith("postgresql+asyncpg"):
         return None
-    if not (_env_truthy("QUICKLY_DATABASE_SSL_RELAXED") or _railway_like_db_host(url)):
+    if not (
+        _env_truthy("QUICKLY_DATABASE_SSL_RELAXED")
+        or _railway_like_db_host(url)
+        or _railway_env_db_numeric_host(url)
+    ):
         return None
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-    return {"ssl": ctx}
+    return {"ssl": _non_verifying_tls_context()}
 
 # use TEST_DATABASE_URL during testing, otherwise fall back to configured URL
 # in settings.  The application expects a PostgreSQL compatible URI; old

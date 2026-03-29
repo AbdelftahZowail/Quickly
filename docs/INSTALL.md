@@ -111,7 +111,7 @@ Quickly uses **SQLAlchemy + asyncpg** with `DATABASE_URL` (`postgres://` / `post
 
 | Situation | What to do |
 | --- | --- |
-| **Railway** — host contains `rlwy.net` or ends with `.railway.internal` | Automatic. No extra variable. |
+| **Railway** — host contains `rlwy.net`, contains `railway.internal`, ends with `.railway.app`, or (with `RAILWAY_ENVIRONMENT` set) the host is a **non-loopback IP** (private networking) | Automatic. No extra variable. |
 | **Other PaaS** (Render, Fly.io, Neon, Supabase pooler, DigitalOcean, etc.) | Set **`QUICKLY_DATABASE_SSL_RELAXED=1`** (or `true`, `yes`, `on`) on the **app** service. |
 | **Your own Postgres** (Docker Compose, VPS, hostname matches cert) | Leave **`QUICKLY_DATABASE_SSL_RELAXED` unset** so certificate verification stays strict. |
 
