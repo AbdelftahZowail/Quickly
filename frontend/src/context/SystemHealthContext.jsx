@@ -235,8 +235,8 @@ function buildChecks(d) {
         const name = inbox.display_name || inbox.email;
         beaconIssues.push({
           level: 'error',
-          text: `Beacon at "${inbox.beacon_base_url}" for "${name}" is not responding to the tracking probe.`,
-          fix: 'Confirm the Beacon service is running and the URL matches your deployment.',
+          text: `Beacon at "${inbox.beacon_base_url}" for "${name}" failed the health check (not reachable or not connected to this inbox).`,
+          fix: 'Confirm the Beacon service is running, the URL is correct, and Beacon is still connected (try reconnect from Inboxes if needed).',
           action: { label: 'Open Inboxes', to: '/inboxes' },
         });
       }
