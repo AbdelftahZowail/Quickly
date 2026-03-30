@@ -149,6 +149,8 @@ export default function Unibox() {
   const LEAD_STATUSES = [
     { value: '', label: 'All statuses' },
     { value: 'active', label: 'Active' },
+    { value: 'contacted', label: 'Contacted' },
+    { value: 'completed', label: 'Completed' },
     { value: 'replied', label: 'Replied' },
     { value: 'unsubscribed', label: 'Unsubscribed' },
     { value: 'bounced', label: 'Bounced' },
@@ -161,6 +163,8 @@ export default function Unibox() {
 
   const STATUS_COLORS = {
     active: 'bg-blue-50 text-blue-700 border-blue-200',
+    contacted: 'bg-indigo-50 text-indigo-700 border-indigo-200',
+    completed: 'bg-emerald-50 text-emerald-800 border-emerald-200',
     replied: 'bg-green-50 text-green-700 border-green-200',
     unsubscribed: 'bg-gray-100 text-gray-600 border-gray-300',
     bounced: 'bg-red-50 text-red-600 border-red-200',

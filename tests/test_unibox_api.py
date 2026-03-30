@@ -6,11 +6,12 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.models import GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox
+from app.models import EmailLog, GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox, LeadReply
 from app.routers import unibox as unibox_router
 from app.routers.unibox import UniboxLoadMoreRequest, UniboxSendRequest
 from app.sender import SendResult
-from app.unibox import _upsert_message_from_gmail, get_thread_messages, upsert_sent_message
+from app.unibox import _upsert_message_from_gmail, get_thread_messages, list_unibox_conversations, upsert_sent_message
+from tests.conftest import make_campaign, make_campaign_lead, make_inbox, make_lead
 
 
 def _ms(dt: datetime) -> int:
@@ -532,4 +533,148 @@ async def test_hydrate_thread_not_found_skips(session, monkeypatch):
     )
     msg = msg_row.scalar_one()
     assert msg.body_fetched is False
+
+
+@pytest.mark.asyncio
+async def test_inbound_reply_thread_fallback_when_from_email_differs_from_lead(session):
+    """Reply from an alternate address still attributes to the lead on the thread (EmailLog)."""
+    inbox = await make_inbox(session, email="sender@example.com")
+    campaign = await make_campaign(session, name="C1")
+    lead = await make_lead(session, email="lead@primary.com", name="Primary")
+    await make_campaign_lead(session, campaign.id, lead.id)
+    session.add(
+        GmailThread(
+            inbox_id=inbox.id,
+            thread_id="thr-alt-from",
+            snippet="reply",
+            last_internal_date=_ms(datetime(2026, 3, 30, 12, 0, 0)),
+        )
+    )
+    session.add(
+        EmailLog(
+            lead_id=lead.id,
+            campaign_id=campaign.id,
+            sequence_index=0,
+            inbox_id=inbox.id,
+            thread_id="thr-alt-from",
+            subject="Hi",
+        )
+    )
+    await session.flush()
+
+    reply_ms = _ms(datetime(2026, 3, 30, 13, 0, 0))
+    payload = {
+        "id": "msg-reply-alt",
+        "threadId": "thr-alt-from",
+        "internalDate": str(reply_ms),
+        "historyId": "h-reply",
+        "labelIds": ["INBOX"],
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "Re: Hi"},
+                {"name": "From", "value": 'Other Person <other@other.com>'},
+                {"name": "To", "value": "sender@example.com"},
+            ]
+        },
+    }
+    await _upsert_message_from_gmail(session, inbox_id=inbox.id, gmail_message=payload, include_body=False)
+    await session.flush()
+
+    lr = (
+        await session.execute(select(LeadReply).where(LeadReply.lead_id == lead.id, LeadReply.campaign_id == campaign.id))
+    ).scalar_one_or_none()
+    assert lr is not None
+
+
+@pytest.mark.asyncio
+async def test_list_unibox_lead_status_uses_enrollment_not_legacy_lead_status(session):
+    inbox = await make_inbox(session, email="acc@example.com")
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, email="x@example.com")
+    lead.status = "completed"
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    cl.enrollment_status = "contacted"
+    await session.flush()
+
+    t_ms = _ms(datetime(2026, 2, 3, 10, 0, 0))
+    session.add(
+        EmailLog(
+            lead_id=lead.id,
+            campaign_id=campaign.id,
+            sequence_index=0,
+            inbox_id=inbox.id,
+            thread_id="thr-enr",
+            subject="S",
+        )
+    )
+    session.add(
+        GmailThread(
+            inbox_id=inbox.id,
+            thread_id="thr-enr",
+            snippet="x",
+            last_internal_date=t_ms,
+        )
+    )
+    session.add(
+        GmailMessage(
+            inbox_id=inbox.id,
+            message_id="m1",
+            thread_id="thr-enr",
+            internal_date=t_ms,
+            snippet="x",
+            headers_json=json.dumps([{"name": "Subject", "value": "Sub"}]),
+            label_ids_json=json.dumps(["INBOX"]),
+        )
+    )
+    await session.flush()
+
+    payload = await list_unibox_conversations(session, page=1, page_size=20, leads_only=False, lead_status=None)
+    item = next(i for i in payload["items"] if i["thread_id"] == "thr-enr")
+    assert item["lead_status"] == "contacted"
+
+
+@pytest.mark.asyncio
+async def test_list_unibox_filter_replied_uses_lead_reply_table(session):
+    inbox = await make_inbox(session, email="acc2@example.com")
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, email="y@example.com")
+    await make_campaign_lead(session, campaign.id, lead.id)
+    t_ms = _ms(datetime(2026, 2, 4, 10, 0, 0))
+    session.add(
+        EmailLog(
+            lead_id=lead.id,
+            campaign_id=campaign.id,
+            sequence_index=0,
+            inbox_id=inbox.id,
+            thread_id="thr-replied",
+            subject="S",
+        )
+    )
+    session.add(LeadReply(lead_id=lead.id, campaign_id=campaign.id))
+    session.add(
+        GmailThread(
+            inbox_id=inbox.id,
+            thread_id="thr-replied",
+            snippet="x",
+            last_internal_date=t_ms,
+        )
+    )
+    session.add(
+        GmailMessage(
+            inbox_id=inbox.id,
+            message_id="m2",
+            thread_id="thr-replied",
+            internal_date=t_ms,
+            snippet="x",
+            headers_json=json.dumps([{"name": "Subject", "value": "Sub"}]),
+            label_ids_json=json.dumps(["INBOX"]),
+        )
+    )
+    await session.flush()
+
+    payload = await list_unibox_conversations(
+        session, page=1, page_size=20, leads_only=False, lead_status="replied"
+    )
+    assert payload["total"] == 1
+    assert payload["items"][0]["thread_id"] == "thr-replied"
 

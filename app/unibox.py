@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, delete, desc, func, select
+from sqlalchemy import and_, delete, desc, exists, false, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import time as time_provider
@@ -31,6 +31,7 @@ from app.models import (
 )
 from app.routers.gmail_oauth import refresh_access_token
 from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
+from app.campaign_lead_status import ENROLLMENT_STATUSES, LEAD_INTERESTS
 
 log = logging.getLogger("quickly.unibox")
 
@@ -161,6 +162,22 @@ def _header_value(headers_json: str, name: str) -> str:
         if hdr["name"].lower() == lname:
             return hdr["value"]
     return ""
+
+
+async def _single_lead_campaign_pair_for_thread(
+    db: AsyncSession,
+    thread_id: str,
+) -> tuple[int, int] | None:
+    """If exactly one (lead_id, campaign_id) is tied to *thread_id* in EmailLog, return it."""
+    if not thread_id:
+        return None
+    res = await db.execute(
+        select(EmailLog.lead_id, EmailLog.campaign_id).where(EmailLog.thread_id == thread_id).distinct()
+    )
+    pairs = {(int(r[0]), int(r[1])) for r in res.all()}
+    if len(pairs) != 1:
+        return None
+    return next(iter(pairs))
 
 
 def _extract_email_only(header_value: str) -> str:
@@ -894,24 +911,44 @@ async def _upsert_message_from_gmail(
         from_email_addr = _extract_email_only(
             _header_value(headers_json, "From")
         )
+        lead: Lead | None = None
+        campaign_ids_from_thread_only: list[int] | None = None
+
         if from_email_addr:
             lead_res = await db.execute(
-                select(Lead).where(Lead.email == from_email_addr)
+                select(Lead).where(func.lower(Lead.email) == from_email_addr)
             )
             lead = lead_res.scalar_one_or_none()
-            if lead is not None:
-                # Mark the thread as a lead thread & unread.
-                thread_res = await db.execute(
-                    select(GmailThread).where(
-                        GmailThread.inbox_id == inbox_id,
-                        GmailThread.thread_id == thread_id,
-                    )
-                )
-                thread_obj = thread_res.scalar_one_or_none()
-                if thread_obj is not None:
-                    thread_obj.is_lead_thread = True
-                    thread_obj.unread_lead_reply = True
 
+        if lead is None:
+            pair = await _single_lead_campaign_pair_for_thread(db, thread_id)
+            if pair is not None:
+                lid, cid = pair
+                lead_res_fb = await db.execute(select(Lead).where(Lead.id == lid))
+                lead = lead_res_fb.scalar_one_or_none()
+                if lead is not None:
+                    campaign_ids_from_thread_only = [cid]
+
+        if lead is not None:
+            reply_from_addr = from_email_addr or _extract_email_only(
+                _header_value(headers_json, "From")
+            ) or (lead.email or "").lower()
+
+            # Mark the thread as a lead thread & unread.
+            thread_res = await db.execute(
+                select(GmailThread).where(
+                    GmailThread.inbox_id == inbox_id,
+                    GmailThread.thread_id == thread_id,
+                )
+            )
+            thread_obj = thread_res.scalar_one_or_none()
+            if thread_obj is not None:
+                thread_obj.is_lead_thread = True
+                thread_obj.unread_lead_reply = True
+
+            if campaign_ids_from_thread_only is not None:
+                campaign_ids = list(campaign_ids_from_thread_only)
+            else:
                 # Find which campaign(s) this thread belongs to via EmailLog,
                 # then record a LeadReply so stop_on_reply works correctly.
                 # Primary lookup: match by Gmail thread_id stored in EmailLog.
@@ -934,85 +971,85 @@ async def _upsert_message_from_gmail(
                     )
                     campaign_ids = [r[0] for r in cl_res.all()]
 
-                for camp_id in campaign_ids:
-                    existing_reply = await db.execute(
-                        select(LeadReply).where(
-                            LeadReply.lead_id == lead.id,
-                            LeadReply.campaign_id == camp_id,
-                        )
-                    )
-                    if existing_reply.scalar_one_or_none() is None:
-                        db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
-                    cl_touch = await db.execute(
-                        select(CampaignLead).where(
-                            CampaignLead.lead_id == lead.id,
-                            CampaignLead.campaign_id == camp_id,
-                        )
-                    )
-                    _clt = cl_touch.scalar_one_or_none()
-                    if _clt is not None and _clt.enrollment_status == "active":
-                        _clt.enrollment_status = "contacted"
-
-                # Delete all remaining QueueSlots for this lead+campaign so
-                # the queue is clean and the send job doesn't re-skip them.
-                if campaign_ids:
-                    cl_ids_res = await db.execute(
-                        select(CampaignLead.id).where(
-                            CampaignLead.lead_id == lead.id,
-                            CampaignLead.campaign_id.in_(campaign_ids),
-                        )
-                    )
-                    cl_ids = [r[0] for r in cl_ids_res.all()]
-                    if cl_ids:
-                        await db.execute(
-                            delete(QueueSlot).where(
-                                QueueSlot.campaign_lead_id.in_(cl_ids)
-                            )
-                        )
-
-                await db.flush()
-                # Resolve inbox email for the webhook payload.
-                inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
-                inbox_obj = inbox_res.scalar_one_or_none()
-                webhook_data: dict[str, Any] = {
-                    "lead_email": from_email_addr,
-                    "lead_id": lead.id,
-                    "lead_name": lead.name or "",
-                    "thread_id": thread_id,
-                    "inbox_id": inbox_id,
-                    "inbox_email": inbox_obj.email if inbox_obj else "",
-                    "message_id": gmail_msg_id,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                }
-                # SSE notification fires immediately (in-memory, no commit needed).
-                asyncio.create_task(
-                    unibox_events.publish(
-                        {
-                            "type": "unibox.notification",
-                            "reason": "lead_reply",
-                            "inbox_id": inbox_id,
-                            "thread_id": thread_id,
-                            "lead_id": lead.id,
-                            "lead_email": from_email_addr,
-                            "timestamp": datetime.utcnow().isoformat() + "Z",
-                        }
+            for camp_id in campaign_ids:
+                existing_reply = await db.execute(
+                    select(LeadReply).where(
+                        LeadReply.lead_id == lead.id,
+                        LeadReply.campaign_id == camp_id,
                     )
                 )
-                # Webhook fires in the background after current transaction commits.
-                asyncio.create_task(_fire_lead_reply_webhook_bg(webhook_data))
-                # AI classification fires in a separate background task.
-                # It uses the body of the reply message for classification.
-                reply_body = body_plain or body_html or snippet or ""
-                asyncio.create_task(
-                    _classify_and_notify_bg(
-                        lead_id=lead.id,
-                        lead_email=from_email_addr,
-                        lead_name=lead.name or "",
-                        campaign_ids=campaign_ids,
-                        reply_text=reply_body,
-                        thread_id=thread_id,
+                if existing_reply.scalar_one_or_none() is None:
+                    db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
+                cl_touch = await db.execute(
+                    select(CampaignLead).where(
+                        CampaignLead.lead_id == lead.id,
+                        CampaignLead.campaign_id == camp_id,
                     )
                 )
+                _clt = cl_touch.scalar_one_or_none()
+                if _clt is not None and _clt.enrollment_status == "active":
+                    _clt.enrollment_status = "contacted"
+
+            # Delete all remaining QueueSlots for this lead+campaign so
+            # the queue is clean and the send job doesn't re-skip them.
+            if campaign_ids:
+                cl_ids_res = await db.execute(
+                    select(CampaignLead.id).where(
+                        CampaignLead.lead_id == lead.id,
+                        CampaignLead.campaign_id.in_(campaign_ids),
+                    )
+                )
+                cl_ids = [r[0] for r in cl_ids_res.all()]
+                if cl_ids:
+                    await db.execute(
+                        delete(QueueSlot).where(
+                            QueueSlot.campaign_lead_id.in_(cl_ids)
+                        )
+                    )
+
+            await db.flush()
+            # Resolve inbox email for the webhook payload.
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+            inbox_obj = inbox_res.scalar_one_or_none()
+            webhook_data: dict[str, Any] = {
+                "lead_email": reply_from_addr,
+                "lead_id": lead.id,
+                "lead_name": lead.name or "",
+                "thread_id": thread_id,
+                "inbox_id": inbox_id,
+                "inbox_email": inbox_obj.email if inbox_obj else "",
+                "message_id": gmail_msg_id,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+            }
+            # SSE notification fires immediately (in-memory, no commit needed).
+            asyncio.create_task(
+                unibox_events.publish(
+                    {
+                        "type": "unibox.notification",
+                        "reason": "lead_reply",
+                        "inbox_id": inbox_id,
+                        "thread_id": thread_id,
+                        "lead_id": lead.id,
+                        "lead_email": reply_from_addr,
+                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                    }
+                )
+            )
+            # Webhook fires in the background after current transaction commits.
+            asyncio.create_task(_fire_lead_reply_webhook_bg(webhook_data))
+            # AI classification fires in a separate background task.
+            # It uses the body of the reply message for classification.
+            reply_body = body_plain or body_html or snippet or ""
+            asyncio.create_task(
+                _classify_and_notify_bg(
+                    lead_id=lead.id,
+                    lead_email=reply_from_addr,
+                    lead_name=lead.name or "",
+                    campaign_ids=campaign_ids,
+                    reply_text=reply_body,
+                    thread_id=thread_id,
+                )
+            )
     # -----------------------------------------------------------------------
 
     # ---------- NDR / bounce detection (mailer-daemon messages) ----------
@@ -1094,7 +1131,7 @@ async def _upsert_message_from_gmail(
         )
         if to_email_addr:
             to_lead_res = await db.execute(
-                select(Lead).where(Lead.email == to_email_addr)
+                select(Lead).where(func.lower(Lead.email) == to_email_addr)
             )
             to_lead = to_lead_res.scalar_one_or_none()
             if to_lead is not None:
@@ -1330,6 +1367,23 @@ async def _cleanup_thread_if_empty(db: AsyncSession, inbox_id: int, thread_id: s
         await db.delete(thread)
 
 
+def _unibox_lead_status_filter_criterion(lead_sq, lead_status: str):
+    """Filter unibox rows by enrollment, replied (LeadReply), or interest_status."""
+    ls = (lead_status or "").strip().lower()
+    if ls in ENROLLMENT_STATUSES:
+        return lead_sq.c.lead_status == ls
+    if ls == "replied":
+        return exists(
+            select(1).select_from(LeadReply).where(
+                LeadReply.lead_id == lead_sq.c.lead_id,
+                LeadReply.campaign_id == lead_sq.c.campaign_id,
+            )
+        )
+    if ls in LEAD_INTERESTS:
+        return lead_sq.c.interest_status == ls
+    return false()
+
+
 async def list_unibox_conversations(
     db: AsyncSession,
     *,
@@ -1342,11 +1396,15 @@ async def list_unibox_conversations(
 
     # Shared: one lead per thread (works for both Gmail thread_id and O365 conversation_id
     # because EmailLog.thread_id stores the conversation id for both providers).
+    # Pipeline badge uses CampaignLead.enrollment_status (not legacy Lead.status).
     lead_sq = (
         select(
             EmailLog.thread_id.label("thread_id"),
             Lead.email.label("lead_email"),
-            Lead.status.label("lead_status"),
+            CampaignLead.enrollment_status.label("lead_status"),
+            EmailLog.lead_id.label("lead_id"),
+            EmailLog.campaign_id.label("campaign_id"),
+            CampaignLead.interest_status.label("interest_status"),
             func.row_number()
             .over(
                 partition_by=EmailLog.thread_id,
@@ -1355,6 +1413,13 @@ async def list_unibox_conversations(
             .label("rn"),
         )
         .join(Lead, Lead.id == EmailLog.lead_id)
+        .join(
+            CampaignLead,
+            and_(
+                CampaignLead.lead_id == EmailLog.lead_id,
+                CampaignLead.campaign_id == EmailLog.campaign_id,
+            ),
+        )
         .where(EmailLog.thread_id.isnot(None))
         .subquery()
     )
@@ -1411,7 +1476,7 @@ async def list_unibox_conversations(
     if leads_only:
         gmail_stmt = gmail_stmt.where(GmailThread.is_lead_thread.is_(True))
     if lead_status:
-        gmail_stmt = gmail_stmt.where(lead_sq.c.lead_status == lead_status)
+        gmail_stmt = gmail_stmt.where(_unibox_lead_status_filter_criterion(lead_sq, lead_status))
 
     gmail_rows = (await db.execute(gmail_stmt)).all()
 
@@ -1464,7 +1529,7 @@ async def list_unibox_conversations(
     if leads_only:
         o365_stmt = o365_stmt.where(Office365Thread.is_lead_thread.is_(True))
     if lead_status:
-        o365_stmt = o365_stmt.where(lead_sq.c.lead_status == lead_status)
+        o365_stmt = o365_stmt.where(_unibox_lead_status_filter_criterion(lead_sq, lead_status))
 
     o365_rows = (await db.execute(o365_stmt)).all()
 
@@ -3003,8 +3068,17 @@ async def _detect_o365_lead_replies(
             select(Lead).where(func.lower(Lead.email) == from_addr)
         )
         lead = lead_res.scalar_one_or_none()
-        if not lead:
-            continue
+        campaign_ids_from_thread_only: list[int] | None = None
+        if lead is None:
+            pair = await _single_lead_campaign_pair_for_thread(db, conv_id)
+            if pair is None:
+                continue
+            lid, cid = pair
+            lead_res_fb = await db.execute(select(Lead).where(Lead.id == lid))
+            lead = lead_res_fb.scalar_one_or_none()
+            if lead is None:
+                continue
+            campaign_ids_from_thread_only = [cid]
 
         # Always mark the thread as a lead thread when this lead sent us a message,
         # regardless of whether they're in an active campaign (matches Gmail behaviour).
@@ -3020,28 +3094,31 @@ async def _detect_o365_lead_replies(
             thread.unread_lead_reply = True
             await db.flush()
 
-        # Find campaign_leads associated with this inbox so we can record a reply
-        # and cancel remaining queue slots.  Primary lookup: EmailLog thread_id.
-        log_res = await db.execute(
-            select(EmailLog.campaign_id).where(
-                EmailLog.thread_id == conv_id,
-                EmailLog.lead_id == lead.id,
-            ).distinct()
-        )
-        campaign_ids = [r[0] for r in log_res.all()]
-
-        # Fallback: any campaign this lead is enrolled in that uses this inbox.
-        if not campaign_ids:
-            from app.models import CampaignInbox
-            cl_res = await db.execute(
-                select(CampaignLead.campaign_id)
-                .join(CampaignInbox, CampaignLead.campaign_id == CampaignInbox.campaign_id)
-                .where(
-                    CampaignLead.lead_id == lead.id,
-                    CampaignInbox.inbox_id == inbox.id,
-                )
+        if campaign_ids_from_thread_only is not None:
+            campaign_ids = list(campaign_ids_from_thread_only)
+        else:
+            # Find campaign_leads associated with this inbox so we can record a reply
+            # and cancel remaining queue slots.  Primary lookup: EmailLog thread_id.
+            log_res = await db.execute(
+                select(EmailLog.campaign_id).where(
+                    EmailLog.thread_id == conv_id,
+                    EmailLog.lead_id == lead.id,
+                ).distinct()
             )
-            campaign_ids = [r[0] for r in cl_res.all()]
+            campaign_ids = [r[0] for r in log_res.all()]
+
+            # Fallback: any campaign this lead is enrolled in that uses this inbox.
+            if not campaign_ids:
+                from app.models import CampaignInbox
+                cl_res = await db.execute(
+                    select(CampaignLead.campaign_id)
+                    .join(CampaignInbox, CampaignLead.campaign_id == CampaignInbox.campaign_id)
+                    .where(
+                        CampaignLead.lead_id == lead.id,
+                        CampaignInbox.inbox_id == inbox.id,
+                    )
+                )
+                campaign_ids = [r[0] for r in cl_res.all()]
 
         for camp_id in campaign_ids:
             existing_reply = await db.execute(
@@ -3087,7 +3164,7 @@ async def _detect_o365_lead_replies(
             try:
                 await fire_lead_reply_webhook(db, {
                     "lead_id": lead.id,
-                    "lead_email": lead.email,
+                    "lead_email": from_addr,
                     "campaign_id": camp_id,
                     "inbox_id": inbox.id,
                     "conversation_id": conv_id,
