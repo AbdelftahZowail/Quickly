@@ -29,6 +29,9 @@ Output is emitted to `dist/`. The `n8n` block in `package.json` points n8n at th
 
 ## Install in n8n
 
+`docker cp ./dist n8n:/home/node/.n8n/custom/n8n-nodes-quickly/dist`
+`docker restart n8n`
+
 ### Option A — Custom extensions directory (common for Docker)
 
 1. Build the package (above).
