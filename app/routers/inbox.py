@@ -5,6 +5,7 @@
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
 import logging
+import os
 import secrets
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
@@ -19,6 +20,7 @@ from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog, CampaignLead
 from app.schemas import (
     BeaconConnectFromInboxRequest,
     BeaconConnectRequest,
+    BeaconPendingRegistrationCountResponse,
     InboxCreate,
     InboxUpdate,
     InboxResponse,
@@ -104,7 +106,7 @@ async def _apply_beacon_connection(
     from app.beacon_sync import sync_inbox_tracking_to_beacon
 
     try:
-        n = await sync_inbox_tracking_to_beacon(db, inbox)
+        n = await sync_inbox_tracking_to_beacon(db, inbox.id)
         if n:
             log.info("beacon_connect: synced %s prior tracking row(s) for inbox_id=%s", n, inbox.id)
     except Exception:
@@ -237,6 +239,27 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     await _maybe_complete_ramp_up(inbox, db)
     return inbox
+
+
+@router.get(
+    "/{inbox_id}/beacon/pending-registration-count",
+    response_model=BeaconPendingRegistrationCountResponse,
+)
+async def beacon_pending_registration_count(
+    inbox_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Count of tracking registrations that would sync to Beacon (development only)."""
+    if os.environ.get("QUICKLY_MODE", "development").lower() == "production":
+        raise HTTPException(404, "Not found")
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = result.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
+    from app.beacon_sync import collect_inbox_beacon_items
+
+    items = await collect_inbox_beacon_items(db, inbox_id)
+    return BeaconPendingRegistrationCountResponse(count=len(items))
 
 
 @router.patch("/{inbox_id}", response_model=InboxResponse)

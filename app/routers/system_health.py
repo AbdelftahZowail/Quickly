@@ -11,6 +11,7 @@ import logging
 import re
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from datetime import datetime
 
 from fastapi import APIRouter, Depends
@@ -150,16 +151,12 @@ def _probe_tracking_domain(domain: str) -> str:
     return "error"
 
 
-def _probe_beacon_health(base_url: str, setup_token: str | None) -> str:
-    """Return 'ok' if Beacon's authenticated health reports connected.
-
-    Calls ``GET <base>/api/v1/health`` with ``Authorization: Bearer <setup_token>``.
-    Requires HTTP 200, JSON ``ok`` true, and ``connected`` true (Beacon wired to Quickly).
-    """
+def _fetch_beacon_health_payload(base_url: str, setup_token: str | None) -> tuple[str, dict | None]:
+    """GET Beacon ``/api/v1/health``. Returns (``'ok'``|``'error'``, parsed JSON or None)."""
     import httpx
 
     if not base_url or not (setup_token or "").strip():
-        return "error"
+        return "error", None
     base = base_url.strip().rstrip("/")
     url = f"{base}/api/v1/health"
     headers = {"Authorization": f"Bearer {setup_token.strip()}"}
@@ -171,18 +168,30 @@ def _probe_beacon_health(base_url: str, setup_token: str | None) -> str:
                 try:
                     data = resp.json()
                     if not data.get("ok"):
-                        return "error"
-                    return "ok" if data.get("connected") else "error"
+                        return "error", None
+                    if not data.get("connected"):
+                        return "error", None
+                    return "ok", data
                 except Exception:
-                    return "error"
-            return "error"
+                    return "error", None
+            return "error", None
         except httpx.ConnectError:
             pass
         except httpx.TimeoutException:
-            return "error"
+            return "error", None
         except Exception:
             pass
-    return "error"
+    return "error", None
+
+
+def _beacon_registration_actual(data: dict | None, inbox_id: int) -> int:
+    if not data:
+        return 0
+    raw = data.get("registration_counts") or {}
+    v = raw.get(str(inbox_id), raw.get(inbox_id))
+    if v is None:
+        return 0
+    return int(v)
 
 
 # ---------------------------------------------------------------------------
@@ -258,21 +267,141 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
             domain_probe_map[inbox_id] = result
 
     beacon_probe_map: dict[int, str] = {}
+    beacon_reg_fields: dict[int, dict] = {}
+    beacon_repaired_ids: list[int] = []
 
-    inboxes_with_beacon = [
-        (inbox.id, inbox.beacon_base_url, getattr(inbox, "beacon_setup_token", None))
-        for inbox in inbox_list
-        if getattr(inbox, "beacon_connected", False) and inbox.beacon_base_url
-    ]
-    if inboxes_with_beacon:
-        raw_beacon = await asyncio.gather(
+    beacon_by_key: dict[tuple[str, str], list[int]] = defaultdict(list)
+    inbox_to_key: dict[int, tuple[str, str]] = {}
+    for inbox in inbox_list:
+        if not getattr(inbox, "beacon_connected", False) or not inbox.beacon_base_url:
+            continue
+        url = inbox.beacon_base_url.strip().rstrip("/")
+        tok = (getattr(inbox, "beacon_setup_token", None) or "").strip()
+        if not url or not tok:
+            continue
+        key = (url, tok)
+        beacon_by_key[key].append(inbox.id)
+        inbox_to_key[inbox.id] = key
+
+    unique_beacon_keys = list(beacon_by_key.keys())
+    key_to_data: dict[tuple[str, str], dict | None] = {}
+    if unique_beacon_keys:
+        _fetched = await asyncio.gather(
             *[
-                asyncio.to_thread(_probe_beacon_health, url, token)
-                for _, url, token in inboxes_with_beacon
+                asyncio.to_thread(_fetch_beacon_health_payload, u, t)
+                for u, t in unique_beacon_keys
             ]
         )
-        for (inbox_id, _, _), result in zip(inboxes_with_beacon, raw_beacon):
-            beacon_probe_map[inbox_id] = result
+        for _i, _key in enumerate(unique_beacon_keys):
+            _st, _payload = _fetched[_i]
+            key_to_data[_key] = _payload if _st == "ok" else None
+
+    from app.beacon_sync import collect_inbox_beacon_items, sync_inbox_tracking_to_beacon
+
+    drift_ids: list[int] = []
+    for inbox in inbox_list:
+        iid = inbox.id
+        if iid not in inbox_to_key:
+            continue
+        key = inbox_to_key[iid]
+        data = key_to_data.get(key)
+        if data is None:
+            beacon_probe_map[iid] = "error"
+            beacon_reg_fields[iid] = {
+                "beacon_registration_expected": None,
+                "beacon_registration_actual": None,
+                "beacon_registration_ok": None,
+                "beacon_registration_note": None,
+                "beacon_registration_repaired": False,
+            }
+            continue
+        inbox_ids_b = set(data.get("inbox_ids") or [])
+        if iid not in inbox_ids_b:
+            beacon_probe_map[iid] = "error"
+            beacon_reg_fields[iid] = {
+                "beacon_registration_expected": None,
+                "beacon_registration_actual": None,
+                "beacon_registration_ok": None,
+                "beacon_registration_note": "This inbox is not listed as connected on Beacon.",
+                "beacon_registration_repaired": False,
+            }
+            continue
+        beacon_probe_map[iid] = "ok"
+        if "registration_counts" not in data:
+            beacon_reg_fields[iid] = {
+                "beacon_registration_expected": None,
+                "beacon_registration_actual": None,
+                "beacon_registration_ok": None,
+                "beacon_registration_note": "Beacon does not report registration_counts (upgrade Beacon).",
+                "beacon_registration_repaired": False,
+            }
+            continue
+        items = await collect_inbox_beacon_items(db, iid)
+        expected = len(items)
+        actual = _beacon_registration_actual(data, iid)
+        beacon_reg_fields[iid] = {
+            "beacon_registration_expected": expected,
+            "beacon_registration_actual": actual,
+            "beacon_registration_ok": expected == actual,
+            "beacon_registration_note": None,
+            "beacon_registration_repaired": False,
+        }
+        if expected != actual:
+            drift_ids.append(iid)
+
+    keys_to_refetch: set[tuple[str, str]] = {inbox_to_key[i] for i in drift_ids}
+    for iid in drift_ids:
+        try:
+            await sync_inbox_tracking_to_beacon(db, iid)
+            beacon_reg_fields[iid]["beacon_registration_repaired"] = True
+            beacon_repaired_ids.append(iid)
+        except Exception:
+            log.exception("beacon health reconcile: sync failed for inbox_id=%s", iid)
+
+    if keys_to_refetch:
+        _keys_list = list(keys_to_refetch)
+        _refetched = await asyncio.gather(
+            *[
+                asyncio.to_thread(_fetch_beacon_health_payload, u, t)
+                for u, t in _keys_list
+            ]
+        )
+        for _key, _pair in zip(_keys_list, _refetched):
+            _st, _payload = _pair
+            if _st == "ok" and _payload:
+                key_to_data[_key] = _payload
+
+        for inbox in inbox_list:
+            iid = inbox.id
+            if iid not in inbox_to_key or beacon_probe_map.get(iid) != "ok":
+                continue
+            fld = beacon_reg_fields.get(iid)
+            if not fld or fld.get("beacon_registration_expected") is None:
+                continue
+            if inbox_to_key[iid] not in keys_to_refetch:
+                continue
+            data2 = key_to_data.get(inbox_to_key[iid])
+            expected = fld["beacon_registration_expected"]
+            actual2 = _beacon_registration_actual(data2, iid)
+            ok = expected == actual2
+            note = None
+            if not ok:
+                if actual2 > expected:
+                    note = (
+                        "Beacon has more registration rows than Quickly "
+                        "(possible orphan rows on Beacon)."
+                    )
+                else:
+                    note = (
+                        "Registration count still below Quickly after sync; "
+                        "check Beacon logs and network."
+                    )
+            beacon_reg_fields[iid] = {
+                **fld,
+                "beacon_registration_actual": actual2,
+                "beacon_registration_ok": ok,
+                "beacon_registration_note": note,
+            }
 
     # ------------------------------------------------------------------
     # Google OAuth
@@ -320,8 +449,16 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
     # ------------------------------------------------------------------
     # Inboxes
     # ------------------------------------------------------------------
+    _reg_default = {
+        "beacon_registration_expected": None,
+        "beacon_registration_actual": None,
+        "beacon_registration_ok": None,
+        "beacon_registration_note": None,
+        "beacon_registration_repaired": False,
+    }
     inboxes = []
     for inbox in inbox_list:
+        reg = {**_reg_default, **beacon_reg_fields.get(inbox.id, {})}
         inboxes.append({
             "id": inbox.id,
             "email": inbox.email,
@@ -334,6 +471,7 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
             "beacon_connected": getattr(inbox, "beacon_connected", False),
             "beacon_base_url": getattr(inbox, "beacon_base_url", None),
             "beacon_status": beacon_probe_map.get(inbox.id),
+            **reg,
         })
 
     # ------------------------------------------------------------------
@@ -415,5 +553,8 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
         },
         "flags": {
             "test_mode": test_mode,
+        },
+        "beacon_reconciliation": {
+            "repaired_inbox_ids": beacon_repaired_ids,
         },
     }

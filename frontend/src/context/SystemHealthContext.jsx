@@ -42,6 +42,7 @@ function buildChecks(d) {
     ai_features: rawAi = [],
     email_verification: evData = null,
     flags,
+    beacon_reconciliation: beaconReconciliation = null,
   } = d;
   const checks = [];
 
@@ -230,13 +231,41 @@ function buildChecks(d) {
     let beaconStatLvl = 'ok';
     const beaconIssues = [];
     inboxesWithBeacon.forEach(inbox => {
+      const name = inbox.display_name || inbox.email;
       if (inbox.beacon_status !== 'ok') {
         beaconStatLvl = 'error';
-        const name = inbox.display_name || inbox.email;
         beaconIssues.push({
           level: 'error',
           text: `Beacon at "${inbox.beacon_base_url}" for "${name}" failed the health check (not reachable or not connected to this inbox).`,
           fix: 'Confirm the Beacon service is running, the URL is correct, and Beacon is still connected (try reconnect from Inboxes if needed).',
+          action: { label: 'Open Inboxes', to: '/inboxes' },
+        });
+        return;
+      }
+      if (inbox.beacon_registration_note) {
+        if (beaconStatLvl === 'ok') beaconStatLvl = 'warning';
+        beaconIssues.push({
+          level: 'warning',
+          text: `${name}: ${inbox.beacon_registration_note}`,
+          fix: inbox.beacon_registration_note.includes('upgrade')
+            ? 'Update the Beacon service so GET /api/v1/health includes registration_counts.'
+            : 'Review server logs for Quickly and Beacon.',
+          action: { label: 'Open Inboxes', to: '/inboxes' },
+        });
+      } else if (inbox.beacon_registration_ok === false) {
+        if (beaconStatLvl === 'ok') beaconStatLvl = 'warning';
+        beaconIssues.push({
+          level: 'warning',
+          text: `Beacon registration count still mismatched for "${name}" (Quickly expects ${inbox.beacon_registration_expected}, Beacon has ${inbox.beacon_registration_actual}).`,
+          fix: 'The server attempted a full resync during this health check. If this persists, check connectivity to Beacon.',
+          action: { label: 'Open Inboxes', to: '/inboxes' },
+        });
+      } else if (inbox.beacon_registration_repaired) {
+        if (beaconStatLvl === 'ok') beaconStatLvl = 'warning';
+        beaconIssues.push({
+          level: 'warning',
+          text: `Beacon tracking registrations for "${name}" were out of sync with Quickly and were repaired automatically.`,
+          fix: null,
           action: { label: 'Open Inboxes', to: '/inboxes' },
         });
       }
@@ -247,7 +276,7 @@ function buildChecks(d) {
       icon: 'domain',
       status: beaconStatLvl,
       issues: beaconIssues,
-      meta: { inboxesWithBeacon },
+      meta: { inboxesWithBeacon, beaconReconciliation },
       detail: inboxesWithBeacon.length === 1
         ? `1 host — ${inboxesWithBeacon[0].beacon_base_url}`
         : `${inboxesWithBeacon.length} Beacon hosts`,

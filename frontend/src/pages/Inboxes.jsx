@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
+import { useAppMode } from '../context/AppModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
 
@@ -549,6 +550,28 @@ export default function Inboxes() {
   const confirm = useConfirm();
   const addBackdropDown = useRef(false);
   const notify = useNotify();
+  const { mode } = useAppMode();
+  /** Development-only: count of open/click/unsub rows synced to Beacon on connect (from server). */
+  const [devBeaconRegCount, setDevBeaconRegCount] = useState(null);
+
+  useEffect(() => {
+    if (!editing?.id || mode !== 'development') {
+      setDevBeaconRegCount(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get(`/inboxes/${editing.id}/beacon/pending-registration-count`)
+      .then((d) => {
+        if (!cancelled) setDevBeaconRegCount(typeof d.count === 'number' ? d.count : null);
+      })
+      .catch(() => {
+        if (!cancelled) setDevBeaconRegCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editing?.id, mode]);
 
   // ---- Pause modal state ----
   const [showPauseModal, setShowPauseModal] = useState(false);
@@ -1080,7 +1103,15 @@ export default function Inboxes() {
                         <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (stored as seconds on the server). Set to 0 to disable.</p>
                       </div>
                       <div className="border rounded p-3 space-y-4 bg-gray-50 min-w-0 max-w-full overflow-hidden">
-                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Tracking</p>
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">
+                          Tracking
+                          {mode === 'development' && devBeaconRegCount !== null && (
+                            <span className="normal-case font-normal text-gray-400">
+                              {' '}
+                              ({devBeaconRegCount} {devBeaconRegCount === 1 ? 'link' : 'links'})
+                            </span>
+                          )}
+                        </p>
                         <InboxTrackingOptions
                           key={editing.id}
                           variant="edit"

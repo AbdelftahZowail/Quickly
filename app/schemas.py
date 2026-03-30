@@ -126,6 +126,13 @@ class BeaconConnectFromInboxRequest(BaseModel):
 
     source_inbox_id: int = Field(..., ge=1)
 
+
+class BeaconPendingRegistrationCountResponse(BaseModel):
+    """How many open/click/unsub rows would be POSTed to Beacon (dev diagnostics)."""
+
+    count: int
+
+
 class InboxResponse(BaseModel):
     id: int
     email: str

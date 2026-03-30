@@ -8,7 +8,7 @@ from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.beacon_client import register_beacon_mappings_batched
+from app.beacon_client import register_beacon_mappings_batched_explicit
 from app.models import EmailLog, Inbox, LeadUnsubscribeToken
 
 log = logging.getLogger("quickly.beacon_sync")
@@ -59,13 +59,35 @@ async def collect_inbox_beacon_items(session: AsyncSession, inbox_id: int) -> li
     return list(by_key.values())
 
 
-async def sync_inbox_tracking_to_beacon(session: AsyncSession, inbox: Inbox) -> int:
-    """Push every known mapping for this inbox to Beacon (e.g. after connect or beacon DB reset)."""
-    if not getattr(inbox, "beacon_connected", False):
+async def sync_inbox_tracking_to_beacon(session: AsyncSession, inbox_id: int) -> int:
+    """Push every known mapping for this inbox to Beacon (e.g. after connect or beacon DB reset).
+
+    Reads Beacon credentials with a fresh SQL query so post-commit sync is not affected by
+    session identity-map staleness, and uses explicit POST so we never skip register due to
+    a stale ``beacon_connected`` flag on an in-memory ``Inbox`` instance.
+    """
+    creds = await session.execute(
+        select(Inbox.beacon_connected, Inbox.beacon_base_url, Inbox.beacon_setup_token).where(
+            Inbox.id == inbox_id
+        )
+    )
+    row = creds.one_or_none()
+    if row is None:
         return 0
-    items = await collect_inbox_beacon_items(session, inbox.id)
+    connected, base_raw, setup_token_raw = row[0], row[1], row[2]
+    if not connected:
+        return 0
+    base = (base_raw or "").strip().rstrip("/")
+    setup_token = (setup_token_raw or "").strip() if setup_token_raw else ""
+    if not base or not setup_token:
+        log.warning(
+            "beacon sync: inbox_id=%s connected but missing beacon_base_url or setup token",
+            inbox_id,
+        )
+        return 0
+    items = await collect_inbox_beacon_items(session, inbox_id)
     if not items:
         return 0
-    await register_beacon_mappings_batched(inbox, items)
-    log.info("beacon sync: inbox_id=%s pushed %s registration row(s)", inbox.id, len(items))
+    await register_beacon_mappings_batched_explicit(base, setup_token, items)
+    log.info("beacon sync: inbox_id=%s pushed %s registration row(s)", inbox_id, len(items))
     return len(items)
