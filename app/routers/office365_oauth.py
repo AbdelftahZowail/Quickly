@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
 from app.settings_manager import settings
 from app.database import get_db
 from app.models import Inbox, Office365Account, OAuthState
@@ -55,7 +56,10 @@ async def office365_oauth_status(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api/office365/accounts")
-async def list_office365_accounts(db: AsyncSession = Depends(get_db)):
+async def list_office365_accounts(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """List all connected Office 365 accounts."""
     result = await db.execute(
         select(Office365Account, Inbox)
@@ -85,6 +89,7 @@ async def office365_authorize(
     ramp_up_enabled: bool = False,
     ramp_up_start: int = 1,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
 ):
     """Redirect user to Microsoft consent screen."""
     from app.app_settings import get_office365_oauth_credentials
@@ -272,7 +277,11 @@ async def office365_callback(
 
 
 @router.delete("/api/office365/accounts/{account_id}")
-async def disconnect_office365(account_id: int, db: AsyncSession = Depends(get_db)):
+async def disconnect_office365(
+    account_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """Disconnect an Office 365 account (removes tokens, reverts inbox provider)."""
     result = await db.execute(
         select(Office365Account).where(Office365Account.id == account_id)

@@ -135,12 +135,8 @@ async def resolve_current_user(
     """Resolve the authenticated user; same rules as :func:`get_current_user`."""
     from app.models import User, APIKey  # deferred to avoid circular import
 
-    token: str | None = None
-
-    if credentials and credentials.credentials:
-        token = credentials.credentials
-
-    api_key_header = request.headers.get("X-API-Key")
+    # API key first (trimmed) so automation is not broken by a stray/empty Bearer header.
+    api_key_header = (request.headers.get("X-API-Key") or "").strip()
     if api_key_header:
         hashed = hash_api_key(api_key_header)
         now = utcnow()
@@ -160,6 +156,10 @@ async def resolve_current_user(
         if user and user.is_active:
             return user
         raise HTTPException(status_code=401, detail="User account disabled")
+
+    token: str | None = None
+    if credentials and credentials.credentials:
+        token = (credentials.credentials or "").strip() or None
 
     if not token:
         token = request.cookies.get("access_token")
@@ -190,11 +190,12 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
 ):
-    """Resolve the authenticated user from JWT cookie or API key header.
+    """Resolve the authenticated user from API key, JWT Bearer, or cookie.
 
     Priority:
-    1. ``Authorization: Bearer <jwt>`` header (frontend uses this)
-    2. ``X-API-Key: <raw_key>`` header (programmatic API access) — O(1) lookup by HMAC hash
+    1. ``X-API-Key`` (trimmed) — programmatic access; evaluated before Bearer so a bad
+       ``Authorization`` header cannot block a valid key.
+    2. ``Authorization: Bearer <jwt>`` access token
     3. ``access_token`` httpOnly cookie (fallback)
 
     Returns the User ORM object. Raises 401 if unauthenticated.
@@ -234,8 +235,9 @@ async def try_resolve_user_for_mcp(
     """
     from app.models import User, APIKey  # deferred to avoid circular import
 
-    if x_api_key and x_api_key.strip():
-        hashed = hash_api_key(x_api_key.strip())
+    raw_key = (x_api_key or "").strip()
+    if raw_key:
+        hashed = hash_api_key(raw_key)
         now = utcnow()
         result = await db.execute(
             select(APIKey).where(
