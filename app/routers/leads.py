@@ -767,9 +767,17 @@ async def update_lead(
     # End read transaction so a queued global recalc (separate session on
     # SQLite StaticPool) is not blocked waiting for this connection.
     await db.commit()
+    interactions = await _fetch_lead_interactions(db, lead_id)
     pairs = {(lead_loaded.id, cl.campaign_id) for cl in lead_loaded.campaign_leads}
     inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
-    return _lead_to_response(lead_loaded, opened, clicked, replied, inbox_by_pair=inbox_by_pair)
+    return _lead_to_response(
+        lead_loaded,
+        opened,
+        clicked,
+        replied,
+        interactions=interactions,
+        inbox_by_pair=inbox_by_pair,
+    )
 
 
 @router.post("/{lead_id}/recover", response_model=LeadResponse)

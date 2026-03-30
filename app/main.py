@@ -218,8 +218,7 @@ inbox.router.dependencies = _auth_deps
 leads.router.dependencies = _auth_deps
 campaigns.router.dependencies = _auth_deps
 test_mode.router.dependencies = _auth_deps
-gmail_oauth.router.dependencies = _auth_deps
-office365_oauth.router.dependencies = _auth_deps
+# Gmail / Office365 OAuth: status is public; other routes set auth per-endpoint (see routers).
 # Callback routes are public – the provider's redirect carries no auth cookie.
 # office365_webhook_router has a public notification endpoint called by Microsoft,
 # so auth is NOT applied globally.  Management routes enforce auth individually.

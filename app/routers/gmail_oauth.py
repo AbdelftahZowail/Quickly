@@ -13,6 +13,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import get_current_user
 from app.settings_manager import settings
 from app.database import get_db
 from app.models import Inbox, GmailAccount, OAuthState
@@ -46,7 +47,10 @@ async def gmail_oauth_status(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api/gmail/accounts")
-async def list_gmail_accounts(db: AsyncSession = Depends(get_db)):
+async def list_gmail_accounts(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """List all connected Gmail accounts."""
     result = await db.execute(
         select(GmailAccount, Inbox)
@@ -70,7 +74,10 @@ async def list_gmail_accounts(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/api/gmail/permissions")
-async def check_gmail_permissions(db: AsyncSession = Depends(get_db)):
+async def check_gmail_permissions(
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """Check permissions/scopes for all connected Gmail accounts."""
     result = await db.execute(
         select(GmailAccount, Inbox)
@@ -212,6 +219,7 @@ async def google_authorize(
     ramp_up_enabled: bool = False,
     ramp_up_start: int = 1,
     db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
 ):
     """Redirect user to Google consent screen."""
     from app.app_settings import get_google_oauth_credentials
@@ -397,7 +405,11 @@ async def google_callback(
 
 
 @router.delete("/api/gmail/accounts/{account_id}")
-async def disconnect_gmail(account_id: int, db: AsyncSession = Depends(get_db)):
+async def disconnect_gmail(
+    account_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
     """Disconnect a Gmail account (removes tokens, deletes inbox)."""
     result = await db.execute(
         select(GmailAccount).where(GmailAccount.id == account_id)

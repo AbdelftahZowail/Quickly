@@ -48,6 +48,11 @@ async def test_google_callback_creates_inbox(monkeypatch, session):
 
         # also verify that the status endpoint reflects the in-memory env values
         from app.settings_manager import settings
+        from app.auth import get_current_user as _real_auth
+
+        async def _fake_auth():
+            return object()
+
         settings.google_client_id = "cid"
         settings.google_client_secret = "csecret"
         resp_status = client.get("/api/gmail/status")
@@ -74,7 +79,11 @@ async def test_google_callback_creates_inbox(monkeypatch, session):
         assert follow.status_code == 200
 
         # Verify that the new inbox/gmail account shows up in the API list
-        resp2 = client.get("/api/gmail/accounts")
-        assert resp2.status_code == 200
-        data = resp2.json()
-        assert any(acc["google_email"] == "test@example.com" for acc in data)
+        app.dependency_overrides[_real_auth] = _fake_auth
+        try:
+            resp2 = client.get("/api/gmail/accounts")
+            assert resp2.status_code == 200
+            data = resp2.json()
+            assert any(acc["google_email"] == "test@example.com" for acc in data)
+        finally:
+            app.dependency_overrides.pop(_real_auth, None)

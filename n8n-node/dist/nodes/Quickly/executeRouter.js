@@ -23,6 +23,12 @@ function parseJson(raw, fallback) {
         return fallback;
     }
 }
+/** Top-level JSON arrays from list endpoints → one n8n item per row (correct count + looping). */
+function isFanOutRowArray(result) {
+    if (!Array.isArray(result) || result.length === 0)
+        return false;
+    return result.every((x) => x !== null && typeof x === 'object' && !Array.isArray(x));
+}
 function leadListQs(ctx, i) {
     const q = {};
     const search = ctx.getNodeParameter('leadSearchQuery', i, '');
@@ -316,15 +322,16 @@ async function runLead(ctx, i, credentials, operation) {
             if (operation === 'update') {
                 const f = ctx.getNodeParameter('leadUpdateFields', i, {});
                 const body = {};
-                if (f.name !== undefined && f.name !== '')
+                if ('name' in f)
                     body.name = f.name;
-                if (f.custom_data_json) {
+                if ('custom_data_json' in f && f.custom_data_json) {
                     const cd = parseJson(f.custom_data_json, {});
                     if (Object.keys(cd).length)
                         body.custom_data = cd;
                 }
-                if (f.enrollment_status)
+                if ('enrollment_status' in f && f.enrollment_status) {
                     body.enrollment_status = f.enrollment_status;
+                }
                 return (await transport_1.quicklyRequest.call(ctx, credentials, {
                     method: 'PATCH',
                     path: `/api/leads/${lid}`,
@@ -438,16 +445,26 @@ async function runCampaignLead(ctx, i, credentials, operation) {
         case 'updateEnrollment': {
             const f = ctx.getNodeParameter('enrollmentUpdateFields', i, {});
             const body = {};
-            if (f.status)
+            if ('status' in f &&
+                f.status !== undefined &&
+                f.status !== null &&
+                String(f.status).trim() !== '') {
                 body.status = f.status;
-            if (f.interest !== undefined && f.interest !== '') {
-                body.interest = f.interest;
             }
-            else if (f.interest === '') {
-                body.interest = '';
+            if ('interest' in f) {
+                if (f.interest === undefined || f.interest === null) {
+                    /* collection key present but unset — skip */
+                }
+                else if (String(f.interest).trim() === '') {
+                    body.interest = '';
+                }
+                else {
+                    body.interest = f.interest;
+                }
             }
-            if (f.sending_paused !== undefined)
+            if ('sending_paused' in f && f.sending_paused !== undefined && f.sending_paused !== null) {
                 body.sending_paused = f.sending_paused;
+            }
             const leadId = (0, rlUtils_1.getRl)(ctx, i, 'campaignLeadId');
             return (await transport_1.quicklyRequest.call(ctx, credentials, {
                 method: 'PATCH',
@@ -1062,14 +1079,25 @@ async function executeQuickly() {
                 'pairedItem' in result &&
                 'binary' in result) {
                 returnData.push(result);
+                continue;
             }
-            else {
-                const data = result;
-                returnData.push({
-                    json: data !== null && typeof data === 'object' ? data : { result: data },
-                    pairedItem: { item: i },
-                });
+            if (Array.isArray(result) && result.length === 0) {
+                continue;
             }
+            if (isFanOutRowArray(result)) {
+                for (const row of result) {
+                    returnData.push({
+                        json: row,
+                        pairedItem: { item: i },
+                    });
+                }
+                continue;
+            }
+            const data = result;
+            returnData.push({
+                json: data !== null && typeof data === 'object' ? data : { result: data },
+                pairedItem: { item: i },
+            });
         }
         catch (error) {
             if (this.continueOnFail()) {
