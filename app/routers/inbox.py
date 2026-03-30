@@ -17,6 +17,7 @@ from sqlalchemy import select, exists, update as sa_update
 from app.database import get_db
 from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog, CampaignLead
 from app.schemas import (
+    BeaconConnectFromInboxRequest,
     BeaconConnectRequest,
     InboxCreate,
     InboxUpdate,
@@ -44,6 +45,75 @@ def _parse_beacon_setup_url(raw: str) -> tuple[str, str]:
     if not token:
         raise ValueError("missing token query parameter")
     return base, token
+
+
+async def _apply_beacon_connection(
+    db: AsyncSession,
+    inbox: Inbox,
+    base: str,
+    setup_token: str,
+) -> Inbox:
+    """Call Beacon connect API and persist fields on *inbox* (target row)."""
+    base = base.strip().rstrip("/")
+    if not base.startswith("http://") and not base.startswith("https://"):
+        raise HTTPException(422, "Invalid Beacon base URL")
+    if not setup_token:
+        raise HTTPException(422, "Missing Beacon setup token")
+
+    webhook_secret = secrets.token_urlsafe(32)
+    quickly_base = (app_settings.base_url or "").strip().rstrip("/")
+    if not quickly_base.startswith("http"):
+        raise HTTPException(500, "BASE_URL is not configured")
+
+    connect_url = f"{base}/api/v1/connect"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                connect_url,
+                json={
+                    "quickly_base_url": quickly_base,
+                    "webhook_secret": webhook_secret,
+                    "inbox_id": inbox.id,
+                },
+                headers={"Authorization": f"Bearer {setup_token}"},
+            )
+            if resp.status_code >= 400:
+                raise HTTPException(
+                    502,
+                    f"Beacon connect failed: HTTP {resp.status_code} {resp.text[:200]}",
+                )
+            probe = await client.get(f"{base}/api/tracking-probe")
+            if probe.status_code != 200 or not probe.json().get("ok"):
+                raise HTTPException(502, "Beacon is reachable but tracking probe failed")
+    except httpx.RequestError as e:
+        raise HTTPException(502, f"Could not reach Beacon: {e}") from e
+
+    inbox.beacon_base_url = base
+    inbox.beacon_setup_token = setup_token
+    inbox.beacon_webhook_secret = webhook_secret
+    inbox.beacon_connected = True
+    inbox.tracking_domain = None
+    await db.flush()
+    await db.refresh(inbox)
+    inbox.sent_today = 0
+    inbox.effective_max_per_day = _compute_effective_limit(inbox)
+    await _maybe_complete_ramp_up(inbox, db)
+    await db.commit()
+    log.info("beacon_connect applied: inbox_id=%s base=%s", inbox.id, base)
+
+    from app.beacon_sync import sync_inbox_tracking_to_beacon
+
+    try:
+        n = await sync_inbox_tracking_to_beacon(db, inbox)
+        if n:
+            log.info("beacon_connect: synced %s prior tracking row(s) for inbox_id=%s", n, inbox.id)
+    except Exception:
+        log.exception(
+            "beacon_connect: historical sync failed for inbox_id=%s (inbox is connected; retry by disconnect/reconnect or resend)",
+            inbox.id,
+        )
+
+    return inbox
 
 
 def _normalise_tracking_domain(raw: str | None) -> str:
@@ -260,60 +330,36 @@ async def beacon_connect(
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
 
-    webhook_secret = secrets.token_urlsafe(32)
-    quickly_base = (app_settings.base_url or "").strip().rstrip("/")
-    if not quickly_base.startswith("http"):
-        raise HTTPException(500, "BASE_URL is not configured")
+    return await _apply_beacon_connection(db, inbox, base, setup_token)
 
-    connect_url = f"{base}/api/v1/connect"
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                connect_url,
-                json={
-                    "quickly_base_url": quickly_base,
-                    "webhook_secret": webhook_secret,
-                    "inbox_id": inbox_id,
-                },
-                headers={"Authorization": f"Bearer {setup_token}"},
-            )
-            if resp.status_code >= 400:
-                raise HTTPException(
-                    502,
-                    f"Beacon connect failed: HTTP {resp.status_code} {resp.text[:200]}",
-                )
-            probe = await client.get(f"{base}/api/tracking-probe")
-            if probe.status_code != 200 or not probe.json().get("ok"):
-                raise HTTPException(502, "Beacon is reachable but tracking probe failed")
-    except httpx.RequestError as e:
-        raise HTTPException(502, f"Could not reach Beacon: {e}") from e
 
-    inbox.beacon_base_url = base
-    inbox.beacon_setup_token = setup_token
-    inbox.beacon_webhook_secret = webhook_secret
-    inbox.beacon_connected = True
-    inbox.tracking_domain = None
-    await db.flush()
-    await db.refresh(inbox)
-    inbox.sent_today = 0
-    inbox.effective_max_per_day = _compute_effective_limit(inbox)
-    await _maybe_complete_ramp_up(inbox, db)
-    await db.commit()
-    log.info("beacon_connect: inbox_id=%s base=%s", inbox_id, base)
+@router.post("/{inbox_id}/beacon/connect-from", response_model=InboxResponse)
+async def beacon_connect_from_inbox(
+    inbox_id: int,
+    body: BeaconConnectFromInboxRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Connect this inbox to the same Beacon as *source_inbox_id* without pasting the setup URL."""
+    if inbox_id == body.source_inbox_id:
+        raise HTTPException(422, "source_inbox_id must be a different inbox")
 
-    from app.beacon_sync import sync_inbox_tracking_to_beacon
+    tgt = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = tgt.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
 
-    try:
-        n = await sync_inbox_tracking_to_beacon(db, inbox)
-        if n:
-            log.info("beacon_connect: synced %s prior tracking row(s) for inbox_id=%s", n, inbox_id)
-    except Exception:
-        log.exception(
-            "beacon_connect: historical sync failed for inbox_id=%s (inbox is connected; retry by disconnect/reconnect or resend)",
-            inbox_id,
-        )
+    src = await db.execute(select(Inbox).where(Inbox.id == body.source_inbox_id))
+    source = src.scalar_one_or_none()
+    if not source:
+        raise HTTPException(404, "Source inbox not found")
+    if not getattr(source, "beacon_connected", False):
+        raise HTTPException(422, "Source inbox is not connected to Beacon")
+    base = (getattr(source, "beacon_base_url", None) or "").strip().rstrip("/")
+    setup_token = getattr(source, "beacon_setup_token", None)
+    if not base or not setup_token:
+        raise HTTPException(422, "Source inbox is missing Beacon credentials")
 
-    return inbox
+    return await _apply_beacon_connection(db, inbox, base, setup_token)
 
 
 @router.post("/{inbox_id}/beacon/disconnect", response_model=InboxResponse)
@@ -323,6 +369,24 @@ async def beacon_disconnect(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+    base = (inbox.beacon_base_url or "").strip().rstrip("/")
+    setup = inbox.beacon_setup_token
+    if inbox.beacon_connected and base and setup:
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{base}/api/v1/disconnect",
+                    json={"inbox_id": inbox_id},
+                    headers={"Authorization": f"Bearer {setup}"},
+                )
+                if resp.status_code >= 400:
+                    log.warning(
+                        "beacon_disconnect: Beacon returned HTTP %s for inbox_id=%s",
+                        resp.status_code,
+                        inbox_id,
+                    )
+        except httpx.RequestError as e:
+            log.warning("beacon_disconnect: Beacon unreachable for inbox_id=%s: %s", inbox_id, e)
     inbox.beacon_base_url = None
     inbox.beacon_setup_token = None
     inbox.beacon_webhook_secret = None

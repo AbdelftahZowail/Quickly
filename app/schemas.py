@@ -120,6 +120,12 @@ class BeaconConnectRequest(BaseModel):
 
     setup_url: str = Field(..., min_length=12)
 
+
+class BeaconConnectFromInboxRequest(BaseModel):
+    """Reuse another inbox’s Beacon base URL and setup token (one-click)."""
+
+    source_inbox_id: int = Field(..., ge=1)
+
 class InboxResponse(BaseModel):
     id: int
     email: str

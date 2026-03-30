@@ -790,6 +790,10 @@ Use **Quickly Beacon** when you want open, click, and unsubscribe links to use *
 3. While Beacon is **not** connected yet, open its root URL and **copy the setup link** (includes `?token=…`).
 4. In Quickly → **Inboxes** → choose an inbox → **Connect Beacon**, paste the full URL. After a successful connect, Beacon stops showing the token on `/` and behaves like a normal tracking host.
 
+**Multiple inboxes:** One Beacon deployment and one DNS hostname can serve **many** Quickly inboxes. Use the **same** Beacon URL for each inbox; paste the setup link (or rely on Quickly’s saved token) and click **Connect** per inbox so each gets its own webhook secret and token registrations. Disconnecting one inbox in Quickly removes only that inbox’s rows on Beacon.
+
+In the inbox **Edit** UI, expand **Use a tracker already linked to another inbox** to pick an existing Beacon or DNS setup from another inbox and connect in one click (no need to paste the setup URL again for Beacon).
+
 That is the full loop for most operators.
 
 **Prebuilt image / Docker Hub (`azowail/quickly:latest`)** sets `QUICKLY_PREBUILT_IMAGE=1`. The inbox UI **hides** the legacy “custom domain + CNAME to Quickly” section and steers you to Beacon instead. To show that CNAME workflow again (for example on a **host Caddy** deployment where Quickly terminates on-demand TLS for tracking hosts), set **`QUICKLY_TRACKING_CNAME_UI=1`** or **`QUICKLY_PREBUILT_IMAGE=0`** in the app environment and restart.

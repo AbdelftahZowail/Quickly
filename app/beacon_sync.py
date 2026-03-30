@@ -36,12 +36,19 @@ async def collect_inbox_beacon_items(session: AsyncSession, inbox_id: int) -> li
     raw: list[dict[str, Any]] = []
     for lg in logs:
         if lg.open_token:
-            raw.append({"kind": "open", "token": lg.open_token})
+            raw.append({"kind": "open", "token": lg.open_token, "inbox_id": inbox_id})
         for tl in lg.tracked_links:
-            raw.append({"kind": "click", "token": tl.token, "original_url": tl.original_url})
+            raw.append(
+                {
+                    "kind": "click",
+                    "token": tl.token,
+                    "original_url": tl.original_url,
+                    "inbox_id": inbox_id,
+                }
+            )
         utok = unsub_by_pair.get((lg.lead_id, lg.campaign_id))
         if utok:
-            raw.append({"kind": "unsubscribe", "token": utok})
+            raw.append({"kind": "unsubscribe", "token": utok, "inbox_id": inbox_id})
 
     # One row per (kind, token) for Beacon; duplicate unsubs across sends collapse here.
     by_key: dict[tuple[str, str], dict[str, Any]] = {}

@@ -350,8 +350,8 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
         path="/api/auth",
     )
     # Also set the access token as an httpOnly cookie so logged-in browsers
-    # can reach API endpoints directly (e.g. /api/office365/graph-webhook/subscriptions)
-    # without needing a custom Authorization header.
+    # can reach API endpoints and top-level OAuth redirects (e.g. /oauth/google/authorize)
+    # without needing a custom Authorization header. Path must be "/" so /oauth/* receives it.
     response.set_cookie(
         key="access_token",
         value=access_token,
@@ -359,7 +359,7 @@ async def login(data: LoginRequest, response: Response, db: AsyncSession = Depen
         secure=True,
         samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        path="/api",
+        path="/",
     )
 
     return TokenResponse(access_token=access_token)
@@ -394,7 +394,8 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         max_age=7 * 24 * 60 * 60,
         path="/api/auth",
     )
-    # Rotate the access token cookie too
+    # Rotate the access token cookie; clear legacy path="/api" so it cannot shadow the new one
+    response.delete_cookie("access_token", path="/api")
     response.set_cookie(
         key="access_token",
         value=new_access,
@@ -402,7 +403,7 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
         secure=True,
         samesite="lax",
         max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
-        path="/api",
+        path="/",
     )
 
     return TokenResponse(access_token=new_access)
@@ -410,8 +411,10 @@ async def refresh_token(request: Request, response: Response, db: AsyncSession =
 
 @router.post("/logout")
 async def logout(response: Response):
-    """Clear the refresh token cookie."""
+    """Clear auth cookies (refresh + access; access may exist at legacy path /api)."""
     response.delete_cookie("refresh_token", path="/api/auth")
+    response.delete_cookie("access_token", path="/")
+    response.delete_cookie("access_token", path="/api")
     return {"detail": "Logged out"}
 
 

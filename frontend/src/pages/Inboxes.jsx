@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
 import { Card } from '../components/ui/Card';
@@ -105,6 +105,11 @@ function InboxTrackingOptions({
   onConnectBeacon,
   onDisconnectBeacon,
   beaconConnecting,
+  siblingInboxesForReuse = [],
+  currentInboxId = null,
+  onBeaconConnectFromSibling,
+  onReuseDnsDomain,
+  dnsAutoVerifyTrigger = 0,
 }) {
   const hostHint = cnameTarget || (typeof window !== 'undefined' ? window.location.hostname : '');
   const dnsActive = uiMode === 'dns';
@@ -112,6 +117,56 @@ function InboxTrackingOptions({
   const [verifyState, setVerifyState] = useState(null);
   const [verifyMsg, setVerifyMsg] = useState('');
   const abortRef = useRef(false);
+  const [reuseOpen, setReuseOpen] = useState(false);
+  const [reuseSearch, setReuseSearch] = useState('');
+  const [reuseBusyKey, setReuseBusyKey] = useState(null);
+
+  const reuseRowsAll = useMemo(() => {
+    const list = Array.isArray(siblingInboxesForReuse) ? siblingInboxesForReuse : [];
+    return list
+      .filter((i) => i.id !== currentInboxId)
+      .flatMap((i) => {
+        const label = (i.display_name || '').trim() || i.email || `Inbox #${i.id}`;
+        const rows = [];
+        if (!beaconConnected && i.beacon_connected && (i.beacon_base_url || '').trim()) {
+          const primary = (i.beacon_base_url || '').trim();
+          const hay = `${primary} ${label} ${i.email || ''}`.toLowerCase();
+          rows.push({
+            key: `beacon-${i.id}`,
+            kind: 'beacon',
+            inboxId: i.id,
+            primary,
+            secondary: label,
+            hay,
+          });
+        }
+        if (
+          !beaconConnected
+          && cnameUiEnabled
+          && (i.tracking_domain || '').trim()
+          && !i.beacon_connected
+        ) {
+          const primary = (i.tracking_domain || '').trim();
+          const hay = `${primary} ${label} ${i.email || ''}`.toLowerCase();
+          rows.push({
+            key: `dns-${i.id}`,
+            kind: 'dns',
+            inboxId: i.id,
+            primary,
+            secondary: label,
+            hay,
+          });
+        }
+        return rows;
+      });
+  }, [siblingInboxesForReuse, currentInboxId, beaconConnected, cnameUiEnabled]);
+
+  const reuseRows = useMemo(() => {
+    const q = (reuseSearch || '').trim().toLowerCase();
+    return reuseRowsAll.filter((r) => !q || r.hay.includes(q));
+  }, [reuseRowsAll, reuseSearch]);
+
+  const hasReuseOptions = variant === 'edit' && currentInboxId != null && reuseRowsAll.length > 0;
 
   const handleDnsValue = (v) => {
     abortRef.current = true;
@@ -172,12 +227,112 @@ function InboxTrackingOptions({
     }
   }, [uiMode]);
 
+  useEffect(() => {
+    if (variant !== 'edit' || !dnsAutoVerifyTrigger) return;
+    if (uiMode !== 'dns' || !(trackingDomain || '').trim()) return;
+    verifyDns();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: run once per trigger after DNS mode + domain applied
+  }, [dnsAutoVerifyTrigger]);
+
   const dnsInputDisabled = !dnsActive;
   const beaconInputDisabled = variant === 'add' || !beaconActive || beaconConnected;
   const canVerifyDns = dnsActive && (trackingDomain || '').trim().length > 0;
 
   return (
     <div className={`${wrapClassName} min-w-0 max-w-full`}>
+      {variant === 'edit' && currentInboxId != null && (
+        <div className="rounded-md border border-gray-200 bg-white overflow-hidden min-w-0 max-w-full">
+          <button
+            type="button"
+            onClick={() => setReuseOpen((o) => !o)}
+            className="w-full flex items-center gap-2 text-left px-3 py-2 text-xs font-medium text-gray-800 hover:bg-gray-50"
+            aria-expanded={reuseOpen}
+          >
+            <svg
+              className={`w-3.5 h-3.5 shrink-0 text-gray-500 transition-transform ${reuseOpen ? 'rotate-90' : ''}`}
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              aria-hidden
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+            </svg>
+            Use a tracker already linked to another inbox
+            {!reuseOpen && hasReuseOptions && (
+              <span className="ml-auto text-[10px] font-normal text-gray-500">{reuseRowsAll.length} available</span>
+            )}
+          </button>
+          {reuseOpen && (
+            <div className="px-3 pb-3 pt-0 border-t border-gray-100 space-y-2 min-w-0 max-w-full">
+              {!hasReuseOptions ? (
+                <p className="text-xs text-gray-500 pt-2">
+                  No other inboxes have Beacon or DNS tracking yet. Connect one inbox first, or paste a setup URL below.
+                </p>
+              ) : (
+                <>
+                  <input
+                    type="search"
+                    value={reuseSearch}
+                    onChange={(e) => setReuseSearch(e.target.value)}
+                    placeholder="Search by URL, domain, or inbox…"
+                    className="w-full min-w-0 max-w-full box-border border rounded px-2 py-1.5 text-xs bg-white"
+                  />
+                  {reuseSearch.trim() && reuseRows.length === 0 && reuseRowsAll.length > 0 ? (
+                    <p className="text-xs text-gray-500">No matches — clear search to see all {reuseRowsAll.length} tracker(s).</p>
+                  ) : null}
+                  <ul className="max-h-40 overflow-y-auto space-y-1.5 min-w-0">
+                    {reuseRows.map((r) => (
+                      <li
+                        key={r.key}
+                        className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between rounded border border-gray-100 bg-gray-50/80 px-2 py-1.5 min-w-0"
+                      >
+                        <div className="min-w-0 text-xs">
+                          <span className="font-medium text-gray-700">
+                            {r.kind === 'beacon' ? 'Beacon' : 'DNS'}
+                          </span>
+                          <code className="block mt-0.5 font-mono text-[11px] text-teal-900 break-all [overflow-wrap:anywhere]">
+                            {r.primary}
+                          </code>
+                          <span className="text-gray-500 text-[11px]">{r.secondary}</span>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={
+                            beaconConnecting
+                            || reuseBusyKey === r.key
+                            || (r.kind === 'beacon' && !onBeaconConnectFromSibling)
+                            || (r.kind === 'dns' && !onReuseDnsDomain)
+                          }
+                          onClick={async () => {
+                            if (r.kind === 'beacon' && onBeaconConnectFromSibling) {
+                              setReuseBusyKey(r.key);
+                              try {
+                                await onBeaconConnectFromSibling(r.inboxId);
+                              } finally {
+                                setReuseBusyKey(null);
+                              }
+                            } else if (r.kind === 'dns' && onReuseDnsDomain) {
+                              onReuseDnsDomain(r.primary);
+                            }
+                          }}
+                          className="shrink-0 self-start sm:self-center px-2 py-1 text-[11px] rounded border border-teal-600 bg-teal-600 text-white hover:bg-teal-700 disabled:opacity-50 disabled:hover:bg-teal-600"
+                        >
+                          {r.kind === 'beacon'
+                            ? beaconConnecting && reuseBusyKey === r.key
+                              ? 'Connecting…'
+                              : 'Connect'
+                            : 'Use & verify'}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Use app domain */}
       <div className="space-y-2 min-w-0 max-w-full">
         <label className="flex items-start gap-2 cursor-pointer text-sm">
@@ -386,6 +541,7 @@ export default function Inboxes() {
   const [editDomainVerified, setEditDomainVerified] = useState(false);
   const [beaconSetupUrl, setBeaconSetupUrl] = useState('');
   const [beaconConnecting, setBeaconConnecting] = useState(false);
+  const [dnsAutoVerifyTrigger, setDnsAutoVerifyTrigger] = useState(0);
   const [editTrackingMode, setEditTrackingMode] = useState('app');
   const [addTrackingMode, setAddTrackingMode] = useState('app');
   const [addDomainVerified, setAddDomainVerified] = useState(false);
@@ -515,6 +671,7 @@ export default function Inboxes() {
     editOriginalDomain.current = inbox.tracking_domain || '';
     setEditDomainVerified(false);
     setBeaconSetupUrl('');
+    setDnsAutoVerifyTrigger(0);
     setEditTrackingMode(
       inbox.beacon_connected
         ? 'beacon'
@@ -598,6 +755,17 @@ export default function Inboxes() {
     await doSave();
   };
 
+  const refreshEditingInbox = async (inboxId) => {
+    const data = await api.get('/inboxes');
+    setInboxes(data);
+    const fresh = data.find((i) => i.id === inboxId);
+    if (fresh) {
+      setEditing({ ...fresh });
+      editOriginalDomain.current = fresh.tracking_domain || '';
+      setSelectedInbox((prev) => (prev?.id === fresh.id ? fresh : prev));
+    }
+  };
+
   const connectBeacon = async () => {
     if (!editing) return;
     const url = beaconSetupUrl.trim();
@@ -611,18 +779,41 @@ export default function Inboxes() {
       setEditMsg({ type: 'success', text: 'Beacon connected. Custom Caddy tracking domain was cleared.' });
       setBeaconSetupUrl('');
       setEditTrackingMode('beacon');
-      const data = await api.get('/inboxes');
-      setInboxes(data);
-      const fresh = data.find(i => i.id === editing.id);
-      if (fresh) {
-        setEditing({ ...fresh });
-        setSelectedInbox(prev => (prev?.id === fresh.id ? fresh : prev));
-      }
+      await refreshEditingInbox(editing.id);
     } catch (err) {
       setEditMsg({ type: 'error', text: err.message });
     } finally {
       setBeaconConnecting(false);
     }
+  };
+
+  const connectBeaconFromSibling = async (sourceInboxId) => {
+    if (!editing) return;
+    setBeaconConnecting(true);
+    setEditMsg(null);
+    try {
+      await api.post(`/inboxes/${editing.id}/beacon/connect-from`, { source_inbox_id: sourceInboxId });
+      setEditMsg({ type: 'success', text: 'Beacon connected using another inbox’s tracker.' });
+      setBeaconSetupUrl('');
+      setEditTrackingMode('beacon');
+      await refreshEditingInbox(editing.id);
+    } catch (err) {
+      setEditMsg({ type: 'error', text: err.message });
+    } finally {
+      setBeaconConnecting(false);
+    }
+  };
+
+  const reuseDnsFromSibling = (domain) => {
+    if (!editing || editing.beacon_connected) return;
+    const d = (domain || '').trim();
+    if (!d) return;
+    setEditMsg(null);
+    setEditTrackingMode('dns');
+    setEditing((prev) => ({ ...prev, tracking_domain: d }));
+    setEditDomainVerified(false);
+    setEditDirty(true);
+    setDnsAutoVerifyTrigger((n) => n + 1);
   };
 
   const disconnectBeacon = async () => {
@@ -637,13 +828,7 @@ export default function Inboxes() {
       await api.post(`/inboxes/${editing.id}/beacon/disconnect`);
       setEditMsg({ type: 'success', text: 'Beacon disconnected.' });
       setEditTrackingMode('app');
-      const data = await api.get('/inboxes');
-      setInboxes(data);
-      const fresh = data.find(i => i.id === editing.id);
-      if (fresh) {
-        setEditing({ ...fresh });
-        setSelectedInbox(prev => (prev?.id === fresh.id ? fresh : prev));
-      }
+      await refreshEditingInbox(editing.id);
     } catch (err) {
       setEditMsg({ type: 'error', text: err.message });
     }
@@ -915,6 +1100,11 @@ export default function Inboxes() {
                           onConnectBeacon={connectBeacon}
                           onDisconnectBeacon={disconnectBeacon}
                           beaconConnecting={beaconConnecting}
+                          siblingInboxesForReuse={inboxes}
+                          currentInboxId={editing.id}
+                          onBeaconConnectFromSibling={connectBeaconFromSibling}
+                          onReuseDnsDomain={reuseDnsFromSibling}
+                          dnsAutoVerifyTrigger={dnsAutoVerifyTrigger}
                         />
                       </div>
                       <div className="border rounded p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">

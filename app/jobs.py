@@ -628,12 +628,15 @@ async def run_send_job():
                 if getattr(inbox, "beacon_connected", False):
                     from app.beacon_client import register_beacon_mappings
 
-                    b_items: list[dict] = [{"kind": "unsubscribe", "token": unsub_row.token}]
+                    iid = inbox.id
+                    b_items: list[dict] = [
+                        {"kind": "unsubscribe", "token": unsub_row.token, "inbox_id": iid}
+                    ]
                     if do_track:
-                        b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token})
+                        b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token, "inbox_id": iid})
                         for _token, _url in link_pairs:
                             b_items.append(
-                                {"kind": "click", "token": _token, "original_url": _url}
+                                {"kind": "click", "token": _token, "original_url": _url, "inbox_id": iid}
                             )
                     try:
                         await register_beacon_mappings(inbox, b_items)
@@ -1305,12 +1308,15 @@ async def send_slot_job(slot_id: int) -> None:
         if getattr(inbox, "beacon_connected", False):
             from app.beacon_client import register_beacon_mappings
 
-            b_items: list[dict] = [{"kind": "unsubscribe", "token": unsub_row.token}]
+            iid = inbox.id
+            b_items: list[dict] = [
+                {"kind": "unsubscribe", "token": unsub_row.token, "inbox_id": iid}
+            ]
             if do_track:
-                b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token})
+                b_items.insert(0, {"kind": "open", "token": email_log_entry.open_token, "inbox_id": iid})
                 for _token, _url in link_pairs:
                     b_items.append(
-                        {"kind": "click", "token": _token, "original_url": _url}
+                        {"kind": "click", "token": _token, "original_url": _url, "inbox_id": iid}
                     )
             try:
                 await register_beacon_mappings(inbox, b_items)

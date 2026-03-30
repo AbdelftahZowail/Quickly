@@ -38,6 +38,8 @@ async def test_collect_inbox_beacon_items_open_click_unsub(session):
     assert ("unsubscribe", "unsub-one") in kinds
     click = next(i for i in items if i["kind"] == "click")
     assert click["original_url"] == "https://example.com/p"
+    for i in items:
+        assert i["inbox_id"] == inbox.id
 
 
 @pytest.mark.asyncio

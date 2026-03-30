@@ -251,7 +251,7 @@ async def _resolve_user_and_login(
     response.set_cookie(
         key="access_token", value=jwt_access,
         httponly=True, secure=True, samesite="lax",
-        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60, path="/api",
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60, path="/",
     )
 
     return jwt_access
