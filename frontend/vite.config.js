@@ -11,7 +11,7 @@ export default defineConfig({
   server: {
     // Public dev hostname (e.g. behind host Caddy → docker-compose-not-host.dev.yml).
     // Add more via VITE_ALLOWED_HOSTS in .env_dev (comma-separated).
-***REMOVED***
+    allowedHosts: ['localhost', '127.0.0.1', ...allowedHostsExtra],
 
     // File watching inside Docker on Windows can miss changes because
     // the underlying filesystem notifications don’t propagate across

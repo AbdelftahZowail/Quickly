@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
     ports:
       - "8000:8000"   # direct access
-***REMOVED***
+      - "5050:8000"   # host reverse proxy -> 127.0.0.1:5050
     depends_on:
       db:
         condition: service_healthy
