@@ -34,3 +34,6 @@ Caddyfile.host
 # quickly-beacon
 quickly-beacon/
 n8n-node/dist/
+
+AGENTS.md
+tasks.md

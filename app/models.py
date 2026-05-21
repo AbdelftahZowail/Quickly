@@ -112,8 +112,10 @@ class Inbox(Base):
     ramp_up_enabled = Column(Boolean, default=False, nullable=False)
     ramp_up_period_days = Column(Integer, default=42, nullable=False)  # kept for legacy compat; not used in formula
     ramp_up_start = Column(Integer, default=1, nullable=False)  # starting emails per day for ramp-up
+    ramp_up_step_size = Column(Integer, default=1, nullable=False)  # emails added per day during warm-up
     ramp_up_started_at = Column(DateTime, nullable=True, default=None)  # when ramp-up was (last) enabled
     paused = Column(Boolean, default=False, nullable=False)
+    ramp_up_paused_at = Column(DateTime, nullable=True, default=None)  # when ramp-up was paused (for freezing warm-up)
     campaign_inboxes = relationship("CampaignInbox", back_populates="inbox")
     gmail_account = relationship("GmailAccount", back_populates="inbox", uselist=False, cascade="all, delete-orphan")
     gmail_sync_state = relationship("GmailSyncState", uselist=False, cascade="all, delete-orphan")

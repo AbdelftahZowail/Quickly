@@ -21,20 +21,26 @@ def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int
     """Return the effective daily send limit for an inbox on a given date.
 
     When ramp-up is enabled the inbox starts at ramp_up_start emails on the
-    day ramp-up was enabled and gains 1 additional slot per calendar day until
-    it reaches max_emails_per_day.  The reference date is ramp_up_started_at
-    (set when the user enables ramp-up) so that old inboxes always start from
-    the correct baseline regardless of when the inbox was first created.
+    day ramp-up was enabled and gains ramp_up_step_size additional slots per
+    calendar day until it reaches max_emails_per_day.  The reference date is
+    ramp_up_started_at (set when the user enables ramp-up) so that old inboxes
+    always start from the correct baseline regardless of when the inbox was
+    first created.
 
-    Accepts either an Inbox ORM object or a plain integer (treated as a static
-    limit with no warmup), so existing callers that pre-compute max_per_day
-    continue to work unchanged.
+    When the inbox is paused and ramp_up_paused_at is set, the warm-up
+    progression freezes: the effective date is clamped to the pause date so
+    that further calendar days do not advance the limit.
     """
     if isinstance(inbox, int):
         return inbox
     if not getattr(inbox, "ramp_up_enabled", False):
         return inbox.max_emails_per_day
     ref = for_date or datetime.utcnow().date()
+    # Freeze at the pause date when the inbox is paused
+    paused = getattr(inbox, "paused", False)
+    paused_at = getattr(inbox, "ramp_up_paused_at", None)
+    if paused and paused_at is not None:
+        ref = paused_at.date() if isinstance(paused_at, datetime) else paused_at
     # Use ramp_up_started_at when available, fall back to created_at
     started_at = getattr(inbox, "ramp_up_started_at", None)
     if started_at is not None:
@@ -43,7 +49,8 @@ def compute_effective_daily_limit(inbox, for_date: Optional[date] = None) -> int
         started = inbox.created_at.date() if isinstance(inbox.created_at, datetime) else inbox.created_at
     days_since_start = max(0, (ref - started).days)
     start = max(1, getattr(inbox, "ramp_up_start", 1))
-    return min(days_since_start + start, inbox.max_emails_per_day)
+    step = max(1, getattr(inbox, "ramp_up_step_size", 1))
+    return min(days_since_start * step + start, inbox.max_emails_per_day)
 
 
 def _parse_time(s: str) -> time:

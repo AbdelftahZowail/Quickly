@@ -204,6 +204,7 @@ async def create_inbox(data: InboxCreate, db: AsyncSession = Depends(get_db)):
         ramp_up_enabled=data.ramp_up_enabled,
         ramp_up_period_days=data.ramp_up_period_days,
         ramp_up_start=data.ramp_up_start,
+        ramp_up_step_size=data.ramp_up_step_size,
         ramp_up_started_at=datetime.utcnow() if data.ramp_up_enabled else None,
     )
     db.add(inbox)
@@ -309,7 +310,24 @@ async def update_inbox(
             if inbox.ramp_up_enabled:
                 inbox.ramp_up_started_at = datetime.utcnow()
         inbox.ramp_up_start = data.ramp_up_start
+    if data.ramp_up_step_size is not None:
+        if data.ramp_up_step_size != inbox.ramp_up_step_size:
+            capacity_changed = True
+            # Reset the clock when the step size changes
+            if inbox.ramp_up_enabled:
+                inbox.ramp_up_started_at = datetime.utcnow()
+        inbox.ramp_up_step_size = data.ramp_up_step_size
     if data.paused is not None:
+        if data.paused and not inbox.paused:
+            # Pausing — freeze the ramp-up clock
+            inbox.ramp_up_paused_at = datetime.utcnow()
+        elif not data.paused and inbox.paused:
+            # Unpausing — shift ramp_up_started_at forward by pause duration
+            if inbox.ramp_up_paused_at is not None:
+                paused_dur = datetime.utcnow() - inbox.ramp_up_paused_at
+                if inbox.ramp_up_enabled and inbox.ramp_up_started_at is not None:
+                    inbox.ramp_up_started_at += paused_dur
+            inbox.ramp_up_paused_at = None
         inbox.paused = data.paused
     await db.flush()
     
@@ -448,6 +466,7 @@ async def pause_inbox(
 
     # Mark inbox as paused first so downstream logic (recalc) excludes it
     inbox.paused = True
+    inbox.ramp_up_paused_at = now  # freeze warm-up clock
     await db.flush()
 
     if body.action == "pause_leads":
@@ -504,6 +523,13 @@ async def unpause_inbox(
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
+
+    # Un-freeze warm-up: shift start date forward by the pause duration
+    if inbox.ramp_up_enabled and inbox.ramp_up_paused_at is not None:
+        paused_dur = datetime.utcnow() - inbox.ramp_up_paused_at
+        if inbox.ramp_up_started_at is not None:
+            inbox.ramp_up_started_at += paused_dur
+    inbox.ramp_up_paused_at = None
 
     inbox.paused = False
     await db.flush()

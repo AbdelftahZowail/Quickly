@@ -524,6 +524,7 @@ export default function Inboxes() {
     ramp_up_enabled: false,
     ramp_up_period_days: 42,
     ramp_up_start: 1,
+    ramp_up_step_size: 1,
   };
   const [form, setForm] = useState(initialForm);
   const [message, setMessage] = useState(null);
@@ -649,7 +650,7 @@ export default function Inboxes() {
         return;
       }
       // redirect to Gmail OAuth
-      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false', ramp_up_start: form.ramp_up_start });
+      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false', ramp_up_start: form.ramp_up_start, ramp_up_step_size: form.ramp_up_step_size });
       window.location.href = '/oauth/google/authorize?' + params;
       return;
     }
@@ -662,7 +663,7 @@ export default function Inboxes() {
         return;
       }
       // redirect to Office 365 OAuth
-      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false', ramp_up_start: form.ramp_up_start });
+      const params = new URLSearchParams({ display_name: form.display_name, max_per_day: form.max_emails_per_day, ramp_up_enabled: form.ramp_up_enabled ? 'true' : 'false', ramp_up_start: form.ramp_up_start, ramp_up_step_size: form.ramp_up_step_size });
       window.location.href = '/oauth/office365/authorize?' + params;
       return;
     }
@@ -765,6 +766,7 @@ export default function Inboxes() {
         ramp_up_enabled: editing.ramp_up_enabled,
         ramp_up_period_days: editing.ramp_up_period_days,
         ramp_up_start: editing.ramp_up_start ?? 1,
+        ramp_up_step_size: editing.ramp_up_step_size ?? 1,
       };
       await api.patch(`/inboxes/${editing.id}`, body);
       setEditMsg({ type: 'success', text: 'Inbox updated' });
@@ -1162,8 +1164,19 @@ export default function Inboxes() {
                                   className="mt-1 block w-full border-gray-300 rounded-md text-sm"
                                 />
                               </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700">Step size (emails added per day)</label>
+                                <input
+                                  type="number"
+                                  value={editing.ramp_up_step_size ?? 1}
+                                  onChange={e => { setEditing(prev => ({ ...prev, ramp_up_step_size: Math.max(1, +e.target.value) })); setEditDirty(true); }}
+                                  min={1}
+                                  max={100}
+                                  className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                                />
+                              </div>
                               <p className="text-xs text-gray-500">
-                                Starts at {editing.ramp_up_start ?? 1} email{(editing.ramp_up_start ?? 1) !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {editing.max_emails_per_day}.
+                                Starts at {editing.ramp_up_start ?? 1} email{(editing.ramp_up_start ?? 1) !== 1 ? 's' : ''} on day one, adds {editing.ramp_up_step_size ?? 1} more each day, and turns off automatically once it reaches {editing.max_emails_per_day}.
                                 Today's limit: <strong>{editing.effective_max_per_day ?? editing.ramp_up_start ?? 1}</strong> / {editing.max_emails_per_day}
                               </p>
                             </div>
@@ -1277,7 +1290,7 @@ export default function Inboxes() {
                           )}
                           <div className="flex justify-between text-sm">
                             <span className="text-gray-600">Ramp period</span>
-                            <span className="font-medium text-gray-900">{selectedInbox.max_emails_per_day - (selectedInbox.ramp_up_start || 1)} days</span>
+                            <span className="font-medium text-gray-900">{Math.ceil((selectedInbox.max_emails_per_day - (selectedInbox.ramp_up_start || 1)) / (selectedInbox.ramp_up_step_size || 1))} days</span>
                           </div>
                         </div>
                       </>
@@ -1426,8 +1439,19 @@ export default function Inboxes() {
                           className="mt-1 block w-full border-gray-300 rounded-md text-sm"
                         />
                       </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Step size (emails added per day)</label>
+                        <input
+                          type="number"
+                          value={form.ramp_up_step_size}
+                          onChange={e => setForm(f => ({ ...f, ramp_up_step_size: Math.max(1, +e.target.value) }))}
+                          min={1}
+                          max={100}
+                          className="mt-1 block w-full border-gray-300 rounded-md text-sm"
+                        />
+                      </div>
                       <p className="text-xs text-gray-500">
-                        Starts at {form.ramp_up_start} email{form.ramp_up_start !== 1 ? 's' : ''} on day one, adds 1 more each day, and turns off automatically once it reaches {form.max_emails_per_day}.
+                        Starts at {form.ramp_up_start} email{form.ramp_up_start !== 1 ? 's' : ''} on day one, adds {form.ramp_up_step_size} more each day, and turns off automatically once it reaches {form.max_emails_per_day}.
                       </p>
                     </div>
                   )}
