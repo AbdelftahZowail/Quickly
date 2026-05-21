@@ -344,6 +344,127 @@ async def _fetch_lead_interactions(db: AsyncSession, lead_id: int) -> list[dict]
     return events
 
 
+async def _fetch_lead_interactions_batch(
+    db: AsyncSession, lead_ids: list[int]
+) -> dict[int, list[dict]]:
+    """Batch equivalent of _fetch_lead_interactions; returns dict[lead_id, events]."""
+    if not lead_ids:
+        return {}
+
+    res = await db.execute(select(Lead).where(Lead.id.in_(lead_ids)))
+    leads = {l.id: l for l in res.scalars().all()}
+    email_map = {lid: (lead.email or "").strip().lower() for lid, lead in leads.items()}
+
+    events_map: dict[int, list[dict]] = {lid: [] for lid in lead_ids}
+
+    log_rows = await db.execute(
+        select(EmailLog, Campaign.name, Campaign.public_id)
+        .join(Campaign, EmailLog.campaign_id == Campaign.id)
+        .where(EmailLog.lead_id.in_(lead_ids))
+        .order_by(EmailLog.sent_at.asc())
+    )
+    for el, cname, pub in log_rows.all():
+        events_map[el.lead_id].append(
+            {
+                "direction": "outbound",
+                "kind": "sent",
+                "at": el.sent_at.isoformat(),
+                "campaign_id": el.campaign_id,
+                "campaign_name": cname,
+                "campaign_public_id": pub,
+                "subject": el.subject or "",
+                "sequence_index": el.sequence_index,
+            }
+        )
+
+    th_res = await db.execute(
+        select(EmailLog.lead_id, EmailLog.thread_id)
+        .where(
+            EmailLog.lead_id.in_(lead_ids),
+            EmailLog.thread_id.isnot(None),
+            EmailLog.thread_id != "",
+        )
+        .distinct()
+    )
+    tid_to_leads: dict[str, list[int]] = {}
+    for lid, tid in th_res.all():
+        tid_to_leads.setdefault(tid, []).append(lid)
+    all_thread_ids = list(tid_to_leads.keys())
+
+    if all_thread_ids:
+        from app.unibox import _extract_email_only, _header_value
+
+        gm_res = await db.execute(
+            select(GmailMessage).where(GmailMessage.thread_id.in_(all_thread_ids))
+        )
+        for msg in gm_res.scalars().all():
+            try:
+                from_a = _extract_email_only(_header_value(msg.headers_json or "[]", "From"))
+            except Exception:
+                from_a = ""
+            from_a = (from_a or "").strip().lower()
+            for lid in tid_to_leads.get(msg.thread_id, []):
+                if from_a == email_map.get(lid, ""):
+                    subj = _header_value(msg.headers_json or "[]", "Subject") or ""
+                    ts = None
+                    if msg.internal_date is not None:
+                        ts = datetime.utcfromtimestamp(int(msg.internal_date) / 1000.0).isoformat() + "Z"
+                    events_map[lid].append(
+                        {
+                            "direction": "inbound",
+                            "kind": "received",
+                            "channel": "gmail",
+                            "at": ts or (msg.updated_at.isoformat() if msg.updated_at else None),
+                            "thread_id": msg.thread_id,
+                            "subject": subj,
+                            "snippet": (msg.snippet or "")[:500],
+                        }
+                    )
+                    break
+
+        o365_res = await db.execute(
+            select(Office365Message).where(Office365Message.conversation_id.in_(all_thread_ids))
+        )
+        for msg in o365_res.scalars().all():
+            for lid in tid_to_leads.get(msg.conversation_id, []):
+                if (msg.from_address or "").strip().lower() == email_map.get(lid, ""):
+                    events_map[lid].append(
+                        {
+                            "direction": "inbound",
+                            "kind": "received",
+                            "channel": "office365",
+                            "at": msg.received_at.isoformat() if msg.received_at else None,
+                            "thread_id": msg.conversation_id,
+                            "subject": msg.subject or "",
+                            "snippet": (msg.body_plain or msg.body_html or "")[:500],
+                        }
+                    )
+                    break
+
+    lr_rows = await db.execute(
+        select(LeadReply, Campaign.name, Campaign.public_id)
+        .join(Campaign, LeadReply.campaign_id == Campaign.id)
+        .where(LeadReply.lead_id.in_(lead_ids))
+        .order_by(LeadReply.replied_at.asc())
+    )
+    for lr, cname, pub in lr_rows.all():
+        events_map[lr.lead_id].append(
+            {
+                "direction": "inbound",
+                "kind": "reply_marker",
+                "at": lr.replied_at.isoformat(),
+                "campaign_id": lr.campaign_id,
+                "campaign_name": cname,
+                "campaign_public_id": pub,
+            }
+        )
+
+    for lid in lead_ids:
+        events_map[lid].sort(key=lambda e: (e.get("at") or "", e.get("direction", "")))
+
+    return events_map
+
+
 def _enrolled_earliest_iso(lead: Lead) -> str:
     if not lead.campaign_leads:
         return ""
@@ -416,7 +537,15 @@ async def list_leads(
         for cl in x.campaign_leads:
             pairs.add((x.id, cl.campaign_id))
     inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
-    return [_lead_to_response(x, opened, clicked, replied, inbox_by_pair=inbox_by_pair) for x in leads]
+    interactions_map = await _fetch_lead_interactions_batch(db, ids) if ids else {}
+    return [
+        _lead_to_response(
+            x, opened, clicked, replied,
+            interactions=interactions_map.get(x.id, []),
+            inbox_by_pair=inbox_by_pair,
+        )
+        for x in leads
+    ]
 
 
 @router.get("/export")
@@ -823,10 +952,15 @@ async def recover_lead(
     )
     lead_out = result3.scalar_one()
     opened, clicked, replied = await _engagement_pair_sets(db, [lead_id])
+    interactions = await _fetch_lead_interactions(db, lead_id)
     await db.commit()
     pairs = {(lead_out.id, cl.campaign_id) for cl in lead_out.campaign_leads}
     inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
-    return _lead_to_response(lead_out, opened, clicked, replied, inbox_by_pair=inbox_by_pair)
+    return _lead_to_response(
+        lead_out, opened, clicked, replied,
+        interactions=interactions,
+        inbox_by_pair=inbox_by_pair,
+    )
 
 
 @router.delete("/{lead_id}")

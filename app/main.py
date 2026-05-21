@@ -214,42 +214,31 @@ from app.auth import get_current_user as _auth_dep
 
 _auth_deps = [Depends(_auth_dep)]
 
-inbox.router.dependencies = _auth_deps
-leads.router.dependencies = _auth_deps
-campaigns.router.dependencies = _auth_deps
-test_mode.router.dependencies = _auth_deps
 # Gmail / Office365 OAuth: status is public; other routes set auth per-endpoint (see routers).
 # Callback routes are public – the provider's redirect carries no auth cookie.
 # office365_webhook_router has a public notification endpoint called by Microsoft,
 # so auth is NOT applied globally.  Management routes enforce auth individually.
-schedule_router.router.dependencies = _auth_deps
-settings_router.router.dependencies = _auth_deps
-backup_router.router.dependencies = _auth_deps
-unibox_router.router.dependencies = _auth_deps
 # tracking_router has public endpoints (open pixel, click redirect, unsubscribe)
 # so it does NOT get global auth — individual endpoints handle auth internally.
-notifications_router.router.dependencies = _auth_deps
-system_health_router.router.dependencies = _auth_deps
-analytics_router.router.dependencies = _auth_deps
 
-app.include_router(inbox.router)
-app.include_router(leads.router)
-app.include_router(campaigns.router)
-app.include_router(test_mode.router)
+app.include_router(inbox.router, dependencies=_auth_deps)
+app.include_router(leads.router, dependencies=_auth_deps)
+app.include_router(campaigns.router, dependencies=_auth_deps)
+app.include_router(test_mode.router, dependencies=_auth_deps)
 app.include_router(gmail_oauth.router)
 app.include_router(gmail_oauth.callback_router)
 app.include_router(office365_oauth.router)
 app.include_router(office365_oauth.callback_router)
 app.include_router(office365_webhook_router.router)
-app.include_router(schedule_router.router)
-app.include_router(settings_router.router)
-app.include_router(backup_router.router)
-app.include_router(unibox_router.router)
+app.include_router(schedule_router.router, dependencies=_auth_deps)
+app.include_router(settings_router.router, dependencies=_auth_deps)
+app.include_router(backup_router.router, dependencies=_auth_deps)
+app.include_router(unibox_router.router, dependencies=_auth_deps)
 app.include_router(tracking_router.router)
 app.include_router(beacon_ingest_router.router)
-app.include_router(notifications_router.router)
-app.include_router(system_health_router.router)
-app.include_router(analytics_router.router)
+app.include_router(notifications_router.router, dependencies=_auth_deps)
+app.include_router(system_health_router.router, dependencies=_auth_deps)
+app.include_router(analytics_router.router, dependencies=_auth_deps)
 
 # lightweight public utility for MX-based provider detection
 app.include_router(email_provider_router.router)

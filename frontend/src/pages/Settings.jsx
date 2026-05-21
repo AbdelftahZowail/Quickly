@@ -510,7 +510,7 @@ export default function Settings() {
     const yes = await confirm('Revoke this API key? This cannot be undone.');
     if (!yes) return;
     try {
-      await api.delete(`/auth/api-keys/${id}`);
+      await api.del(`/auth/api-keys/${id}`);
       setApiKeys(prev => prev.filter(k => k.id !== id));
       notify({ type: 'success', message: 'API key revoked.' });
     } catch (e) { notify({ type: 'error', message: e.message }); }

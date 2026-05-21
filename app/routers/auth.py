@@ -525,7 +525,9 @@ async def create_api_key(
 async def list_api_keys(user=Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     """List all API keys for the current user (hashes are never exposed)."""
     result = await db.execute(
-        select(APIKey).where(APIKey.user_id == user.id).order_by(APIKey.created_at.desc())
+        select(APIKey)
+        .where(APIKey.user_id == user.id, APIKey.revoked == False)
+        .order_by(APIKey.created_at.desc())
     )
     return result.scalars().all()
 

@@ -161,6 +161,26 @@ async def resolve_current_user(
     if credentials and credentials.credentials:
         token = (credentials.credentials or "").strip() or None
 
+    if token and "." not in token:
+        hashed = hash_api_key(token)
+        now = utcnow()
+        result = await db.execute(
+            select(APIKey).where(
+                APIKey.key_hash == hashed,
+                APIKey.revoked == False,  # noqa: E712
+                (APIKey.expires_at == None) | (APIKey.expires_at > now),  # noqa: E711
+            )
+        )
+        ak = result.scalar_one_or_none()
+        if ak is None:
+            raise HTTPException(status_code=401, detail="Invalid API key")
+        ak.last_used_at = utcnow()
+        await db.flush()
+        user = await db.get(User, ak.user_id)
+        if user and user.is_active:
+            return user
+        raise HTTPException(status_code=401, detail="User account disabled")
+
     if not token:
         token = request.cookies.get("access_token")
 
@@ -195,7 +215,8 @@ async def get_current_user(
     Priority:
     1. ``X-API-Key`` (trimmed) — programmatic access; evaluated before Bearer so a bad
        ``Authorization`` header cannot block a valid key.
-    2. ``Authorization: Bearer <jwt>`` access token
+    2. ``Authorization: Bearer <jwt>`` access token, or
+       ``Authorization: Bearer <api-key>`` (API key, no dots)
     3. ``access_token`` httpOnly cookie (fallback)
 
     Returns the User ORM object. Raises 401 if unauthenticated.
@@ -260,6 +281,25 @@ async def try_resolve_user_for_mcp(
     if authorization and authorization.lower().startswith("bearer "):
         bearer = authorization[7:].strip()
     if not bearer:
+        return None
+
+    if bearer and "." not in bearer:
+        hashed = hash_api_key(bearer)
+        now = utcnow()
+        result = await db.execute(
+            select(APIKey).where(
+                APIKey.key_hash == hashed,
+                APIKey.revoked == False,  # noqa: E712
+                (APIKey.expires_at == None) | (APIKey.expires_at > now),  # noqa: E711
+            )
+        )
+        ak = result.scalar_one_or_none()
+        if ak is not None:
+            ak.last_used_at = utcnow()
+            await db.flush()
+            user = await db.get(User, ak.user_id)
+            if user and user.is_active:
+                return user
         return None
 
     try:

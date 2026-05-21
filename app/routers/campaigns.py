@@ -53,6 +53,7 @@ from app.schemas import (
     SequenceVariantResponse,
 )
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
+from app.routers.leads import _fetch_lead_interactions_batch
 from app.queue_logic import reserve_slots_for_new_leads_bulk
 
 log = logging.getLogger("quickly.routes")
@@ -950,6 +951,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
 
     inbox_pairs = {(lead.id, campaign_id) for _cl, lead in rows}
     inbox_by_lead = await from_inbox_email_by_lead_campaign(db, inbox_pairs)
+    interactions_map = await _fetch_lead_interactions_batch(db, lead_ids) if lead_ids else {}
 
     def stage_label(lead_id: int) -> str:
         last_index = last_sent_map.get(lead_id, -1)
@@ -978,6 +980,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "email_verification_status": lead.email_verification_status,
             "provider": lead.provider,
             "from_inbox_email": inbox_by_lead.get((lead.id, campaign_id)),
+            "interactions": interactions_map.get(lead.id, []),
         }
         for cl, lead in rows
     ]
