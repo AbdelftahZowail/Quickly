@@ -242,30 +242,12 @@ function buildChecks(d) {
         });
         return;
       }
-      if (inbox.beacon_registration_note) {
-        if (beaconStatLvl === 'ok') beaconStatLvl = 'warning';
-        beaconIssues.push({
-          level: 'warning',
-          text: `${name}: ${inbox.beacon_registration_note}`,
-          fix: inbox.beacon_registration_note.includes('upgrade')
-            ? 'Update the Beacon service so GET /api/v1/health includes registration_counts.'
-            : 'Review server logs for Quickly and Beacon.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
-        });
-      } else if (inbox.beacon_registration_ok === false) {
+      if (inbox.beacon_registration_ok === false) {
         if (beaconStatLvl === 'ok') beaconStatLvl = 'warning';
         beaconIssues.push({
           level: 'warning',
           text: `Beacon registration count still mismatched for "${name}" (Quickly expects ${inbox.beacon_registration_expected}, Beacon has ${inbox.beacon_registration_actual}).`,
           fix: 'The server attempted a full resync during this health check. If this persists, check connectivity to Beacon.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
-        });
-      } else if (inbox.beacon_registration_repaired) {
-        if (beaconStatLvl === 'ok') beaconStatLvl = 'warning';
-        beaconIssues.push({
-          level: 'warning',
-          text: `Beacon tracking registrations for "${name}" were out of sync with Quickly and were repaired automatically.`,
-          fix: null,
           action: { label: 'Open Inboxes', to: '/inboxes' },
         });
       }

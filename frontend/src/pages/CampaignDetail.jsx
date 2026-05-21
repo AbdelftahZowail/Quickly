@@ -405,6 +405,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const fileInputRef = useRef(null);
   const [verifying, setVerifying] = useState(false);
   const [verificationSummary, setVerificationSummary] = useState(null);
+  const [showLeadsConfirm, setShowLeadsConfirm] = useState(false);
+  const [confirmPayload, setConfirmPayload] = useState(null);
+  const [confirmPreview, setConfirmPreview] = useState(null);
+  const [confirmAddLoading, setConfirmAddLoading] = useState(false);
+  const [importFile, setImportFile] = useState(null);
   // filters: { status, interest, opened, replied, clicked, verification }
   const [filters, setFilters] = useState({
     status: 'all',
@@ -645,12 +650,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     if (!payload.length) { setMsg({ type: 'error', text: 'No valid emails found' }); return; }
 
     try {
-      const res = await api.post(`/campaigns/${campaignId}/leads?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, payload);
-      setBulk('');
-      setLastDuplicates(res.duplicate_leads || []);
-      const dupMsg = res.duplicate_leads?.length ? ` (${res.duplicate_leads.length} duplicate(s) skipped)` : '';
-      notify({ type: 'success', message: `${res.added || payload.length} lead(s) added${dupMsg}` });
-      refresh();
+      const preview = await api.post(`/campaigns/${campaignId}/leads?confirm_only=true&skip_duplicates=${skipDuplicates}`, payload);
+      setConfirmPayload(payload);
+      setConfirmPreview(preview);
+      setImportFile(null);
+      setShowLeadsConfirm(true);
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
     }
@@ -663,15 +667,42 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
     setImporting(true);
     setLastDuplicates([]);
     try {
-      const res = await api.upload(`/campaigns/${campaignId}/leads/import?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, file);
-      setLastDuplicates(res.duplicate_leads || []);
-      const dupMsg = res.duplicate_leads?.length ? `, ${res.duplicate_leads.length} duplicate(s) skipped` : '';
-      notify({ type: 'success', message: `Imported: ${res.added} added, ${res.already_enrolled} already enrolled, ${res.errors} errors${dupMsg}` });
-      refresh();
+      const preview = await api.upload(`/campaigns/${campaignId}/leads/import?confirm_only=true&skip_duplicates=${skipDuplicates}`, file);
+      setImportFile(file);
+      setConfirmPayload(null);
+      setConfirmPreview(preview);
+      setShowLeadsConfirm(true);
     } catch (err) {
       notify({ type: 'error', message: err.message });
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleConfirmAdd = async () => {
+    setConfirmAddLoading(true);
+    try {
+      let res;
+      if (confirmPayload) {
+        res = await api.post(`/campaigns/${campaignId}/leads?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, confirmPayload);
+        setBulk('');
+        const dupMsg = res.duplicate_leads?.length ? ` (${res.duplicate_leads.length} duplicate(s) skipped)` : '';
+        notify({ type: 'success', message: `${res.added || confirmPayload.length} lead(s) added${dupMsg}` });
+      } else if (importFile) {
+        res = await api.upload(`/campaigns/${campaignId}/leads/import?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, importFile);
+        const dupMsg = res.duplicate_leads?.length ? `, ${res.duplicate_leads.length} duplicate(s) skipped` : '';
+        notify({ type: 'success', message: `Imported: ${res.added} added, ${res.already_enrolled} already enrolled, ${res.errors} errors${dupMsg}` });
+      }
+      setShowLeadsConfirm(false);
+      setConfirmPreview(null);
+      setConfirmPayload(null);
+      setImportFile(null);
+      setLastDuplicates(res?.duplicate_leads || []);
+      refresh();
+    } catch (err) {
+      notify({ type: 'error', message: err.message });
+    } finally {
+      setConfirmAddLoading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -1126,6 +1157,68 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         </div>
       )}
 
+      {/* Confirm leads modal */}
+      {showLeadsConfirm && confirmPreview && (
+        <div
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onMouseDown={e => { if (e.target === e.currentTarget) setShowLeadsConfirm(false); }}
+        >
+          <div
+            data-darkreader-ignore
+            className="rounded-xl shadow-lg p-6 w-full max-w-md mx-auto max-h-[90vh] overflow-y-auto"
+            style={{ backgroundColor: 'white' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-gray-800 mb-4">Review leads before adding</h2>
+
+            <div className="mb-4 text-center">
+              <div className="text-3xl font-bold text-teal-600">{confirmPreview.total_valid}</div>
+              <div className="text-sm text-gray-500">valid {confirmPreview.total_valid === 1 ? 'lead' : 'leads'}</div>
+            </div>
+
+            {confirmPreview.providers && Object.keys(confirmPreview.providers).length > 0 && (
+              <div className="mb-4">
+                <h3 className="text-sm font-semibold text-gray-700 mb-2">Email providers</h3>
+                <div className="space-y-1">
+                  {Object.entries(confirmPreview.providers).map(([provider, count]) => (
+                    <div key={provider} className="flex justify-between text-sm py-1 px-2 rounded odd:bg-gray-50">
+                      <span className="text-gray-700">{provider}</span>
+                      <span className="font-mono text-gray-900">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {confirmPreview.total_flagged > 0 && (
+              <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                <p className="text-sm font-semibold text-yellow-800 mb-1">{confirmPreview.total_flagged} issue(s) — will be skipped</p>
+                {confirmPreview.flagged?.invalid_format?.length > 0 && (
+                  <div className="mt-1">
+                    <span className="text-xs text-yellow-700 font-medium">Invalid format:</span>
+                    <div className="flex flex-wrap gap-1 mt-0.5">
+                      {confirmPreview.flagged.invalid_format.map((em, i) => (
+                        <span key={i} className="font-mono text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded">{em}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {confirmPreview.flagged?.duplicates_in_batch > 0 && (
+                  <p className="text-xs text-yellow-700 mt-1">{confirmPreview.flagged.duplicates_in_batch} duplicate(s) within batch</p>
+                )}
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 mt-6 pt-3 border-t border-gray-100">
+              <Button variant="outline" size="sm" onClick={() => setShowLeadsConfirm(false)}>Cancel</Button>
+              <Button variant="default" size="sm" onClick={handleConfirmAdd} disabled={confirmAddLoading}>
+                {confirmAddLoading ? 'Adding…' : `Confirm & Add ${confirmPreview.total_valid} lead${confirmPreview.total_valid !== 1 ? 's' : ''}`}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
@@ -1497,13 +1590,15 @@ function StepAnalyticsPanel({ stepStats, loading, campaignId, sequences, onToggl
                     )}
                   </td>
                   <td className="px-3 py-2.5">
-                    <div className="font-medium text-gray-800">Step {step.sequence_index + 1}</div>
-                    {step.subject && <div className="text-xs text-gray-400 truncate max-w-xs">{step.subject}</div>}
-                    {hasVariants && (
-                      <span className="inline-flex items-center gap-1 text-[10px] bg-purple-100 text-purple-600 rounded-full px-1.5 py-0.5 mt-0.5">
-                        A/B {step.variants.length - 1} variant{step.variants.length - 1 > 1 ? 's' : ''}
-                      </span>
-                    )}
+                    <div className="max-w-[280px] min-w-0">
+                      <div className="font-medium text-gray-800 truncate">Step {step.sequence_index + 1}</div>
+                      {step.subject && <div className="text-xs text-gray-400 truncate">{step.subject}</div>}
+                      {hasVariants && (
+                        <span className="inline-flex items-center gap-1 text-[10px] bg-purple-100 text-purple-600 rounded-full px-1.5 py-0.5 mt-0.5">
+                          A/B {step.variants.length - 1} variant{step.variants.length - 1 > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-3 py-2.5 text-right font-medium">{step.total_sent}</td>
                   <td className="px-3 py-2.5 text-right">
@@ -2399,11 +2494,11 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                         isActive ? 'bg-teal-50 border-teal-300 shadow-sm' : 'bg-white border-gray-200 hover:border-teal-200 hover:bg-teal-50/30'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className={`text-sm font-medium truncate ${isActive ? 'text-teal-700' : 'text-gray-800'}`}>
+                      <div className="flex items-center gap-1 min-w-0">
+                        <span className={`text-sm font-medium truncate min-w-0 flex-1 ${isActive ? 'text-teal-700' : 'text-gray-800'}`}>
                           {s.subject || <em className="text-gray-400 font-normal text-xs">Reply in thread</em>}
                         </span>
-                        {s.is_html && <span className="text-[9px] bg-blue-100 text-blue-600 rounded px-1 py-0.5 font-medium ml-1 shrink-0">HTML</span>}
+                        {s.is_html && <span className="text-[9px] bg-blue-100 text-blue-600 rounded px-1 py-0.5 font-medium shrink-0">HTML</span>}
                       </div>
                       <div className="text-[11px] text-gray-400 mt-0.5">Day {cumulDay}{idx === 0 ? ' (start)' : ''}</div>
                     </button>

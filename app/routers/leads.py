@@ -158,7 +158,7 @@ def _build_leads_stmt(
     bad_only: bool,
     interest: str | None,
 ):
-    stmt = _lead_query_with_campaigns().order_by(Lead.id)
+    stmt = _lead_query_with_campaigns().order_by(Lead.id.desc())
     if bad_only:
         bounced_enrollment = exists(
             select(1).select_from(CampaignLead).where(

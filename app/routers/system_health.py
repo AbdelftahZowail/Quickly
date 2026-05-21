@@ -383,19 +383,15 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
             data2 = key_to_data.get(inbox_to_key[iid])
             expected = fld["beacon_registration_expected"]
             actual2 = _beacon_registration_actual(data2, iid)
-            ok = expected == actual2
+            ok = actual2 >= expected
             note = None
             if not ok:
-                if actual2 > expected:
-                    note = (
-                        "Beacon has more registration rows than Quickly "
-                        "(possible orphan rows on Beacon)."
-                    )
-                else:
-                    note = (
-                        "Registration count still below Quickly after sync; "
-                        "check Beacon logs and network."
-                    )
+                note = (
+                    "Registration count still below Quickly after sync; "
+                    "check Beacon logs and network."
+                )
+            elif actual2 > expected:
+                note = "Beacon tracks some unregistered leads (harmless)."
             beacon_reg_fields[iid] = {
                 **fld,
                 "beacon_registration_actual": actual2,

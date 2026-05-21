@@ -182,10 +182,18 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["click_rate"] = cnt  # temporarily store count
-        # reply counts
+        # reply counts (excluding OOO and auto-reply)
         res = await db.execute(
             select(LeadReply.campaign_id, func.count())
-            .where(LeadReply.campaign_id.in_(campaign_ids))
+            .join(
+                CampaignLead,
+                (LeadReply.lead_id == CampaignLead.lead_id)
+                & (LeadReply.campaign_id == CampaignLead.campaign_id),
+            )
+            .where(
+                LeadReply.campaign_id.in_(campaign_ids),
+                CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+            )
             .group_by(LeadReply.campaign_id)
         )
         for cid, cnt in res.all():
@@ -369,11 +377,19 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         .where(CampaignLead.campaign_id == campaign_id, _one_eligible)
     )
     stats["scheduled"] = res.scalar() or 0
-    # replies
+    # replies (excluding OOO and auto-reply)
     res = await db.execute(
         select(func.count())
         .select_from(LeadReply)
-        .where(LeadReply.campaign_id == campaign_id)
+        .join(
+            CampaignLead,
+            (LeadReply.lead_id == CampaignLead.lead_id)
+            & (LeadReply.campaign_id == CampaignLead.campaign_id),
+        )
+        .where(
+            LeadReply.campaign_id == campaign_id,
+            CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+        )
     )
     stats["replies"] = res.scalar() or 0
     # sequences
@@ -1465,6 +1481,7 @@ async def bulk_add_leads_to_campaign(
     leads_data: list[CampaignLeadAdd],
     skip_duplicates: bool = Query(True, description="When True, leads already enrolled in any campaign are skipped and reported in duplicate_leads. When False, leads are added normally (already-enrolled leads in this campaign are silently skipped)."),
     verify_emails: bool = Query(False, description="When True and email verification is configured, verify each lead's email in the background after adding."),
+    confirm_only: bool = Query(False, description="When True, return a preview (counts, providers, issues) without actually creating leads."),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -1492,6 +1509,39 @@ async def bulk_add_leads_to_campaign(
             deduped.append(entry)
     duplicates_in_batch = len(leads_data) - len(deduped)
     leads_data = deduped
+
+    if confirm_only:
+        from collections import defaultdict
+        from app.email_provider import detect_provider_for_email
+
+        valid_emails = []
+        invalid_format: list[str] = []
+        for entry in leads_data:
+            email = entry.email.strip().lower()
+            if not email or "@" not in email:
+                invalid_format.append(entry.email or email)
+            else:
+                valid_emails.append(email)
+
+        domain_cache: dict[str, str] = {}
+        provider_counts: dict[str, int] = defaultdict(int)
+        for email in valid_emails:
+            domain = email.split("@")[-1].lower()
+            if domain not in domain_cache:
+                provider = await detect_provider_for_email(email)
+                domain_cache[domain] = provider or "Unknown"
+            provider_counts[domain_cache[domain]] += 1
+
+        return {
+            "preview": True,
+            "total_valid": len(valid_emails),
+            "providers": dict(sorted(provider_counts.items(), key=lambda x: -x[1])),
+            "total_flagged": len(invalid_format) + duplicates_in_batch,
+            "flagged": {
+                "invalid_format": invalid_format,
+                "duplicates_in_batch": duplicates_in_batch,
+            },
+        }
 
     results = []
     added = 0
@@ -2095,6 +2145,7 @@ async def import_campaign_leads(
     file: UploadFile = File(...),
     skip_duplicates: bool = Query(True, description="When True, leads already enrolled in any campaign are skipped and reported in duplicate_leads. When False, leads are added normally (already-enrolled leads in this campaign are silently skipped)."),
     verify_emails: bool = Query(False, description="When True, triggers background email verification for added leads"),
+    confirm_only: bool = Query(False, description="When True, return a preview (counts, providers, issues) without actually creating leads."),
     db: AsyncSession = Depends(get_db),
 ):
     """Import leads from a CSV file. Expects columns: email, name, and any custom fields."""
@@ -2122,6 +2173,55 @@ async def import_campaign_leads(
     raw_headers = [(f or "").strip() for f in reader.fieldnames]
     if not any(h.lower() == "email" for h in raw_headers if h):
         raise HTTPException(400, "CSV must have an 'email' column")
+
+    if confirm_only:
+        from collections import defaultdict
+        from app.email_provider import detect_provider_for_email
+
+        valid_emails: list[str] = []
+        invalid_format: list[str] = []
+        seen: set[str] = set()
+        dup_count = 0
+        preview_reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+        for _ in preview_reader:
+            by_header = {}
+            for fk in preview_reader.fieldnames or []:
+                h = (fk or "").strip()
+                if not h:
+                    continue
+                raw_val = _.get(fk)
+                by_header[h] = raw_val.strip() if raw_val else ""
+            email = next(
+                (by_header[h] for h in raw_headers if h.lower() == "email"), ""
+            ).strip().lower()
+            if not email or "@" not in email:
+                invalid_format.append(email or "(empty)")
+                continue
+            if email in seen:
+                dup_count += 1
+                continue
+            seen.add(email)
+            valid_emails.append(email)
+
+        domain_cache: dict[str, str] = {}
+        provider_counts: dict[str, int] = defaultdict(int)
+        for email in valid_emails:
+            domain = email.split("@")[-1].lower()
+            if domain not in domain_cache:
+                provider = await detect_provider_for_email(email)
+                domain_cache[domain] = provider or "Unknown"
+            provider_counts[domain_cache[domain]] += 1
+
+        return {
+            "preview": True,
+            "total_valid": len(valid_emails),
+            "providers": dict(sorted(provider_counts.items(), key=lambda x: -x[1])),
+            "total_flagged": len(invalid_format) + dup_count,
+            "flagged": {
+                "invalid_format": invalid_format,
+                "duplicates_in_batch": dup_count,
+            },
+        }
 
     _csv_reserved_lower = frozenset(
         {"email", "name", "status", "interest", "email_verification_status"}

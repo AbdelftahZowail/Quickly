@@ -8,7 +8,7 @@ from sqlalchemy import cast, Date, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Campaign, EmailClick, EmailLog, EmailOpen, LeadReply
+from app.models import Campaign, CampaignLead, EmailClick, EmailLog, EmailOpen, LeadReply
 
 log = logging.getLogger("quickly.analytics")
 router = APIRouter(prefix="/api/analytics", tags=["analytics"])
@@ -81,14 +81,23 @@ async def daily_analytics(
     if campaign_id:
         clicks_stmt = clicks_stmt.where(EmailLog.campaign_id.in_(campaign_id))
 
-    # replies per day per campaign
+    # replies per day per campaign (excluding OOO and auto-reply)
     replies_stmt = (
         select(
             cast(LeadReply.replied_at, Date).label("day"),
             LeadReply.campaign_id,
             func.count().label("total_replies"),
         )
-        .where(LeadReply.replied_at >= start, LeadReply.replied_at < end)
+        .join(
+            CampaignLead,
+            (LeadReply.lead_id == CampaignLead.lead_id)
+            & (LeadReply.campaign_id == CampaignLead.campaign_id),
+        )
+        .where(
+            LeadReply.replied_at >= start,
+            LeadReply.replied_at < end,
+            CampaignLead.interest_status.notin_(["out_of_office", "auto_reply"]),
+        )
         .group_by(cast(LeadReply.replied_at, Date), LeadReply.campaign_id)
     )
     if campaign_id:
