@@ -5,6 +5,7 @@ import { Card } from '../components/ui/Card';
 import { useAppMode } from '../context/AppModeContext';
 import { useConfirm } from '../context/ConfirmContext';
 import { useNotify } from '../context/NotificationContext';
+import { useSystemHealth } from '../context/SystemHealthContext';
 
 /** Backend stores jitter in seconds (cap 600). Forms show minutes and convert on change / save. */
 const JITTER_MAX_MINUTES = 10;
@@ -582,6 +583,50 @@ export default function Inboxes() {
   // ---- Detail panel state ----
   const [selectedInbox, setSelectedInbox] = useState(null);
 
+  // ---- Token expiry visual indicator (from system health data) ----
+  const { rawData } = useSystemHealth();
+  const expiredInboxIds = useMemo(() => {
+    if (!rawData) return new Set();
+    const ids = new Set();
+    for (const acc of [...(rawData.google_oauth?.accounts || []), ...(rawData.microsoft_oauth?.accounts || [])]) {
+      if (acc.token_status === 'expired' && acc.inbox_id != null) {
+        ids.add(acc.inbox_id);
+      }
+    }
+    return ids;
+  }, [rawData]);
+
+  // Auto-open inbox detail panel when ?inbox=<id> is in the URL
+  const autoOpenHandledRef = useRef(false);
+
+  // ---- Polling after connect URL generation ----
+  const pollingTimerRef = useRef(null);
+  const knownInboxIdsRef = useRef(new Set());
+  const startPolling = () => {
+    knownInboxIdsRef.current = new Set(inboxes.map(i => i.id));
+    pollingTimerRef.current = setInterval(async () => {
+      try {
+        const fresh = await api.get('/inboxes');
+        const freshIds = new Set(fresh.map(i => i.id));
+        for (const id of freshIds) {
+          if (!knownInboxIdsRef.current.has(id)) {
+            notify({ type: 'success', message: 'New inbox connected!' });
+            setInboxes(fresh);
+            clearInterval(pollingTimerRef.current);
+            pollingTimerRef.current = null;
+            return;
+          }
+        }
+      } catch { /* polling errors are safe to ignore */ }
+    }, 3000);
+    setTimeout(() => {
+      if (pollingTimerRef.current) {
+        clearInterval(pollingTimerRef.current);
+        pollingTimerRef.current = null;
+      }
+    }, 300000);
+  };
+
   const load = async () => {
     try {
       const data = await api.get('/inboxes');
@@ -620,6 +665,42 @@ export default function Inboxes() {
       })
       .catch(() => setCnameTarget(window.location.hostname));
   }, []);
+
+  // Clean up polling timer on unmount
+  useEffect(() => () => {
+    if (pollingTimerRef.current) {
+      clearInterval(pollingTimerRef.current);
+    }
+  }, []);
+
+  // Toast for ?connected=email from OAuth callback redirect (standard auth flow)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const connectedEmail = params.get('connected');
+    if (connectedEmail) {
+      notify({ type: 'success', message: `Connected ${connectedEmail}` });
+      const clean = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, '', clean);
+    }
+  }, [notify]);
+
+  // Open inbox detail panel when ?inbox=<id> is in the URL (from System Health "Fix it" link)
+  useEffect(() => {
+    if (autoOpenHandledRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const inboxId = params.get('inbox');
+    if (!inboxId) return;
+    const numId = Number(inboxId);
+    if (!Number.isFinite(numId)) return;
+    const inbox = inboxes.find(i => i.id === numId);
+    if (inbox) {
+      autoOpenHandledRef.current = true;
+      setSelectedInbox(inbox);
+      if (editing) closeEdit();
+      const clean = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, '', clean);
+    }
+  }, [inboxes]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleChange = (e) => {
     const { name, value, type } = e.target;
@@ -963,6 +1044,49 @@ export default function Inboxes() {
     }
   };
 
+  const generateConnectUrlForForm = async () => {
+    setMessage(null);
+    try {
+      const res = await api.post('/oauth/connect-url', {
+        provider: form.provider,
+        display_name: form.display_name,
+        max_per_day: form.max_emails_per_day,
+        wait_minutes_between: form.wait_minutes_between,
+        max_jitter_seconds: form.max_jitter_seconds,
+        tracking_domain: form.tracking_domain || '',
+        ramp_up_enabled: form.ramp_up_enabled,
+        ramp_up_start: form.ramp_up_start,
+        ramp_up_step_size: form.ramp_up_step_size,
+      });
+      await navigator.clipboard.writeText(res.url);
+      startPolling();
+      setShowAdd(false);
+      setForm(initialForm);
+      setAddTrackingMode('app');
+      setMessage(null);
+      notify({
+        type: 'success',
+        message: `Connect URL copied! The page will auto-detect when the inbox is connected.`,
+      });
+    } catch (e) {
+      setMessage({ type: 'error', text: e.message });
+    }
+  };
+
+  const generateConnectUrlForInbox = async (inbox) => {
+    try {
+      const res = await api.post(`/inboxes/${inbox.id}/generate-connect-url`);
+      await navigator.clipboard.writeText(res.url);
+      startPolling();
+      notify({
+        type: 'success',
+        message: `Connect URL copied! This page will auto-detect when the inbox is connected.`,
+      });
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    }
+  };
+
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-8">
       {/* header with add button */}
@@ -1033,6 +1157,11 @@ export default function Inboxes() {
                         ? <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full font-medium">Paused</span>
                         : <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">Active</span>
                       }
+                      {expiredInboxIds.has(inbox.id) && (
+                        <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
+                          Token Expired
+                        </span>
+                      )}
                       <svg className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${isSelected ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                       </svg>
@@ -1065,6 +1194,15 @@ export default function Inboxes() {
                   {/* Edit form */}
                   <div className="px-5 py-4 overflow-y-auto flex-1 min-w-0">
                     {editMsg && <div className={`mb-3 text-sm ${editMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{editMsg.text}</div>}
+                    {/* Token expired banner */}
+                    {expiredInboxIds.has(editing.id) && (
+                      <div className="mb-3 p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                        <svg className="w-4 h-4 text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <p className="text-sm text-red-700">Token expired — reconnect this account from the detail panel.</p>
+                      </div>
+                    )}
                     <form onSubmit={saveEdit} className="space-y-4 min-w-0 max-w-full">
                       <div>
                         <label className="block text-xs font-medium text-gray-700">Email (read-only)</label>
@@ -1218,6 +1356,18 @@ export default function Inboxes() {
 
                   {/* Scrollable content */}
                   <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
+                    {/* Token expired banner */}
+                    {expiredInboxIds.has(selectedInbox.id) && (
+                      <div className="p-3 bg-red-50 border border-red-200 rounded-lg flex items-start gap-2">
+                        <svg className="w-4 h-4 text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-red-800">Token expired</p>
+                          <p className="text-xs text-red-600 mt-0.5">Reconnect this account at the bottom of this panel.</p>
+                        </div>
+                      </div>
+                    )}
                     {/* Status + Provider row */}
                     <div className="flex items-center justify-between">
                       {selectedInbox.paused
@@ -1338,6 +1488,17 @@ export default function Inboxes() {
                         title="Re-authenticate this inbox to refresh the OAuth login"
                       >
                         Reconnect login
+                      </Button>
+                    )}
+                    {(selectedInbox.provider === 'gmail' || selectedInbox.provider === 'office365') && (
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="w-full"
+                        onClick={() => generateConnectUrlForInbox(selectedInbox)}
+                        title="Generate a one-time link to connect from another browser"
+                      >
+                        Copy Connect URL
                       </Button>
                     )}
                     <Button variant="danger" size="sm" className="w-full" onClick={() => deleteInbox(selectedInbox.id, selectedInbox.email)}>Delete inbox</Button>
@@ -1485,6 +1646,24 @@ export default function Inboxes() {
                   Cancel
                 </Button>
               </div>
+              {(form.provider === 'gmail' || form.provider === 'office365') && (
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="h-px flex-1 bg-gray-200" />
+                    <span className="text-xs text-gray-400 font-medium uppercase tracking-wider">or</span>
+                    <div className="h-px flex-1 bg-gray-200" />
+                  </div>
+                  <p className="text-xs text-gray-500 mb-2 text-center">
+                    Click to copy a one-time link. Open it in a browser where your account is signed in.
+                  </p>
+                  <Button type="button" variant="outline" size="sm" className="w-full" onClick={generateConnectUrlForForm}>
+                    <svg className="w-3.5 h-3.5 mr-1.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                    </svg>
+                    Copy Connect Link
+                  </Button>
+                </div>
+              )}
             </form>
           </div>
         </div>

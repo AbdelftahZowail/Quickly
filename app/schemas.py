@@ -169,6 +169,23 @@ class PauseInboxRequest(BaseModel):
     target_inbox_id: Optional[int] = None
 
 
+class ConnectUrlRequest(BaseModel):
+    """Parameters for generating a one-time OAuth connect URL for a new inbox."""
+    provider: str = "gmail"  # gmail | office365
+    display_name: str = ""
+    max_per_day: int = 50
+    wait_minutes_between: int = 5
+    max_jitter_seconds: int = 180
+    tracking_domain: Optional[str] = None
+    ramp_up_enabled: bool = False
+    ramp_up_start: int = 1
+    ramp_up_step_size: int = 1
+
+
+class ConnectUrlResponse(BaseModel):
+    url: str
+
+
 class SequenceVariantCreate(BaseModel):
     label: str = ""
     subject: Optional[str] = None  # None = use sequence subject

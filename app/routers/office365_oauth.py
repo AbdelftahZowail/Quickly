@@ -155,9 +155,13 @@ async def office365_callback(
         state_data = {}
     display_name = state_data.get("display_name", "")
     max_per_day = state_data.get("max_per_day", 50)
+    wait_minutes_between = state_data.get("wait_minutes_between", 5)
+    max_jitter_seconds = state_data.get("max_jitter_seconds", 180)
+    tracking_domain = state_data.get("tracking_domain", "") or None
     ramp_up_enabled = bool(state_data.get("ramp_up_enabled", False))
     ramp_up_start = int(state_data.get("ramp_up_start", 1))
     ramp_up_step_size = int(state_data.get("ramp_up_step_size", 1))
+    source = state_data.get("source", "")
 
     # Validate CSRF nonce (single-use)
     csrf_token = state_data.get("_csrf", "")
@@ -235,7 +239,10 @@ async def office365_callback(
             email=user_email,
             display_name=display_name or user_email.split("@")[0],
             max_emails_per_day=max_per_day,
+            wait_minutes_between=wait_minutes_between,
+            max_jitter_seconds=max_jitter_seconds,
             provider="office365",
+            tracking_domain=tracking_domain,
             ramp_up_enabled=ramp_up_enabled,
             ramp_up_start=ramp_up_start,
             ramp_up_step_size=ramp_up_step_size,
@@ -276,7 +283,13 @@ async def office365_callback(
 
     background_tasks.add_task(_auto_subscribe, inbox.id)
 
-    target = settings.base_url.rstrip('/') + "/inboxes?connected=" + urllib.parse.quote(user_email)
+    base = settings.base_url.rstrip('/')
+    if source == "connect_url":
+        from app.auth import SECRET_KEY
+        sig = hmac.new(SECRET_KEY.encode(), user_email.encode(), "sha256").hexdigest()[:12]
+        target = f"{base}/oauth/connected?email=" + urllib.parse.quote(user_email) + "&sig=" + sig
+    else:
+        target = f"{base}/inboxes?connected=" + urllib.parse.quote(user_email)
     return RedirectResponse(target, status_code=303)
 
 

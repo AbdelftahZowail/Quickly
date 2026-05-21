@@ -198,7 +198,7 @@ function CheckCard({ check, muted, onToggleMute }) {
                     {issue.action && (
                       <Link
                         to={issue.action.to}
-                        className="text-xs text-teal-600 hover:text-teal-700 font-medium inline-flex items-center gap-0.5 flex-shrink-0"
+                        className="text-xs font-medium px-2 py-0.5 rounded bg-teal-100 text-teal-700 hover:bg-teal-200 border border-teal-200 inline-flex items-center gap-1 flex-shrink-0 transition-colors"
                       >
                         {issue.action.label}
                         <RiArrowRightSLine size={12} />

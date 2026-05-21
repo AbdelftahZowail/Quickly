@@ -21,6 +21,7 @@ from app.schemas import (
     BeaconConnectFromInboxRequest,
     BeaconConnectRequest,
     BeaconPendingRegistrationCountResponse,
+    ConnectUrlResponse,
     InboxCreate,
     InboxUpdate,
     InboxResponse,
@@ -28,6 +29,7 @@ from app.schemas import (
 )
 from app.queue_logic import compute_effective_daily_limit
 from app.settings_manager import settings as app_settings
+from app.time import utcnow
 
 log = logging.getLogger("quickly.routes")
 
@@ -573,25 +575,44 @@ async def delete_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox = result.scalar_one_or_none()
     if not inbox:
         raise HTTPException(404, "Inbox not found")
-    # Check if this inbox is assigned to any campaign
-    in_use = await db.execute(
-        select(exists().where(CampaignInbox.inbox_id == inbox_id))
+    # Remove campaign assignments referencing this inbox
+    await db.execute(
+        CampaignInbox.__table__.delete().where(CampaignInbox.inbox_id == inbox_id)
     )
-    if in_use.scalar():
-        raise HTTPException(
-            400,
-            "Inbox is assigned to one or more campaigns. Remove it from those campaigns first.",
-        )
-    # Check if any pending queue slots reference this inbox
-    has_slots = await db.execute(
-        select(exists().where(QueueSlot.inbox_id == inbox_id))
+    # Nullify inbox_id on email logs (preserve logs, break FK constraint)
+    await db.execute(
+        EmailLog.__table__.update().where(EmailLog.inbox_id == inbox_id).values(inbox_id=None)
     )
-    if has_slots.scalar():
-        raise HTTPException(
-            400,
-            "Inbox has pending queue slots. Remove those first.",
-        )
     await db.delete(inbox)
     await db.flush()
     log.info("delete_inbox: deleted inbox %s (%s)", inbox_id, inbox.email)
     return {"ok": True}
+
+
+@router.post("/{inbox_id}/generate-connect-url", response_model=ConnectUrlResponse)
+async def generate_connect_url(
+    inbox_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a one-time URL to pre-authenticate the OAuth flow for this inbox.
+
+    Returns a URL like ``https://yourdomain.com/oauth/connect/<token>`` that can be
+    opened in any browser (including one where the user is *not* logged into Quickly)
+    to kick off the OAuth consent flow for the inbox's configured provider.
+    """
+    result = await db.execute(select(Inbox).where(Inbox.id == inbox_id))
+    inbox = result.scalar_one_or_none()
+    if not inbox:
+        raise HTTPException(404, "Inbox not found")
+    if inbox.provider not in ("gmail", "office365"):
+        raise HTTPException(400, f"Cannot generate connect URL for provider '{inbox.provider}'")
+
+    token = secrets.token_urlsafe(32)
+    inbox.connect_token = token
+    inbox.connect_token_expires_at = utcnow() + timedelta(minutes=15)
+    await db.flush()
+
+    base = app_settings.base_url.rstrip("/")
+    url = f"{base}/oauth/connect/{token}"
+    log.info("generate_connect_url: inbox %s token=%s…", inbox_id, token[:12])
+    return ConnectUrlResponse(url=url)

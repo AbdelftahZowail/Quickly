@@ -65,13 +65,14 @@ function buildChecks(d) {
       });
     }
     googleAccounts.forEach(acc => {
+      const inboxLink = `/inboxes?inbox=${acc.inbox_id}`;
       if (acc.token_status === 'expired') {
         googleStatus = 'error';
         googleIssues.push({
           level: 'error',
           text: `Token expired for ${acc.google_email} (${acc.inbox_display_name || ''})`,
           fix: 'Reconnect this account from the Inboxes page.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
+          action: { label: 'Fix it', to: inboxLink },
         });
       }
       if (acc.login_status === 'invalid') {
@@ -80,7 +81,7 @@ function buildChecks(d) {
           level: 'error',
           text: `Login is no longer valid for ${acc.google_email}`,
           fix: 'Reconnect this account from the Inboxes page.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
+          action: { label: 'Fix it', to: inboxLink },
         });
       }
       if (acc.missing_scopes?.length > 0) {
@@ -89,7 +90,7 @@ function buildChecks(d) {
           level: 'error',
           text: `Missing required send scope for ${acc.google_email}: ${acc.missing_scopes.map(s => s.name).join(', ')}`,
           fix: 'Disconnect and reconnect the account, granting the required Gmail send permission.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
+          action: { label: 'Fix it', to: inboxLink },
         });
       }
     });
@@ -130,13 +131,14 @@ function buildChecks(d) {
       });
     }
     o365Accounts.forEach(acc => {
+      const inboxLink = `/inboxes?inbox=${acc.inbox_id}`;
       if (acc.token_status === 'expired') {
         msStatus = 'error';
         msIssues.push({
           level: 'error',
           text: `Token expired for ${acc.microsoft_email}`,
           fix: 'Reconnect this Office 365 account from the Inboxes page.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
+          action: { label: 'Fix it', to: inboxLink },
         });
       }
       if (acc.login_status === 'invalid') {
@@ -145,7 +147,7 @@ function buildChecks(d) {
           level: 'error',
           text: `Login is no longer valid for ${acc.microsoft_email}`,
           fix: 'Reconnect this Office 365 account from the Inboxes page.',
-          action: { label: 'Open Inboxes', to: '/inboxes' },
+          action: { label: 'Fix it', to: inboxLink },
         });
       }
     });

@@ -108,6 +108,8 @@ class Inbox(Base):
     beacon_setup_token = Column(String(128), nullable=True, default=None)
     beacon_webhook_secret = Column(String(256), nullable=True, default=None)
     beacon_connected = Column(Boolean, default=False, nullable=False)
+    connect_token = Column(String(256), nullable=True, unique=True)
+    connect_token_expires_at = Column(DateTime, nullable=True, default=None)
     created_at = Column(DateTime, default=_utcnow)
     ramp_up_enabled = Column(Boolean, default=False, nullable=False)
     ramp_up_period_days = Column(Integer, default=42, nullable=False)  # kept for legacy compat; not used in formula
@@ -720,6 +722,24 @@ class OAuthState(Base):
     purpose = Column(String(32), nullable=False)  # app_login | inbox_google | inbox_microsoft
     metadata_json = Column(Text, default="{}")
     expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=_utcnow)
+
+
+class PendingOAuthConnect(Base):
+    """Temporary storage for a one-time OAuth connect URL (new inbox flow).
+
+    A token is generated and stored here when an authenticated user requests a
+    connect URL for a *new* inbox (whose email is not yet known).  The public
+    ``GET /oauth/connect/{token}`` handler reads this record, marks it used, and
+    redirects to the appropriate OAuth provider with the stored inbox parameters
+    encoded in the CSRF state.
+    """
+    __tablename__ = "pending_oauth_connect"
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String(256), unique=True, nullable=False, index=True)
+    expires_at = Column(DateTime, nullable=False)
+    metadata_json = Column(Text, nullable=False)
+    used = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=_utcnow)
 
 

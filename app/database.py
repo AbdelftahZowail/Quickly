@@ -92,9 +92,15 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_setup_token VARCHAR(128) NULL",
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_webhook_secret VARCHAR(256) NULL",
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS beacon_connected BOOLEAN NOT NULL DEFAULT FALSE",
+        # 2026-05-21: one-time OAuth connect URL tokens
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS connect_token VARCHAR(256) NULL",
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS connect_token_expires_at TIMESTAMP WITHOUT TIME ZONE NULL",
     ]
     for stmt in pg_alters:
         await conn.execute(text(stmt))
+    await conn.execute(
+        text("CREATE UNIQUE INDEX IF NOT EXISTS ix_inbox_connect_token ON inbox (connect_token)")
+    )
     await conn.execute(
         text(
             "CREATE TABLE IF NOT EXISTS _app_schema_migrations (id VARCHAR(128) PRIMARY KEY)"
