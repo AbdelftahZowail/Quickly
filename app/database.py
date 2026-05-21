@@ -95,6 +95,10 @@ async def _run_migrations(conn) -> None:
         # 2026-05-21: one-time OAuth connect URL tokens
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS connect_token VARCHAR(256) NULL",
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS connect_token_expires_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        # 2026-05-21: ramp-up step size (emails added per day during warm-up)
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_step_size INTEGER NOT NULL DEFAULT 1",
+        # 2026-05-21: track when ramp-up was paused (for freezing warm-up)
+        "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_paused_at TIMESTAMP WITHOUT TIME ZONE NULL",
     ]
     for stmt in pg_alters:
         await conn.execute(text(stmt))
