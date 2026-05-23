@@ -358,6 +358,7 @@ const BADGE_STYLES = {
   catch_all:      'bg-yellow-100 text-yellow-700',
   unknown:        'bg-gray-200 text-gray-600',
   pending:        'bg-blue-100 text-blue-600',
+  needs_custom_email: 'bg-purple-100 text-purple-700',
 };
 
 function StatusBadge({ label }) {
@@ -439,6 +440,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         if (filters.status === 'unsubscribed' && l.status !== 'unsubscribed') return false;
         if (filters.status === 'wrong_person' && l.status !== 'wrong_person') return false;
         if (filters.status === 'completed' && l.status !== 'completed') return false;
+        if (filters.status === 'needs_custom_email' && l.status !== 'needs_custom_email') return false;
       }
       if (filters.interest !== 'all') {
         const intr = l.interest ?? l.interest_status ?? '';
@@ -901,7 +903,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         {/* Status */}
         <div className="flex items-center gap-1.5">
           <span className="font-medium text-gray-500 whitespace-nowrap">Status:</span>
-          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'contacted',l:'Contacted'},{v:'completed',l:'Completed'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsub'},{v:'wrong_person',l:'Wrong person'}].map(o => (
+          {[{v:'all',l:'All'},{v:'active',l:'Active'},{v:'contacted',l:'Contacted'},{v:'completed',l:'Completed'},{v:'bounced',l:'Bounced'},{v:'unsubscribed',l:'Unsub'},{v:'wrong_person',l:'Wrong person'},{v:'needs_custom_email',l:'Needs custom'}].map(o => (
             <button key={o.v} onClick={() => setFilter('status', o.v)}
               className={`px-2 py-0.5 rounded-full font-medium transition-colors ${
                 filters.status === o.v ? 'bg-teal-500 text-white' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-600 hover:border-teal-300'
@@ -2053,7 +2055,7 @@ const QUILL_FORMATS = [
   'list','bullet','link','blockquote','code-block',
 ];
 
-function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewText, onPreviewTextChange, isFirstSequence, campaign, required }) {
+function VariablesGuide() {
   const [copiedVar, setCopiedVar] = useState(null);
   const notify = useNotify();
 
@@ -2063,6 +2065,33 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewTe
     notify({ type: 'success', message: `Copied ${v}`, duration: 1500 });
     setTimeout(() => setCopiedVar(null), 1500);
   };
+
+  return (
+    <p className="mt-1 text-xs text-gray-500 flex flex-wrap items-center gap-1">
+      <span>Variables:</span>
+      {['{{name}}','{{email}}','{{unsubscribe_link}}'].map(v => (
+        <span key={v} className="relative inline-flex items-center">
+          <code
+            className="px-1 bg-gray-100 rounded cursor-pointer hover:bg-teal-100 transition-colors select-none"
+            title="Click to copy"
+            onClick={() => copyVar(v)}
+          >
+            {v}
+          </code>
+          {copiedVar === v && (
+            <span className="absolute -top-6 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-xs rounded px-1.5 py-0.5 whitespace-nowrap pointer-events-none z-10 animate-pulse">
+              Copied!
+            </span>
+          )}
+        </span>
+      ))}
+      <span className="text-gray-400">+ custom fields like <code className="px-1 bg-gray-100 rounded">{'{{company}}'}</code></span>
+    </p>
+  );
+}
+
+function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewText, onPreviewTextChange, isFirstSequence, campaign, required }) {
+  const notify = useNotify();
 
   const forcePlainAll   = campaign?.send_all_as_text;
   const forcePlainFirst = campaign?.send_first_as_text && isFirstSequence;
@@ -2132,26 +2161,7 @@ function SequenceBodyEditor({ value, onChange, isHtml, onIsHtmlChange, previewTe
           />
         </div>
       )}
-      <p className="mt-1 text-xs text-gray-500 flex flex-wrap items-center gap-1">
-        <span>Variables:</span>
-        {['{{name}}','{{email}}','{{unsubscribe_link}}'].map(v => (
-          <span key={v} className="relative inline-flex items-center">
-            <code
-              className="px-1 bg-gray-100 rounded cursor-pointer hover:bg-teal-100 transition-colors select-none"
-              title="Click to copy"
-              onClick={() => copyVar(v)}
-            >
-              {v}
-            </code>
-            {copiedVar === v && (
-              <span className="absolute -top-6 left-1/2 -translate-x-1/2 bg-gray-800 text-white text-xs rounded px-1.5 py-0.5 whitespace-nowrap pointer-events-none z-10 animate-pulse">
-                Copied!
-              </span>
-            )}
-          </span>
-        ))}
-        <span className="text-gray-400">+ custom fields like <code className="px-1 bg-gray-100 rounded">{'{{company}}'}</code></span>
-      </p>
+      <VariablesGuide />
     </div>
   );
 }
@@ -2326,16 +2336,372 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null, ed
 }
 
 // ─── Sequences Tab ────────────────────────────────────────────────────────────
+function PersonalizedSequenceSection({ sequence, sequences, personalizedSequences, leads, campaignId, onWriteCustom }) {
+  const [filter, setFilter] = useState('all');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const psIds = useMemo(() => personalizedSequences.map(s => s.id), [personalizedSequences]);
+
+  const leadsForCurrentStep = useMemo(() => {
+    return leads.filter(l => {
+      const personalized = l.personalized || [];
+      return personalized.some(p => p.sequence_id === sequence.id);
+    });
+  }, [leads, sequence.id]);
+
+  const leadsWithProgress = useMemo(() => {
+    return leadsForCurrentStep.map(lead => {
+      const perLead = lead.personalized || [];
+      const writtenCount = psIds.filter(sid => {
+        const entry = perLead.find(p => p.sequence_id === sid);
+        return entry?.written || entry?.already_sent;
+      }).length;
+      const totalCount = psIds.length;
+      const isPartial = writtenCount > 0 && writtenCount < totalCount;
+      return { ...lead, _writtenCount: writtenCount, _totalCount: totalCount, _isPartial: isPartial };
+    });
+  }, [leadsForCurrentStep, psIds]);
+
+  const filtered = useMemo(() => {
+    let result = leadsWithProgress;
+    if (filter === 'needs_writing') {
+      result = result.filter(l => {
+        const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+        return ps && !ps.written && !ps.already_sent;
+      });
+    } else if (filter === 'written') {
+      result = result.filter(l => {
+        const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+        return ps && (ps.written || ps.already_sent);
+      });
+    }
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(l =>
+        (l.email || '').toLowerCase().includes(q) ||
+        (l.name || '').toLowerCase().includes(q)
+      );
+    }
+    const partial = result.filter(l => l._isPartial);
+    const rest = result.filter(l => !l._isPartial);
+    partial.sort((a, b) => b._writtenCount - a._writtenCount);
+    return [...partial, ...rest];
+  }, [leadsWithProgress, filter, searchQuery, sequence.id]);
+
+  const writtenCount = leadsForCurrentStep.filter(l => {
+    const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+    return ps?.written || ps?.already_sent;
+  }).length;
+
+  if (leadsForCurrentStep.length === 0) {
+    return (
+      <div className="mt-6 pt-6 border-t border-gray-200">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Custom Emails per Lead</span>
+        <p className="text-xs text-gray-400 italic">No leads enrolled yet.</p>
+      </div>
+    );
+  }
+
+  const dotColor = (sid, lead) => {
+    const perLead = lead.personalized || [];
+    const entry = perLead.find(p => p.sequence_id === sid);
+    if (entry?.already_sent) return 'bg-gray-300';
+    if (entry?.written) return 'bg-emerald-400';
+    return 'bg-purple-300';
+  };
+
+  const dotTitle = (sid, idx, lead) => {
+    const perLead = lead.personalized || [];
+    const entry = perLead.find(p => p.sequence_id === sid);
+    const stepNum = (personalizedSequences.find(s => s.id === sid)?.position ?? 0) + 1;
+    if (entry?.already_sent) return `Step ${stepNum}: Sent`;
+    if (entry?.written) return `Step ${stepNum}: Written`;
+    return `Step ${stepNum}: Needs writing`;
+  };
+
+  const FILTERS = [
+    { key: 'all', label: 'All' },
+    { key: 'needs_writing', label: 'Needs writing' },
+    { key: 'written', label: 'Written' },
+  ];
+
+  return (
+    <div className="mt-6 pt-6 border-t border-gray-200">
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Custom Emails per Lead</span>
+        <span className="text-xs text-gray-400">{writtenCount} of {leadsForCurrentStep.length} written</span>
+      </div>
+
+      <div className="flex gap-1 mb-3">
+        {FILTERS.map(f => (
+          <button
+            key={f.key}
+            onClick={() => setFilter(f.key)}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+              filter === f.key
+                ? 'bg-purple-100 text-purple-700 border border-purple-200'
+                : 'bg-gray-50 text-gray-500 border border-gray-200 hover:bg-gray-100'
+            }`}
+          >
+            {f.label}
+          </button>
+        ))}
+      </div>
+
+      <input
+        className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 mb-3"
+        value={searchQuery}
+        onChange={e => setSearchQuery(e.target.value)}
+        placeholder="Search by email or name…"
+      />
+
+      <div className="max-h-[280px] overflow-y-auto border border-gray-200 rounded-lg">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-gray-50">
+            <tr className="border-b border-gray-200 text-xs text-gray-500">
+              <th className="px-3 py-2 text-left">Lead</th>
+              {personalizedSequences.length > 1 && (
+                <th className="px-3 py-2 text-center">
+                  <div className="flex items-center justify-center gap-1.5">
+                    {personalizedSequences.map((s, i) => (
+                      <span key={s.id} className={`w-4 text-center ${s.id === sequence.id ? 'font-bold text-purple-600' : ''}`}>{s.position + 1}</span>
+                    ))}
+                  </div>
+                </th>
+              )}
+              <th className="px-3 py-2 text-left">Status</th>
+              <th className="px-3 py-2 text-right">Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr><td colSpan={personalizedSequences.length > 1 ? 4 : 3} className="px-3 py-8 text-center text-gray-400 text-sm">No leads match your filter.</td></tr>
+            ) : (
+              filtered.map(l => {
+                const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+                const isWritten = ps?.written;
+                const alreadySent = ps?.already_sent;
+                return (
+                  <tr key={l.lead_id} className="border-b border-gray-100 hover:bg-gray-50">
+                    <td className="px-3 py-2">
+                      <span className="font-mono text-xs">{l.email}</span>
+                      {l.name && <span className="text-gray-400 text-xs ml-1">({l.name})</span>}
+                    </td>
+                    {personalizedSequences.length > 1 && (
+                      <td className="px-3 py-2">
+                        <div className="flex items-center justify-center gap-1.5">
+                          {personalizedSequences.map((s, i) => (
+                            <span
+                              key={s.id}
+                              title={dotTitle(s.id, i, l)}
+                              className={`inline-block w-2 h-2 rounded-full ${dotColor(s.id, l)} ${s.id === sequence.id ? 'ring-2 ring-purple-500' : ''} ${s.id !== sequence.id ? 'opacity-70' : ''}`}
+                            />
+                          ))}
+                        </div>
+                      </td>
+                    )}
+                    <td className="px-3 py-2">
+                      {alreadySent ? (
+                        <span className="text-gray-400 text-xs font-medium">Sent</span>
+                      ) : isWritten ? (
+                        <span className="text-green-600 text-xs font-medium">✓ Written</span>
+                      ) : (
+                        <span className="text-purple-600 text-xs font-medium">Needs writing</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {alreadySent ? (
+                        <span className="text-xs text-gray-400 italic">Sent</span>
+                      ) : (
+                        <button
+                          onClick={() => onWriteCustom(l, sequence)}
+                          className="px-2.5 py-1 text-xs font-medium rounded-lg border border-gray-300 transition-colors hover:bg-purple-50 hover:border-purple-300"
+                        >
+                          {isWritten ? 'Edit' : 'Write'}
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function CustomEmailEditorModal({ target, campaignId, onClose, onSaved }) {
+  const { lead, sequence } = target || {};
+  const [subject, setSubject] = useState('');
+  const [body, setBody] = useState('');
+  const [isHtml, setIsHtml] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [subjectError, setSubjectError] = useState('');
+  const [bodyError, setBodyError] = useState('');
+  const notify = useNotify();
+
+  useEffect(() => {
+    if (lead) {
+      const personalized = lead.personalized || [];
+      const ps = personalized.find(p => p.sequence_id === sequence?.id);
+      if (ps?.written) {
+        setSubject(ps.subject ?? '');
+        setBody(ps.body ?? '');
+      } else {
+        setSubject('');
+        setBody('');
+      }
+      setIsHtml(sequence?.is_html ?? false);
+      setSubjectError('');
+      setBodyError('');
+    }
+  }, [target]);
+
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  async function save() {
+    setSubjectError('');
+    setBodyError('');
+    let hasError = false;
+    if ((sequence.position ?? 0) === 0 && !subject.trim() && !sequence?.fallback_subject?.trim()) {
+      setSubjectError('Subject is required for the first email');
+      hasError = true;
+    }
+    if (!body.trim() && !sequence?.fallback_body?.trim()) {
+      setBodyError('Body is required when no fallback is set');
+      hasError = true;
+    }
+    if (hasError) return;
+    setSaving(true);
+    try {
+      await api.patch(`/campaigns/${campaignId}/leads/${lead.lead_id}/custom-email/${sequence.id}`, {
+        subject: subject || null,
+        body: body || null,
+        is_html: isHtml,
+      });
+      notify({ type: 'success', message: 'Custom email saved' });
+      onSaved?.();
+      onClose();
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!target) return null;
+
+  const hasFallback = sequence?.fallback_subject || sequence?.fallback_body;
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        data-darkreader-ignore
+        className="rounded-xl shadow-lg w-full max-w-2xl max-h-[90vh] flex flex-col mx-auto"
+        style={{ backgroundColor: 'white' }}
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="px-6 py-4 border-b flex items-center justify-between">
+          <div>
+            <h2 className="font-semibold text-gray-800">Custom Email</h2>
+            <p className="text-xs text-gray-400">
+              {lead.email}{lead.name ? ` — ${lead.name}` : ''}
+              {' · '}Step {(sequence.position ?? 0) + 1}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-2xl leading-none">×</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          {hasFallback && (
+            <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700 space-y-1">
+              {sequence.fallback_subject && <p><span className="font-semibold">Fallback subject:</span> {sequence.fallback_subject}</p>}
+              {sequence.fallback_body && <p><span className="font-semibold">Fallback body:</span> {sequence.fallback_body}</p>}
+              <p className="text-purple-500 mt-1">Shown as placeholder text when composing a custom email; used automatically if the field is left empty.</p>
+            </div>
+          )}
+          {!hasFallback && (
+            <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
+              Compose your custom email for this lead.
+            </div>
+          )}
+
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+            <input
+              className={`w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 ${subjectError ? 'border-red-400 focus:ring-red-300' : 'focus:ring-teal-300'}`}
+              value={subject}
+              onChange={e => { setSubject(e.target.value); setSubjectError(''); }}
+              placeholder={
+                sequence?.fallback_subject
+                  ? sequence.fallback_subject
+                  : (sequence.position ?? 0) === 0
+                    ? "Subject is required for the first email"
+                    : "Leave blank to reply in same thread"
+              }
+            />
+            {subjectError && <p className="text-xs text-red-500 mt-1">{subjectError}</p>}
+          </div>
+
+          <div>
+            <label className="flex items-center gap-1.5 cursor-pointer select-none mb-2">
+              <input type="checkbox" checked={isHtml} onChange={e => setIsHtml(e.target.checked)} />
+              <span className="text-sm font-medium">Send as HTML</span>
+            </label>
+            {isHtml ? (
+              <div className={`border rounded overflow-hidden ${bodyError ? 'border-red-400' : ''}`}>
+                <ReactQuill
+                  theme="snow" value={body} onChange={v => { setBody(v); setBodyError(''); }}
+                  modules={QUILL_MODULES} formats={QUILL_FORMATS}
+                  style={{ minHeight: '160px' }}
+                />
+              </div>
+            ) : (
+              <textarea
+                className={`w-full border rounded-lg p-3 font-mono text-sm focus:outline-none focus:ring-2 ${bodyError ? 'border-red-400 focus:ring-red-300' : 'focus:ring-teal-300'}`}
+                value={body}
+                onChange={e => { setBody(e.target.value); setBodyError(''); }}
+                rows={8}
+                placeholder={sequence?.fallback_body ? sequence.fallback_body : "Write your custom email body"}
+              />
+            )}
+            {bodyError && <p className="text-xs text-red-500 mt-1">{bodyError}</p>}
+          </div>
+
+          <VariablesGuide />
+        </div>
+
+        <div className="px-6 py-3 border-t flex justify-end gap-2">
+          <Button size="sm" variant="outline" onClick={onClose}>Cancel</Button>
+          <Button size="sm" variant="default" onClick={save} disabled={saving}>
+            {saving ? 'Saving…' : 'Save'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
   const notify      = useNotify();
   const confirm     = useConfirm();
   const loadingCtrl = useLoading();
   const [pos, setPos] = useState(sequences.length);
-  const [form, setForm] = useState({ subject: '', body: '', wait_days_after_previous: 0, is_html: false, preview_text: '' });
+  const [form, setForm] = useState({ subject: '', body: '', wait_days_after_previous: 0, is_html: false, preview_text: '', sequence_type: 'standard', fallback_subject: '', fallback_body: '' });
   const [msg,  setMsg]  = useState(null);
   const [editing,         setEditing]         = useState(null);
   const [originalEditing, setOriginalEditing] = useState(null);
   const [editDirty,       setEditDirty]       = useState(false);
+  const [customEmailTarget, setCustomEmailTarget] = useState(null); // { lead, sequence }
   const [showEditWarning, setShowEditWarning] = useState(false);
   const [previewSeq, setPreviewSeq] = useState(null);
   const [previewVariant, setPreviewVariant] = useState(null);
@@ -2354,8 +2720,13 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
 
   const selectedSeq = selectedIdx !== null && sequences[selectedIdx] ? sequences[selectedIdx] : null;
 
+  const personalizedSequences = useMemo(
+    () => sequences.filter(s => (s.sequence_type || 'standard') === 'personalized'),
+    [sequences],
+  );
+
   const openEdit = (seq) => {
-    const copy = { ...seq, is_html: seq.is_html ?? false, preview_text: seq.preview_text ?? '' };
+    const copy = { ...seq, is_html: seq.is_html ?? false, preview_text: seq.preview_text ?? '', sequence_type: seq.sequence_type ?? 'standard', fallback_subject: seq.fallback_subject ?? '', fallback_body: seq.fallback_body ?? '' };
     setEditing(copy);
     setOriginalEditing(copy);
     setEditDirty(false);
@@ -2379,7 +2750,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
     e.preventDefault();
     try {
       await api.post(`/campaigns/${campaignId}/sequences`, { ...form, position: pos });
-      setForm({ subject: '', body: '', wait_days_after_previous: 0, is_html: false, preview_text: '' });
+      setForm({ subject: '', body: '', wait_days_after_previous: 0, is_html: false, preview_text: '', sequence_type: 'standard', fallback_subject: '', fallback_body: '' });
       setMsg({ type: 'success', text: 'Sequence added' });
       setShowAddForm(false);
       refresh();
@@ -2496,9 +2867,10 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                     >
                       <div className="flex items-center gap-1 min-w-0">
                         <span className={`text-sm font-medium truncate min-w-0 flex-1 ${isActive ? 'text-teal-700' : 'text-gray-800'}`}>
-                          {s.subject || <em className="text-gray-400 font-normal text-xs">Reply in thread</em>}
+                          {s.subject || (s.sequence_type === 'personalized' ? <em className="text-purple-400 font-normal text-xs">Custom per lead</em> : <em className="text-gray-400 font-normal text-xs">Reply in thread</em>)}
                         </span>
                         {s.is_html && <span className="text-[9px] bg-blue-100 text-blue-600 rounded px-1 py-0.5 font-medium shrink-0">HTML</span>}
+                        {s.sequence_type === 'personalized' && <span className="text-[9px] bg-purple-100 text-purple-600 rounded px-1 py-0.5 font-medium shrink-0">Personalized</span>}
                       </div>
                       <div className="text-[11px] text-gray-400 mt-0.5">Day {cumulDay}{idx === 0 ? ' (start)' : ''}</div>
                     </button>
@@ -2546,18 +2918,53 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                 <p className="text-xs text-gray-400">Modify the email content and timing</p>
               </div>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => { setPreviewSeq(editing); setPreviewVariant(null); setPreviewOverride(editing); }}>Preview</Button>
+                {(editing.sequence_type || 'standard') !== 'personalized' && (
+                  <Button size="sm" variant="outline" onClick={() => { setPreviewSeq(editing); setPreviewVariant(null); setPreviewOverride(editing); }}>Preview</Button>
+                )}
                 <Button size="sm" variant="destructive" onClick={() => deleteSeq(editing)}>Delete</Button>
               </div>
             </div>
             <form onSubmit={saveEdit} className="flex-1 overflow-y-auto p-6 space-y-5">
+              {(editing.sequence_type || 'standard') === 'personalized' ? (
+                <>
+                  <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
+                    This is a personalized step. Write fallback content that will appear as placeholder text when composing each lead's custom email.
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Fallback subject</label>
+                    <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300" value={editing.fallback_subject || ''} onChange={e => updateEditing({ fallback_subject: e.target.value })} placeholder={(editing.position ?? 0) === 0 ? "Leave blank — first email requires a subject per lead" : "Leave blank — custom subject will reply in thread"} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Fallback body</label>
+                    <textarea className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 min-h-[120px] font-mono" value={editing.fallback_body || ''} onChange={e => updateEditing({ fallback_body: e.target.value })} placeholder="Write a fallback template to use when composing the custom email per lead" />
+                    <VariablesGuide />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                    <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={editing.subject || ''} onChange={e => updateEditing({ subject: e.target.value })} placeholder="Leave blank to reply in same thread" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
+                    <SequenceBodyEditor value={editing.body} onChange={val => updateEditing({ body: val })} isHtml={editing.is_html ?? false} onIsHtmlChange={v => updateEditing({ is_html: v })} previewText={editing.preview_text ?? ''} onPreviewTextChange={v => updateEditing({ preview_text: v })} isFirstSequence={editing.position === 0} campaign={campaign} required />
+                  </div>
+                </>
+              )}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
-                <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={editing.subject || ''} onChange={e => updateEditing({ subject: e.target.value })} placeholder="Leave blank to reply in same thread" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
-                <SequenceBodyEditor value={editing.body} onChange={val => updateEditing({ body: val })} isHtml={editing.is_html ?? false} onIsHtmlChange={v => updateEditing({ is_html: v })} previewText={editing.preview_text ?? ''} onPreviewTextChange={v => updateEditing({ preview_text: v })} isFirstSequence={editing.position === 0} campaign={campaign} required />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Sequence type</label>
+                <select
+                  className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={editing.sequence_type || 'standard'}
+                  onChange={e => updateEditing({ sequence_type: e.target.value })}
+                >
+                  <option value="standard">Standard — same content for all leads</option>
+                  <option value="personalized">Personalized — custom content per lead</option>
+                </select>
+                {(editing.sequence_type || 'standard') === 'personalized' && (
+                  <p className="text-xs text-purple-600 mt-1">Leads will need a custom email written for this step before sending starts.</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Wait days after previous step</label>
@@ -2575,30 +2982,50 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
           <div className="flex-1 flex flex-col overflow-y-auto">
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-gray-800">Step {selectedSeq.position + 1}{selectedSeq.subject ? ` — ${selectedSeq.subject}` : ' — Reply in thread'}</h3>
+                <h3 className="font-semibold text-gray-800">Step {selectedSeq.position + 1}{selectedSeq.subject ? ` — ${selectedSeq.subject}` : (selectedSeq.sequence_type === 'personalized' ? ' — Custom per lead' : ' — Reply in thread')}</h3>
                 <p className="text-xs text-gray-400">{selectedSeq.wait_days_after_previous}d wait{selectedSeq.is_html ? ' · HTML' : ' · Plain text'}{' · Day ' + getCumulativeDay(selectedIdx)}</p>
               </div>
               <div className="flex gap-2">
-                <Button size="sm" variant="outline" onClick={() => { setPreviewSeq(selectedSeq); setPreviewOverride(null); }}>Preview</Button>
+                {(selectedSeq.sequence_type || 'standard') !== 'personalized' && (
+                  <Button size="sm" variant="outline" onClick={() => { setPreviewSeq(selectedSeq); setPreviewOverride(null); }}>Preview</Button>
+                )}
                 <Button size="sm" variant="default" onClick={() => openEdit(selectedSeq)}>Edit</Button>
                 <Button size="sm" variant="destructive" onClick={() => deleteSeq(selectedSeq)}>Delete</Button>
               </div>
             </div>
             <div className="flex-1 overflow-y-auto p-6">
-              <div className="mb-5">
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Subject</span>
-                <p className="text-gray-800 font-medium">{selectedSeq.subject || <em className="text-gray-400 font-normal">Reply in same thread</em>}</p>
-              </div>
-              <div>
-                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
-                {selectedSeq.is_html ? (
-                  <div className="border rounded-lg p-5 bg-white prose prose-sm max-w-none min-h-[200px]" dangerouslySetInnerHTML={{ __html: selectedSeq.body }} />
-                ) : (
-                  <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800 min-h-[200px]">{selectedSeq.body || '(empty)'}</pre>
-                )}
-              </div>
+              {(selectedSeq.sequence_type || 'standard') !== 'personalized' && (
+                <>
+                  <div className="mb-5">
+                    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-1">Subject</span>
+                    <p className="text-gray-800 font-medium">{selectedSeq.subject || <em className="text-gray-400 font-normal">Reply in same thread</em>}</p>
+                  </div>
+                  <div>
+                    <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
+                    {selectedSeq.is_html ? (
+                      <div className="border rounded-lg p-5 bg-white prose prose-sm max-w-none min-h-[200px]" dangerouslySetInnerHTML={{ __html: selectedSeq.body }} />
+                    ) : (
+                      <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800 min-h-[200px]">{selectedSeq.body || '(empty)'}</pre>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* ── Personalized Sequence: Custom Emails ── */}
+              {(selectedSeq.sequence_type || 'standard') === 'personalized' && (
+                <PersonalizedSequenceSection
+                  sequence={selectedSeq}
+                  sequences={sequences}
+                  personalizedSequences={personalizedSequences}
+                  leads={leads}
+                  campaignId={campaignId}
+                  onWriteCustom={(lead, seq) => setCustomEmailTarget({ lead, sequence: seq })}
+                  onRefresh={refresh}
+                />
+              )}
 
               {/* ── A/B Variants ── */}
+              {(selectedSeq.sequence_type || 'standard') !== 'personalized' && (
               <div className="mt-6 pt-6 border-t border-gray-200">
                 <div className="flex items-center justify-between mb-3">
                   <div>
@@ -2670,6 +3097,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                   </div>
                 )}
               </div>
+              )}
             </div>
           </div>
         )}
@@ -2682,13 +3110,46 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
             </div>
             <form onSubmit={submit} className="flex-1 overflow-y-auto p-6 space-y-5">
               {msg && <div className={`rounded-lg px-3 py-2 text-sm ${msg.type === 'error' ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>{msg.text}</div>}
+              {(form.sequence_type || 'standard') === 'personalized' ? (
+                <>
+                  <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
+                    This is a personalized step. Write fallback content that will appear as placeholder text when composing each lead's custom email.
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Fallback subject</label>
+                    <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300" value={form.fallback_subject} onChange={e => setForm(f => ({ ...f, fallback_subject: e.target.value }))} placeholder={pos === 0 ? "Leave blank — first email requires a subject per lead" : "Leave blank — custom subject will reply in thread"} />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Fallback body</label>
+                    <textarea className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-300 min-h-[120px] font-mono" value={form.fallback_body} onChange={e => setForm(f => ({ ...f, fallback_body: e.target.value }))} placeholder="Write a fallback template to use when composing the custom email per lead" />
+                    <VariablesGuide />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
+                    <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={form.subject} onChange={e => setForm(f => ({ ...f, subject: e.target.value }))} placeholder="Leave blank to reply in same thread" />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
+                    <SequenceBodyEditor value={form.body} onChange={val => setForm(f => ({ ...f, body: val }))} isHtml={form.is_html} onIsHtmlChange={v => setForm(f => ({ ...f, is_html: v }))} previewText={form.preview_text ?? ''} onPreviewTextChange={v => setForm(f => ({ ...f, preview_text: v }))} isFirstSequence={pos === 0} campaign={campaign} required />
+                  </div>
+                </>
+              )}
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Subject</label>
-                <input className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300" value={form.subject} onChange={e => setForm(f => ({ ...f, subject: e.target.value }))} placeholder="Leave blank to reply in same thread" />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Email Body *</label>
-                <SequenceBodyEditor value={form.body} onChange={val => setForm(f => ({ ...f, body: val }))} isHtml={form.is_html} onIsHtmlChange={v => setForm(f => ({ ...f, is_html: v }))} previewText={form.preview_text ?? ''} onPreviewTextChange={v => setForm(f => ({ ...f, preview_text: v }))} isFirstSequence={pos === 0} campaign={campaign} required />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Sequence type</label>
+                <select
+                  className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+                  value={form.sequence_type || 'standard'}
+                  onChange={e => { const newType = e.target.value; setForm(f => ({ ...f, sequence_type: newType })); }}
+                >
+                  <option value="standard">Standard — same content for all leads</option>
+                  <option value="personalized">Personalized — custom content per lead</option>
+                </select>
+                {(form.sequence_type || 'standard') === 'personalized' && (
+                  <p className="text-xs text-purple-600 mt-1">Leads will need a custom email written for this step before sending starts.</p>
+                )}
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Wait days after previous step</label>
@@ -2719,6 +3180,15 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
 
       {previewSeq && (
         <PreviewModal sequence={previewSeq} campaignId={campaignId} leads={leads} variant={previewVariant} editingOverride={previewOverride} onClose={() => { setPreviewSeq(null); setPreviewVariant(null); setPreviewOverride(null); }} />
+      )}
+
+      {customEmailTarget && (
+        <CustomEmailEditorModal
+          target={customEmailTarget}
+          campaignId={campaignId}
+          onClose={() => setCustomEmailTarget(null)}
+          onSaved={refresh}
+        />
       )}
     </div>
   );

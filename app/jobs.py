@@ -36,6 +36,7 @@ from app.models import (
     LeadUnsubscribeToken,
     GmailMessage,
     Office365Message,
+    CustomEmailOverride,
 )
 from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
@@ -345,26 +346,62 @@ async def run_send_job():
                 seq_is_html      = sequence.is_html
                 seq_preview_text = getattr(sequence, 'preview_text', None)
 
-                enabled_variants = [
-                    v for v in getattr(sequence, 'variants', []) if v.enabled
-                ]
-                if enabled_variants:
-                    # options: None = default content, or any enabled variant
-                    options = [None] + enabled_variants
-                    chosen = random.choice(options)
-                    if chosen is not None:
-                        chosen_variant_id = chosen.id
-                        if chosen.subject is not None:
-                            seq_subject = chosen.subject
-                        if chosen.body:
-                            seq_body = chosen.body
-                        if chosen.is_html is not None:
-                            seq_is_html = chosen.is_html
-                        if chosen.preview_text is not None:
-                            seq_preview_text = chosen.preview_text
+                if getattr(sequence, "sequence_type", "standard") != "personalized":
+                    enabled_variants = [
+                        v for v in getattr(sequence, 'variants', []) if v.enabled
+                    ]
+                    if enabled_variants:
+                        # options: None = default content, or any enabled variant
+                        options = [None] + enabled_variants
+                        chosen = random.choice(options)
+                        if chosen is not None:
+                            chosen_variant_id = chosen.id
+                            if chosen.subject is not None:
+                                seq_subject = chosen.subject
+                            if chosen.body:
+                                seq_body = chosen.body
+                            if chosen.is_html is not None:
+                                seq_is_html = chosen.is_html
+                            if chosen.preview_text is not None:
+                                seq_preview_text = chosen.preview_text
+                            log.info(
+                                "A/B: slot=%s seq=%s chose variant_id=%s label=%r",
+                                slot.id, sequence.id, chosen_variant_id, chosen.label,
+                            )
+
+                # ── Personalized sequence override ────────────────────────────
+                if getattr(sequence, "sequence_type", "standard") == "personalized":
+                    ov_res = await session.execute(
+                        select(CustomEmailOverride).where(
+                            CustomEmailOverride.campaign_lead_id == cl.id,
+                            CustomEmailOverride.sequence_id == sequence.id,
+                        )
+                    )
+                    override = ov_res.scalar_one_or_none()
+                    if override:
+                        if override.subject is not None:
+                            seq_subject = override.subject
+                        elif sequence.fallback_subject:
+                            seq_subject = sequence.fallback_subject
+                        if override.body is not None:
+                            seq_body = override.body
+                        elif sequence.fallback_body:
+                            seq_body = sequence.fallback_body
+                        if override.is_html is not None:
+                            seq_is_html = override.is_html
                         log.info(
-                            "A/B: slot=%s seq=%s chose variant_id=%s label=%r",
-                            slot.id, sequence.id, chosen_variant_id, chosen.label,
+                            "Personalized override: slot=%s seq=%s lead=%s using custom content",
+                            slot.id, sequence.id, lead.id,
+                        )
+                    elif sequence.fallback_subject or sequence.fallback_body:
+                        # No override row — use fallback content as safety net
+                        if sequence.fallback_subject:
+                            seq_subject = sequence.fallback_subject
+                        if sequence.fallback_body:
+                            seq_body = sequence.fallback_body
+                        log.info(
+                            "Personalized fallback (no override): slot=%s seq=%s lead=%s",
+                            slot.id, sequence.id, lead.id,
                         )
 
                 if (seq_subject or "").strip() == "":
@@ -1077,23 +1114,58 @@ async def send_slot_job(slot_id: int) -> None:
         seq_is_html      = sequence.is_html
         seq_preview_text = getattr(sequence, "preview_text", None)
 
-        enabled_variants = [v for v in getattr(sequence, "variants", []) if v.enabled]
-        if enabled_variants:
-            options = [None] + enabled_variants
-            chosen = random.choice(options)
-            if chosen is not None:
-                chosen_variant_id = chosen.id
-                if chosen.subject is not None:
-                    seq_subject = chosen.subject
-                if chosen.body:
-                    seq_body = chosen.body
-                if chosen.is_html is not None:
-                    seq_is_html = chosen.is_html
-                if chosen.preview_text is not None:
-                    seq_preview_text = chosen.preview_text
+        if getattr(sequence, "sequence_type", "standard") != "personalized":
+            enabled_variants = [v for v in getattr(sequence, "variants", []) if v.enabled]
+            if enabled_variants:
+                options = [None] + enabled_variants
+                chosen = random.choice(options)
+                if chosen is not None:
+                    chosen_variant_id = chosen.id
+                    if chosen.subject is not None:
+                        seq_subject = chosen.subject
+                    if chosen.body:
+                        seq_body = chosen.body
+                    if chosen.is_html is not None:
+                        seq_is_html = chosen.is_html
+                    if chosen.preview_text is not None:
+                        seq_preview_text = chosen.preview_text
+                    log.info(
+                        "send_slot_job: A/B: slot=%s seq=%s chose variant_id=%s label=%r",
+                        slot.id, sequence.id, chosen_variant_id, chosen.label,
+                    )
+
+        # ── Personalized sequence override ───────────────────────────────
+        if getattr(sequence, "sequence_type", "standard") == "personalized":
+            ov_res = await session.execute(
+                select(CustomEmailOverride).where(
+                    CustomEmailOverride.campaign_lead_id == cl.id,
+                    CustomEmailOverride.sequence_id == sequence.id,
+                )
+            )
+            override = ov_res.scalar_one_or_none()
+            if override:
+                if override.subject is not None:
+                    seq_subject = override.subject
+                elif sequence.fallback_subject:
+                    seq_subject = sequence.fallback_subject
+                if override.body is not None:
+                    seq_body = override.body
+                elif sequence.fallback_body:
+                    seq_body = sequence.fallback_body
+                if override.is_html is not None:
+                    seq_is_html = override.is_html
                 log.info(
-                    "send_slot_job: A/B: slot=%s seq=%s chose variant_id=%s label=%r",
-                    slot.id, sequence.id, chosen_variant_id, chosen.label,
+                    "send_slot_job: Personalized override: slot=%s seq=%s lead=%s",
+                    slot.id, sequence.id, lead.id,
+                )
+            elif sequence.fallback_subject or sequence.fallback_body:
+                if sequence.fallback_subject:
+                    seq_subject = sequence.fallback_subject
+                if sequence.fallback_body:
+                    seq_body = sequence.fallback_body
+                log.info(
+                    "send_slot_job: Personalized fallback (no override): slot=%s seq=%s lead=%s",
+                    slot.id, sequence.id, lead.id,
                 )
 
         # ── Thread / reply chain for follow-up sequences ─────────────────

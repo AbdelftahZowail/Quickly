@@ -30,6 +30,7 @@ from app.models import (
     EmailLog,
     CampaignInbox,
     LeadReply,
+    CustomEmailOverride,
 )
 from app.campaign_lead_status import (
     ENROLLMENT_STATUSES,
@@ -51,6 +52,7 @@ from app.schemas import (
     SequenceVariantCreate,
     SequenceVariantUpdate,
     SequenceVariantResponse,
+    CustomEmailWrite,
 )
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.routers.leads import _fetch_lead_interactions_batch
@@ -230,6 +232,18 @@ async def list_campaigns(db: AsyncSession = Depends(get_db)):
         )
         for cid, cnt in res.all():
             stats_map.setdefault(cid, {})["unsubscribed"] = cnt
+
+        # needs_custom_email count
+        res = await db.execute(
+            select(CampaignLead.campaign_id, func.count())
+            .where(
+                CampaignLead.campaign_id.in_(campaign_ids),
+                CampaignLead.enrollment_status == "needs_custom_email",
+            )
+            .group_by(CampaignLead.campaign_id)
+        )
+        for cid, cnt in res.all():
+            stats_map.setdefault(cid, {})["needs_custom_email"] = cnt
     # convert raw counts stored in open_rate/click_rate keys into fractions
     for cid, stats in stats_map.items():
         sent = stats.get("emails_sent", 0) or 0
@@ -400,6 +414,16 @@ async def get_campaign(campaign_id: int, db: AsyncSession = Depends(get_db)):
         .where(Sequence.campaign_id == campaign_id)
     )
     stats["sequences"] = res.scalar() or 0
+    # needs_custom_email count
+    res = await db.execute(
+        select(func.count())
+        .select_from(CampaignLead)
+        .where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.enrollment_status == "needs_custom_email",
+        )
+    )
+    stats["needs_custom_email"] = res.scalar() or 0
     return _campaign_to_response(campaign, inbox_map.get(campaign_id, []), stats)
 
 
@@ -613,6 +637,9 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
             wait_days_after_previous=seq.wait_days_after_previous,
             is_html=seq.is_html,
             preview_text=seq.preview_text,
+            sequence_type=getattr(seq, "sequence_type", "standard"),
+            fallback_subject=getattr(seq, "fallback_subject", None),
+            fallback_body=getattr(seq, "fallback_body", None),
         )
         db.add(new_seq)
     
@@ -654,10 +681,16 @@ async def create_sequence(
         wait_days_after_previous=data.wait_days_after_previous,
         is_html=data.is_html,
         preview_text=data.preview_text,
+        sequence_type=getattr(data, "sequence_type", "standard"),
+        fallback_subject=data.fallback_subject,
+        fallback_body=data.fallback_body,
     )
     db.add(seq)
     await db.flush()
-    log.info("create_sequence: campaign=%s position=%s id=%s", campaign_id, data.position, seq.id)
+    log.info("create_sequence: campaign=%s position=%s type=%s id=%s", campaign_id, data.position, seq.sequence_type, seq.id)
+    # If this is a personalized sequence, reconcile existing leads' statuses
+    if getattr(seq, "sequence_type", "standard") == "personalized":
+        await reconcile_personalized_status(db, campaign_id, background_tasks)
     # Recalculate queue so already-enrolled leads get slots for the new sequence
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
@@ -699,6 +732,15 @@ async def update_sequence(
         seq.is_html = data.is_html
     if 'preview_text' in data.model_fields_set:
         seq.preview_text = data.preview_text
+    if data.sequence_type is not None:
+        old_type = seq.sequence_type
+        seq.sequence_type = data.sequence_type
+        if data.sequence_type != old_type:
+            await reconcile_personalized_status(db, campaign_id, background_tasks)
+    if data.fallback_subject is not None:
+        seq.fallback_subject = data.fallback_subject
+    if data.fallback_body is not None:
+        seq.fallback_body = data.fallback_body
     if data.wait_days_after_previous is not None:
         seq.wait_days_after_previous = data.wait_days_after_previous
         await db.flush()
@@ -735,6 +777,7 @@ async def delete_sequence(
     if not seq:
         raise HTTPException(404, "Sequence not found")
     deleted_position = seq.position
+    was_personalized = getattr(seq, "sequence_type", "standard") == "personalized"
     await db.delete(seq)
     await db.flush()
     # Re-number remaining sequences to close the gap
@@ -746,6 +789,9 @@ async def delete_sequence(
     for s in remaining.scalars().all():
         s.position -= 1
     await db.flush()
+    # If we deleted a personalized sequence, reconcile leads' statuses
+    if was_personalized:
+        await reconcile_personalized_status(db, campaign_id, background_tasks)
     cl_res = await db.execute(select(CampaignLead.id).where(CampaignLead.campaign_id == campaign_id))
     cl_ids = [r[0] for r in cl_res.all()]
     if cl_ids:
@@ -769,6 +815,8 @@ async def list_variants(
 ):
     """List all A/B variants for a sequence step."""
     seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    if getattr(seq, "sequence_type", "standard") == "personalized":
+        return []
     result = await db.execute(
         select(SequenceVariant)
         .where(SequenceVariant.sequence_id == seq.id)
@@ -790,6 +838,8 @@ async def create_variant(
 ):
     """Create a new A/B variant for a sequence step."""
     seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    if getattr(seq, "sequence_type", "standard") == "personalized":
+        raise HTTPException(400, "A/B variants are not supported for personalized sequences")
     variant = SequenceVariant(
         sequence_id=seq.id,
         label=data.label or "",
@@ -819,6 +869,8 @@ async def update_variant(
 ):
     """Update an A/B variant (partial update)."""
     seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    if getattr(seq, "sequence_type", "standard") == "personalized":
+        raise HTTPException(400, "A/B variants are not supported for personalized sequences")
     result = await db.execute(
         select(SequenceVariant).where(
             SequenceVariant.id == variant_id,
@@ -854,6 +906,8 @@ async def delete_variant(
 ):
     """Delete an A/B variant."""
     seq = await _get_sequence_or_404(campaign_id, sequence_id, db)
+    if getattr(seq, "sequence_type", "standard") == "personalized":
+        raise HTTPException(400, "A/B variants are not supported for personalized sequences")
     result = await db.execute(
         select(SequenceVariant).where(
             SequenceVariant.id == variant_id,
@@ -949,6 +1003,45 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
     )
     total_sequences = seq_count_result.scalar() or 0
 
+    # Personalized sequence info
+    personalized_seq_result = await db.execute(
+        select(Sequence.id, Sequence.position)
+        .where(Sequence.campaign_id == campaign_id, Sequence.sequence_type == "personalized")
+        .order_by(Sequence.position)
+    )
+    personalized_sequences = list(personalized_seq_result.all())
+    personalized_seq_ids = [s.id for s in personalized_sequences]
+
+    # Fetch all custom email overrides for these leads' campaign_leads
+    cl_ids = [cl.id for cl, _lead in rows]
+    override_map: dict[int, set[int]] = {}  # campaign_lead_id -> set of sequence_ids with overrides
+    override_details: dict[int, dict[int, dict]] = {}  # cl_id -> seq_id -> {subject, body, is_html}
+    if personalized_seq_ids and cl_ids:
+        ov_result = await db.execute(
+            select(CustomEmailOverride).where(CustomEmailOverride.campaign_lead_id.in_(cl_ids))
+        )
+        for ov in ov_result.scalars().all():
+            override_map.setdefault(ov.campaign_lead_id, set()).add(ov.sequence_id)
+            override_details.setdefault(ov.campaign_lead_id, {})[ov.sequence_id] = {
+                "subject": ov.subject,
+                "body": ov.body,
+                "is_html": ov.is_html,
+            }
+
+    # Already-sent tracking per lead per sequence position
+    sent_positions: dict[int, set[int]] = {}  # lead_id -> set of sequence_positions already sent
+    if lead_ids:
+        sent_result = await db.execute(
+            select(EmailLog.lead_id, EmailLog.sequence_index)
+            .where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+            )
+            .distinct()
+        )
+        for lead_id, seq_idx in sent_result.all():
+            sent_positions.setdefault(lead_id, set()).add(seq_idx)
+
     inbox_pairs = {(lead.id, campaign_id) for _cl, lead in rows}
     inbox_by_lead = await from_inbox_email_by_lead_campaign(db, inbox_pairs)
     interactions_map = await _fetch_lead_interactions_batch(db, lead_ids) if lead_ids else {}
@@ -961,6 +1054,30 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
         if next_step >= total_sequences:
             return "Complete"
         return f"Step {next_step + 1}"
+
+    def custom_email_status_for_cl(cl_id: int, lead_id: int) -> dict:
+        if not personalized_sequences:
+            return {"needs_custom_email": False, "personalized": []}
+        written = override_map.get(cl_id, set())
+        sent_for_lead = sent_positions.get(lead_id, set())
+        statuses = []
+        all_written = True
+        for sid, spos in personalized_sequences:
+            is_written = sid in written
+            details = override_details.get(cl_id, {}).get(sid, {})
+            statuses.append({
+                "sequence_id": sid,
+                "sequence_position": spos,
+                "subject": details.get("subject"),
+                "written": is_written,
+                "already_sent": spos in sent_for_lead,
+            })
+            if not is_written:
+                all_written = False
+        return {
+            "needs_custom_email": not all_written,
+            "personalized": statuses,
+        }
 
     return [
         {
@@ -981,6 +1098,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "provider": lead.provider,
             "from_inbox_email": inbox_by_lead.get((lead.id, campaign_id)),
             "interactions": interactions_map.get(lead.id, []),
+            **custom_email_status_for_cl(cl.id, lead.id),
         }
         for cl, lead in rows
     ]
@@ -1041,6 +1159,277 @@ async def patch_campaign_lead(
         "status": cl.enrollment_status,
         "interest": cl.interest_status,
         "sending_paused": cl.sending_paused,
+    }
+
+
+# ── Personalized sequence reconciliation ─────────────────────────────────
+async def reconcile_personalized_status(
+    db: AsyncSession,
+    campaign_id: int,
+    background_tasks: BackgroundTasks | None = None,
+    campaign_leads: list[CampaignLead] | None = None,
+) -> dict:
+    """Re-evaluate enrollment status for leads based on personalized sequence requirements.
+
+    For each CampaignLead, checks which personalized sequences are:
+      - already_sent  (EmailLog exists at that position for this lead)
+      - has_override  (CustomEmailOverride row exists)
+      - needs_writing (neither sent nor overridden)
+
+    Leads with pending personalized work are set to ``needs_custom_email``.
+    Leads whose pending work is done are set to ``active``.
+    Terminal statuses (bounced, unsubscribed, wrong_person, completed) are left alone.
+
+    Idempotent — safe to call multiple times.
+    """
+    await db.flush()  # Ensure pending changes visible to queries
+    pers_seq_result = await db.execute(
+        select(Sequence.id, Sequence.position)
+        .where(
+            Sequence.campaign_id == campaign_id,
+            Sequence.sequence_type == "personalized",
+        )
+        .order_by(Sequence.position)
+    )
+    personalized_seqs = list(pers_seq_result.all())
+
+    if campaign_leads is None:
+        cl_result = await db.execute(
+            select(CampaignLead).where(CampaignLead.campaign_id == campaign_id)
+        )
+        campaign_leads = list(cl_result.scalars().all())
+
+    if not campaign_leads:
+        return {
+            "ok": True,
+            "transitioned_to_needs_custom_email": 0,
+            "transitioned_to_active": 0,
+            "total_checked": 0,
+        }
+
+    if not personalized_seqs:
+        # No personalized sequences — move any stuck needs_custom_email leads back to active
+        to_active = 0
+        for cl in campaign_leads:
+            if cl.enrollment_status == "needs_custom_email":
+                cl.enrollment_status = "active"
+                to_active += 1
+        if to_active > 0:
+            await db.flush()
+            await db.commit()
+            if background_tasks is not None:
+                from app.routers.schedule import enqueue_global_recalculate
+                enqueue_global_recalculate(background_tasks)
+                log.info(
+                    "reconcile_personalized: campaign=%s no personalized seqs → %d → active",
+                    campaign_id, to_active,
+                )
+        return {
+            "ok": True,
+            "transitioned_to_needs_custom_email": 0,
+            "transitioned_to_active": to_active,
+            "total_checked": len(campaign_leads),
+        }
+
+    # Gather bulk data
+    lead_ids = [cl.lead_id for cl in campaign_leads]
+    cl_ids = [cl.id for cl in campaign_leads]
+    pers_seq_ids = {s.id for s in personalized_seqs}
+
+    # Already-sent positions per lead
+    sent_result = await db.execute(
+        select(EmailLog.lead_id, EmailLog.sequence_index)
+        .where(
+            EmailLog.campaign_id == campaign_id,
+            EmailLog.lead_id.in_(lead_ids),
+        )
+        .distinct()
+    )
+    sent_map: dict[int, set[int]] = {}
+    for lid, pos in sent_result.all():
+        sent_map.setdefault(lid, set()).add(pos)
+
+    # CustomEmailOverride rows per campaign_lead
+    ov_result = await db.execute(
+        select(CustomEmailOverride.campaign_lead_id, CustomEmailOverride.sequence_id)
+        .where(
+            CustomEmailOverride.campaign_lead_id.in_(cl_ids),
+            CustomEmailOverride.sequence_id.in_(pers_seq_ids),
+        )
+    )
+    override_map: dict[int, set[int]] = {}
+    for clid, sid in ov_result.all():
+        override_map.setdefault(clid, set()).add(sid)
+
+    to_needs_custom = 0
+    to_active = 0
+
+    for cl in campaign_leads:
+        current = cl.enrollment_status or "active"
+        if current in ("bounced", "unsubscribed", "wrong_person", "completed"):
+            continue
+
+        lead_sent = sent_map.get(cl.lead_id, set())
+        lead_overrides = override_map.get(cl.id, set())
+
+        pending = 0
+        for seq_id, seq_pos in personalized_seqs:
+            if seq_pos not in lead_sent and seq_id not in lead_overrides:
+                pending += 1
+
+        if pending > 0:
+            if current in ("active", "contacted"):
+                cl.enrollment_status = "needs_custom_email"
+                to_needs_custom += 1
+        else:
+            if current == "needs_custom_email":
+                cl.enrollment_status = "active"
+                to_active += 1
+
+    await db.flush()
+    if to_needs_custom > 0 or to_active > 0:
+        await db.commit()
+        if background_tasks is not None:
+            from app.routers.schedule import enqueue_global_recalculate
+            enqueue_global_recalculate(background_tasks)
+            log.info(
+                "reconcile_personalized: campaign=%s → needs_custom=%d → active=%d checked=%d",
+                campaign_id, to_needs_custom, to_active, len(campaign_leads),
+            )
+
+    return {
+        "ok": True,
+        "transitioned_to_needs_custom_email": to_needs_custom,
+        "transitioned_to_active": to_active,
+        "total_checked": len(campaign_leads),
+    }
+
+
+@router.post("/{campaign_id}/reconcile-personalized")
+async def reconcile_personalized_endpoint(
+    campaign_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Manually trigger personalized sequence reconciliation for a campaign.
+
+    Re-evaluates every lead's enrollment status based on the current
+    personalized sequences and any CustomEmailOverride rows.  Leads that
+    still need custom content are set to ``needs_custom_email``; leads
+    whose work is complete are returned to ``active``.
+    """
+    camp_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    if not camp_result.scalar_one_or_none():
+        raise HTTPException(404, "Campaign not found")
+    return await reconcile_personalized_status(db, campaign_id, background_tasks)
+
+
+@router.patch("/{campaign_id}/leads/{lead_id}/custom-email/{sequence_id}")
+async def write_custom_email(
+    campaign_id: int,
+    lead_id: int,
+    sequence_id: int,
+    payload: CustomEmailWrite,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Write (or update) a custom email for a lead on a personalized sequence step.
+
+    When all personalized sequences in the campaign have overrides for this
+    lead, the enrollment status transitions from ``needs_custom_email`` to
+    ``active`` and queue slots are created.
+    """
+    # Validate sequence belongs to campaign and is personalized
+    seq_result = await db.execute(
+        select(Sequence).where(
+            Sequence.id == sequence_id,
+            Sequence.campaign_id == campaign_id,
+        )
+    )
+    sequence = seq_result.scalar_one_or_none()
+    if not sequence:
+        raise HTTPException(404, "Sequence not found in this campaign")
+    if getattr(sequence, "sequence_type", "standard") != "personalized":
+        raise HTTPException(400, "Sequence is not a personalized sequence")
+
+    # Find the campaign_lead
+    cl_result = await db.execute(
+        select(CampaignLead).where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id == lead_id,
+        )
+    )
+    cl = cl_result.scalar_one_or_none()
+    if not cl:
+        raise HTTPException(404, "Lead not enrolled in this campaign")
+
+    # Upsert the custom email override
+    ov_result = await db.execute(
+        select(CustomEmailOverride).where(
+            CustomEmailOverride.campaign_lead_id == cl.id,
+            CustomEmailOverride.sequence_id == sequence_id,
+        )
+    )
+    override = ov_result.scalar_one_or_none()
+    if override:
+        override.subject = payload.subject
+        override.body = payload.body
+        override.is_html = payload.is_html
+    else:
+        override = CustomEmailOverride(
+            campaign_lead_id=cl.id,
+            sequence_id=sequence_id,
+            subject=payload.subject,
+            body=payload.body,
+            is_html=payload.is_html,
+        )
+        db.add(override)
+    await db.flush()
+
+    # Check if all personalized sequences now have overrides
+    pers_seq_result = await db.execute(
+        select(func.count(Sequence.id))
+        .where(
+            Sequence.campaign_id == campaign_id,
+            Sequence.sequence_type == "personalized",
+        )
+    )
+    total_personalized = pers_seq_result.scalar() or 0
+
+    ov_count_result = await db.execute(
+        select(func.count(CustomEmailOverride.id))
+        .where(
+            CustomEmailOverride.campaign_lead_id == cl.id,
+            CustomEmailOverride.sequence_id.in_(
+                select(Sequence.id).where(
+                    Sequence.campaign_id == campaign_id,
+                    Sequence.sequence_type == "personalized",
+                )
+            ),
+        )
+    )
+    written_count = ov_count_result.scalar() or 0
+
+    lead_transitioned = False
+    if total_personalized > 0 and written_count >= total_personalized:
+        if cl.enrollment_status == "needs_custom_email":
+            cl.enrollment_status = "active"
+            lead_transitioned = True
+            await db.flush()
+            await db.commit()
+            from app.routers.schedule import enqueue_global_recalculate
+            enqueue_global_recalculate(background_tasks)
+            log.info(
+                "write_custom_email: lead %s campaign %s all custom emails written → active; triggering recalc",
+                lead_id, campaign_id,
+            )
+
+    return {
+        "ok": True,
+        "sequence_id": sequence_id,
+        "lead_id": lead_id,
+        "subject": payload.subject,
+        "lead_transitioned_to_active": lead_transitioned,
     }
 
 
@@ -1499,6 +1888,15 @@ async def bulk_add_leads_to_campaign(
         raise HTTPException(404, "Campaign not found")
     match_provider = getattr(campaign_obj, "match_lead_provider", False)
 
+    # Check if this campaign has any personalized sequences
+    has_personalized = False
+    pers_seq_check = await db.execute(
+        select(func.count(Sequence.id))
+        .where(Sequence.campaign_id == campaign_id, Sequence.sequence_type == "personalized")
+        .limit(1)
+    )
+    has_personalized = (pers_seq_check.scalar() or 0) > 0
+
     if not leads_data:
         raise HTTPException(400, "No leads provided")
 
@@ -1615,6 +2013,8 @@ async def bulk_add_leads_to_campaign(
             db.add(cl)
             await db.flush()
             _apply_campaign_lead_add_options(cl, lead, entry)
+            if has_personalized and (cl.enrollment_status or "active") == "active":
+                cl.enrollment_status = "needs_custom_email"
             await db.flush()
             can_send = campaign_lead_may_receive_sends(cl, lead)
             new_enrollments.append((cl.id, lead.id, email, bool(lead.provider), can_send))
@@ -2158,6 +2558,15 @@ async def import_campaign_leads(
         raise HTTPException(404, "Campaign not found")
     match_provider = getattr(campaign_obj, "match_lead_provider", False)
 
+    # Check if this campaign has any personalized sequences
+    has_personalized_import = False
+    pers_check_import = await db.execute(
+        select(func.count(Sequence.id))
+        .where(Sequence.campaign_id == campaign_id, Sequence.sequence_type == "personalized")
+        .limit(1)
+    )
+    has_personalized_import = (pers_check_import.scalar() or 0) > 0
+
     contents = await file.read()
     text = contents.decode("utf-8-sig")  # handle BOM from Excel
 
@@ -2338,6 +2747,8 @@ async def import_campaign_leads(
                 email_verification_status=_csv_cell("email_verification_status"),
             )
             _apply_campaign_lead_add_options(cl, lead, _row_opts)
+            if has_personalized_import and (cl.enrollment_status or "active") == "active":
+                cl.enrollment_status = "needs_custom_email"
             await db.flush()
             can_send_csv = campaign_lead_may_receive_sends(cl, lead)
             new_enrollments.append((cl.id, lead.id, email, bool(lead.provider), can_send_csv))

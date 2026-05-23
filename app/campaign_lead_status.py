@@ -11,7 +11,7 @@ if TYPE_CHECKING:
 
 # Enrollment (per CampaignLead) — pipeline position / outcome for this campaign.
 ENROLLMENT_STATUSES = frozenset(
-    {"active", "contacted", "completed", "bounced", "unsubscribed", "wrong_person"}
+    {"active", "contacted", "completed", "bounced", "unsubscribed", "wrong_person", "needs_custom_email"}
 )
 
 # Reply / intent classification (per CampaignLead). Unsubscribe & wrong person live in enrollment.

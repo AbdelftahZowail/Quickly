@@ -226,6 +226,9 @@ class SequenceCreate(BaseModel):
     wait_days_after_previous: int = 0
     is_html: Optional[bool] = None  # None = auto-detect (legacy), True = HTML, False = plain
     preview_text: Optional[str] = None
+    sequence_type: str = "standard"  # standard | personalized
+    fallback_subject: Optional[str] = None
+    fallback_body: Optional[str] = None
 
 
 class SequenceUpdate(BaseModel):
@@ -234,6 +237,9 @@ class SequenceUpdate(BaseModel):
     wait_days_after_previous: Optional[int] = None
     is_html: Optional[bool] = None
     preview_text: Optional[str] = None
+    sequence_type: Optional[str] = None
+    fallback_subject: Optional[str] = None
+    fallback_body: Optional[str] = None
 
 
 class SequenceResponse(BaseModel):
@@ -245,7 +251,16 @@ class SequenceResponse(BaseModel):
     wait_days_after_previous: int
     is_html: Optional[bool] = None
     preview_text: Optional[str] = None
+    sequence_type: str = "standard"
+    fallback_subject: Optional[str] = None
+    fallback_body: Optional[str] = None
     variants: List["SequenceVariantResponse"] = []
+
+
+class CustomEmailWrite(BaseModel):
+    subject: Optional[str] = None
+    body: Optional[str] = None
+    is_html: Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -307,6 +322,10 @@ class CampaignStats(BaseModel):
     scheduled emails rather than assuming every enrolled lead will receive
     every sequence.  Without it the progress bar would still show "incomplete"
     after a reply even though no further messages will be sent.
+
+    ``needs_custom_email`` counts leads in the ``needs_custom_email``
+    enrollment status — enrolled but waiting for custom content on
+    personalized sequences.
     """
     total_leads: int = 0
     emails_sent: int = 0
@@ -319,6 +338,7 @@ class CampaignStats(BaseModel):
     scheduled: int = 0
     open_rate: float = 0.0
     click_rate: float = 0.0
+    needs_custom_email: int = 0
 
     class Config:
         from_attributes = True

@@ -13,7 +13,7 @@ from app.database import get_db
 from app.campaign_lead_status import campaign_lead_schedule_eligibility_clause
 from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
-    EmailOpen, EmailClick,
+    EmailOpen, EmailClick, CustomEmailOverride,
 )
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app import time as time_provider
@@ -118,8 +118,13 @@ def _serialize_sent(
     }
 
 
-def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, include_body: bool) -> dict:
+def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, include_body: bool, override_subject: str | None = None) -> dict:
     enr = getattr(campaign_lead, "enrollment_status", None) or "active"
+    # Subject: override → fallback → seq.subject → "(reply in thread)"
+    effective_subject = override_subject
+    if effective_subject is None and seq is not None:
+        effective_subject = seq.fallback_subject or seq.subject
+    subject_display = effective_subject or "(reply in thread)"
     return {
         "type": "scheduled",
         "slot_id": slot.id,
@@ -127,7 +132,7 @@ def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, includ
         "scheduled_date": slot.scheduled_date.date().isoformat() if slot.scheduled_date else None,
         "position_in_day": slot.position_in_day,
         "sequence_index": slot.sequence_index,
-        "subject": (seq.subject or "(reply in thread)") if seq else "",
+        "subject": subject_display,
         "sequence_id": seq.id if seq else None,
         "sequence_body": seq.body if (seq and include_body) else "",
         "sequence_is_html": bool(seq.is_html) if seq else False,
@@ -241,8 +246,22 @@ async def global_scheduled(
     result = await db.execute(query)
     rows = result.all()
 
+    # Batch-fetch custom email overrides for personalized sequences
+    override_subjects: dict[tuple[int, int], str] = {}  # (campaign_lead_id, sequence_id) -> subject
+    cl_override_ids = {cl.id for _slot, cl, _camp, _lead, _inbox, seq in rows if seq is not None}
+    if cl_override_ids:
+        ov_result = await db.execute(
+            select(CustomEmailOverride).where(CustomEmailOverride.campaign_lead_id.in_(cl_override_ids))
+        )
+        for ov in ov_result.scalars().all():
+            if ov.subject:
+                override_subjects[(ov.campaign_lead_id, ov.sequence_id)] = ov.subject
+
     return [
-        _serialize_scheduled(slot, cl, lead, campaign, inbox, seq, include_body)
+        _serialize_scheduled(
+            slot, cl, lead, campaign, inbox, seq, include_body,
+            override_subject=override_subjects.get((cl.id, seq.id)) if seq else None,
+        )
         for slot, cl, campaign, lead, inbox, seq in rows
     ]
 
@@ -302,7 +321,7 @@ async def scheduled_detail(slot_id: int, db: AsyncSession = Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail="Scheduled slot not found")
     slot, _cl, campaign, lead, inbox, seq = row
-    return _serialize_scheduled(slot, lead, campaign, inbox, seq, include_body=True)
+    return _serialize_scheduled(slot, _cl, lead, campaign, inbox, seq, include_body=True)
 
 
 

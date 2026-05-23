@@ -175,6 +175,8 @@ export default function Campaigns() {
                 if (bounced > 0) reasonParts.push(`${bounced} bounced`);
                 const unsubscribed = stats.unsubscribed || 0;
                 if (unsubscribed > 0) reasonParts.push(`${unsubscribed} unsub`);
+                const needsCustom = stats.needs_custom_email || 0;
+                if (needsCustom > 0) reasonParts.push(`${needsCustom} needs custom`);
 
                 // Status display
                 let statusLabel, statusClass;
@@ -184,6 +186,9 @@ export default function Campaigns() {
                 } else if (isCompleted) {
                   statusLabel = 'Completed';
                   statusClass = 'text-blue-600 font-bold';
+                } else if (needsCustom > 0 && totalLeads === needsCustom) {
+                  statusLabel = 'Needs Writing';
+                  statusClass = 'text-purple-600 font-bold';
                 } else if (totalLeads === 0) {
                   statusLabel = 'Draft';
                   statusClass = 'text-gray-400 font-bold';

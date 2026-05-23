@@ -99,7 +99,38 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_step_size INTEGER NOT NULL DEFAULT 1",
         # 2026-05-21: track when ramp-up was paused (for freezing warm-up)
         "ALTER TABLE inbox ADD COLUMN IF NOT EXISTS ramp_up_paused_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        # 2026-05-22: personalized sequence fallbacks
+        "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS fallback_subject VARCHAR(512)",
+        "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS fallback_body TEXT",
+        # 2026-05-22: custom email override body made nullable (optional body)
+        "ALTER TABLE custom_email_override ALTER COLUMN body DROP NOT NULL",
+        # 2026-05-22: personalized sequence type column (standard|personalized)
+        "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS sequence_type VARCHAR(32) NOT NULL DEFAULT 'standard'",
     ]
+    # custom_email_override table (IF NOT EXISTS — must be a separate stmt
+    # because it uses raw SQL, not ALTER TABLE)
+    await conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS custom_email_override (
+                id SERIAL PRIMARY KEY,
+                campaign_lead_id INTEGER NOT NULL REFERENCES campaign_lead(id) ON DELETE CASCADE,
+                sequence_id INTEGER NOT NULL REFERENCES sequence(id) ON DELETE CASCADE,
+                subject VARCHAR(512),
+                body TEXT,
+                is_html BOOLEAN,
+                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+                UNIQUE (campaign_lead_id, sequence_id)
+            )
+            """
+        )
+    )
+    await conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_custom_email_override_cl ON custom_email_override (campaign_lead_id)"
+        )
+    )
     for stmt in pg_alters:
         await conn.execute(text(stmt))
     await conn.execute(

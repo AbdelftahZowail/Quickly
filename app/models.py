@@ -221,6 +221,9 @@ class Sequence(Base):
     # Optional preheader/preview text injected as hidden div when is_html is True.
     preview_text = Column(String(512), nullable=True, default=None)
     wait_days_after_previous = Column(Integer, default=0)  # days after previous sequence
+    sequence_type = Column(String(32), default="standard", nullable=False)  # standard | personalized
+    fallback_subject = Column(String(512), nullable=True, default=None)  # fallback for personalized sequences
+    fallback_body = Column(Text, nullable=True, default=None)  # fallback for personalized sequences
     campaign = relationship("Campaign", back_populates="sequences")
     variants = relationship(
         "SequenceVariant",
@@ -275,6 +278,36 @@ class CampaignLead(Base):
     campaign = relationship("Campaign", back_populates="campaign_leads")
     lead = relationship("Lead", back_populates="campaign_leads")
     queue_slots = relationship("QueueSlot", back_populates="campaign_lead", cascade="all, delete-orphan", order_by="QueueSlot.sequence_index")
+    custom_email_overrides = relationship("CustomEmailOverride", back_populates="campaign_lead", cascade="all, delete-orphan")
+
+
+class CustomEmailOverride(Base):
+    """Per-lead custom content for a personalized sequence step.
+
+    When a sequence has ``sequence_type = 'personalized'``, each lead enrolled
+    in the campaign must have a matching ``CustomEmailOverride`` row before
+    sending can begin.  The sender uses this row's subject/body instead of the
+    sequence defaults.
+    """
+    __tablename__ = "custom_email_override"
+    __table_args__ = (
+        UniqueConstraint("campaign_lead_id", "sequence_id", name="uq_campaign_lead_seq_override"),
+        Index("ix_custom_email_override_cl", "campaign_lead_id"),
+    )
+    id = Column(Integer, primary_key=True, index=True)
+    campaign_lead_id = Column(
+        Integer, ForeignKey("campaign_lead.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sequence_id = Column(
+        Integer, ForeignKey("sequence.id", ondelete="CASCADE"), nullable=False
+    )
+    subject = Column(String(512), nullable=True, default=None)
+    body = Column(Text, nullable=True, default=None)
+    is_html = Column(Boolean, nullable=True, default=None)
+    created_at = Column(DateTime, default=_utcnow)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    campaign_lead = relationship("CampaignLead", back_populates="custom_email_overrides")
+    sequence = relationship("Sequence")
 
 
 class QueueSlot(Base):
