@@ -1,12 +1,13 @@
 # multi-stage Dockerfile for quick, minimal production image
 
 # 1. build the React frontend
-FROM node:22-alpine AS frontend-builder
+FROM node:22-slim AS frontend-builder
 WORKDIR /app/frontend
 
-# copy only package.json files first to leverage layer caching
-COPY frontend/package*.json ./
-RUN npm ci
+# copy only package.json (NOT lockfile) — npm ci + lockfile is broken
+# for multi-platform builds due to npm bug #4828 with optional deps
+COPY frontend/package.json ./
+RUN npm install
 
 # copy the rest of the frontend code and build
 COPY frontend/ .
