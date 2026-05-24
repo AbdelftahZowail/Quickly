@@ -287,6 +287,9 @@ class CampaignCreate(BaseModel):
     timezone: Optional[str] = None
     # When True, prefer inboxes matching the lead's email provider (Google → Gmail, O365 → Office 365)
     match_lead_provider: bool = True
+    # wait_for_all (default) = don't send until all personalized emails are written
+    # asap = start sending each personalized email as soon as it's written
+    custom_sequence_mode: str = "wait_for_all"
 
 
 class CampaignUpdate(BaseModel):
@@ -305,6 +308,7 @@ class CampaignUpdate(BaseModel):
     send_all_as_text: Optional[bool] = None
     timezone: Optional[str] = None
     match_lead_provider: Optional[bool] = None
+    custom_sequence_mode: Optional[str] = None
 
 
 class CampaignStats(BaseModel):
@@ -362,6 +366,7 @@ class CampaignResponse(BaseModel):
     send_all_as_text: bool = False
     timezone: Optional[str] = None
     match_lead_provider: bool = True
+    custom_sequence_mode: str = "wait_for_all"
     created_at: datetime
 
     # new stats object; the frontend can always rely on ``stats`` being

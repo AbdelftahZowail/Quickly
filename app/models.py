@@ -178,6 +178,9 @@ class Campaign(Base):
     # Provider matching: when True, prefer inboxes whose provider matches the lead's email provider
     # (Google leads → Gmail inboxes, Office 365 leads → Office 365 inboxes; falls back to any inbox)
     match_lead_provider = Column(Boolean, default=True, nullable=False)
+    # Custom sequence mode: wait_for_all (default) = don't send until all personalized
+    # emails are written; asap = start sending each personalized email as soon as it's written
+    custom_sequence_mode = Column(String(32), default="wait_for_all", nullable=False)
     created_at = Column(DateTime, default=_utcnow)
     campaign_inboxes = relationship(
         "CampaignInbox",

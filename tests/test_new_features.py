@@ -703,3 +703,215 @@ async def test_bulk_add_empty_batch_raises_400(session):
     with pytest.raises(fastapi.HTTPException) as exc:
         await bulk_add_leads_to_campaign(campaign.id, [], db=session)
     assert exc.value.status_code == 400
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Custom sequence mode: wait_for_all vs asap
+# ══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_create_campaign_with_asap_mode(session):
+    """Creating a campaign with custom_sequence_mode=asap should persist it."""
+    inbox = await make_inbox(session, email="asap-camp@test.com")
+    await session.flush()
+
+    from app.routers.campaigns import create_campaign
+    from app.schemas import CampaignCreate
+
+    data = CampaignCreate(
+        name="ASAP Campaign",
+        inbox_ids=[inbox.id],
+        custom_sequence_mode="asap",
+    )
+    created = await create_campaign(data, db=session)
+    assert created.custom_sequence_mode == "asap"
+
+
+@pytest.mark.asyncio
+async def test_update_campaign_custom_sequence_mode(session):
+    """Patching custom_sequence_mode should update the campaign."""
+    inbox = await make_inbox(session, email="mode-up@test.com")
+    campaign = await make_campaign(session)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await session.flush()
+
+    from app.routers.campaigns import update_campaign
+    from app.schemas import CampaignUpdate
+
+    assert campaign.custom_sequence_mode == "wait_for_all"
+    data = CampaignUpdate(custom_sequence_mode="asap")
+    result = await update_campaign(
+        campaign.id, data, background_tasks=BackgroundTasks(), db=session
+    )
+    assert result.custom_sequence_mode == "asap"
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_asap_mode_no_needs_custom_email(session):
+    """In ASAP mode, new leads with personalized sequences should NOT be set to needs_custom_email."""
+    inbox = await make_inbox(session, email="asap-bulk@test.com")
+    campaign = await make_campaign(session, custom_sequence_mode="asap")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await make_sequence(session, campaign.id, position=0, body="Hi", sequence_type="personalized")
+    await session.flush()
+
+    from app.routers.campaigns import CampaignLeadAdd, bulk_add_leads_to_campaign
+
+    result = await bulk_add_leads_to_campaign(
+        campaign.id,
+        [CampaignLeadAdd(email="asap-lead@test.com", name="ASAP Lead")],
+        db=session,
+    )
+    assert result["added"] == 1
+
+    lead = (await session.execute(select(Lead).where(Lead.email == "asap-lead@test.com"))).scalar_one()
+    cl = (await session.execute(
+        select(CampaignLead).where(CampaignLead.campaign_id == campaign.id, CampaignLead.lead_id == lead.id)
+    )).scalar_one()
+    assert cl.enrollment_status == "active"
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_wait_for_all_sets_needs_custom_email(session):
+    """In wait_for_all mode (default), new leads with personalized sequences SHOULD be set to needs_custom_email."""
+    inbox = await make_inbox(session, email="wait-bulk@test.com")
+    campaign = await make_campaign(session)  # default mode = wait_for_all
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await make_sequence(session, campaign.id, position=0, body="Hi", sequence_type="personalized")
+    await session.flush()
+
+    from app.routers.campaigns import CampaignLeadAdd, bulk_add_leads_to_campaign
+
+    result = await bulk_add_leads_to_campaign(
+        campaign.id,
+        [CampaignLeadAdd(email="wait-lead@test.com", name="Wait Lead")],
+        db=session,
+    )
+    assert result["added"] == 1
+
+    lead = (await session.execute(select(Lead).where(Lead.email == "wait-lead@test.com"))).scalar_one()
+    cl = (await session.execute(
+        select(CampaignLead).where(CampaignLead.campaign_id == campaign.id, CampaignLead.lead_id == lead.id)
+    )).scalar_one()
+    assert cl.enrollment_status == "needs_custom_email"
+
+
+@pytest.mark.asyncio
+async def test_write_custom_email_asap_triggers_recalc_on_first_override(session):
+    """In ASAP mode, writing the first custom email should trigger recalc.
+    Lead is already active (ASAP mode never sets needs_custom_email), so no transition occurs."""
+    inbox = await make_inbox(session, email="asap-write@test.com")
+    campaign = await make_campaign(session, custom_sequence_mode="asap")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    seq = await make_sequence(session, campaign.id, position=0, body="Hi", sequence_type="personalized")
+    lead = await make_lead(session, email="asap-write-lead@test.com")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await session.flush()
+
+    from app.routers.campaigns import write_custom_email
+    from app.schemas import CustomEmailWrite
+
+    bg = BackgroundTasks()
+    result = await write_custom_email(
+        campaign.id, lead.id, seq.id,
+        CustomEmailWrite(subject="Custom", body="Custom body", is_html=False),
+        background_tasks=bg, db=session
+    )
+    # Already active in ASAP mode; no transition needed but recalc is triggered
+    assert result["lead_transitioned_to_active"] is False
+    await session.refresh(cl)
+    assert cl.enrollment_status == "active"
+
+
+@pytest.mark.asyncio
+async def test_write_custom_email_asap_transitions_stuck_lead(session):
+    """In ASAP mode, if a lead was previously stuck in needs_custom_email, writing a custom email transitions it to active."""
+    inbox = await make_inbox(session, email="asap-stuck@test.com")
+    campaign = await make_campaign(session, custom_sequence_mode="asap")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    seq = await make_sequence(session, campaign.id, position=0, body="Hi", sequence_type="personalized")
+    lead = await make_lead(session, email="asap-stuck-lead@test.com")
+    cl = CampaignLead(campaign_id=campaign.id, lead_id=lead.id, enrollment_status="needs_custom_email")
+    session.add(cl)
+    await session.flush()
+
+    from app.routers.campaigns import write_custom_email
+    from app.schemas import CustomEmailWrite
+
+    bg = BackgroundTasks()
+    result = await write_custom_email(
+        campaign.id, lead.id, seq.id,
+        CustomEmailWrite(subject="Custom", body="Custom body", is_html=False),
+        background_tasks=bg, db=session
+    )
+    assert result["lead_transitioned_to_active"] is True
+    await session.refresh(cl)
+    assert cl.enrollment_status == "active"
+
+
+@pytest.mark.asyncio
+async def test_write_custom_email_wait_for_all_no_recalc_until_all_written(session):
+    """In wait_for_all mode, writing one of many custom emails should NOT transition lead to active."""
+    inbox = await make_inbox(session, email="wait-write@test.com")
+    campaign = await make_campaign(session)  # default = wait_for_all
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    seq0 = await make_sequence(session, campaign.id, position=0, body="Hi 0", sequence_type="personalized")
+    seq1 = await make_sequence(session, campaign.id, position=1, body="Hi 1", sequence_type="personalized")
+    lead = await make_lead(session, email="wait-write-lead@test.com")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    cl.enrollment_status = "needs_custom_email"
+    await session.flush()
+
+    from app.routers.campaigns import write_custom_email
+    from app.schemas import CustomEmailWrite
+
+    bg = BackgroundTasks()
+    result = await write_custom_email(
+        campaign.id, lead.id, seq0.id,
+        CustomEmailWrite(subject="Custom 0", body="Custom body 0", is_html=False),
+        background_tasks=bg, db=session
+    )
+    assert result["lead_transitioned_to_active"] is False
+    await session.refresh(cl)
+    assert cl.enrollment_status == "needs_custom_email"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_personalized_asap_never_blocks_leads(session):
+    """In ASAP mode, reconcile_personalized_status should never set needs_custom_email."""
+    inbox = await make_inbox(session, email="rec-asap@test.com")
+    campaign = await make_campaign(session, custom_sequence_mode="asap")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await make_sequence(session, campaign.id, position=0, body="Hi", sequence_type="personalized")
+    lead = await make_lead(session, email="rec-asap-lead@test.com")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    cl.enrollment_status = "needs_custom_email"  # simulate pre-mode-change status
+    await session.flush()
+
+    from app.routers.campaigns import reconcile_personalized_status
+
+    result = await reconcile_personalized_status(session, campaign.id, background_tasks=None)
+    assert result["transitioned_to_needs_custom_email"] == 0
+    assert result["transitioned_to_active"] == 1
+    await session.refresh(cl)
+    assert cl.enrollment_status == "active"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_personalized_wait_for_all_blocks_when_pending(session):
+    """In wait_for_all mode, reconcile should set needs_custom_email when overrides are pending."""
+    inbox = await make_inbox(session, email="rec-wait@test.com")
+    campaign = await make_campaign(session)  # default = wait_for_all
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await make_sequence(session, campaign.id, position=0, body="Hi", sequence_type="personalized")
+    lead = await make_lead(session, email="rec-wait-lead@test.com")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await session.flush()
+
+    from app.routers.campaigns import reconcile_personalized_status
+
+    result = await reconcile_personalized_status(session, campaign.id, background_tasks=None)
+    assert result["transitioned_to_needs_custom_email"] == 1
+    assert result["transitioned_to_active"] == 0
+    await session.refresh(cl)
+    assert cl.enrollment_status == "needs_custom_email"

@@ -196,6 +196,7 @@ async def make_campaign(
     wait_minutes_between: int = 5,
     stop_on_reply: bool = True,
     paused: bool = False,
+    custom_sequence_mode: str = "wait_for_all",
 ) -> Campaign:
     campaign = Campaign(
         name=name,
@@ -205,6 +206,7 @@ async def make_campaign(
         wait_minutes_between=wait_minutes_between,
         stop_on_reply=stop_on_reply,
         paused=paused,
+        custom_sequence_mode=custom_sequence_mode,
     )
     session.add(campaign)
     await session.flush()
@@ -218,6 +220,9 @@ async def make_sequence(
     subject: str = "Hello",
     body: str = "Hi there",
     wait_days_after_previous: int = 0,
+    sequence_type: str = "standard",
+    fallback_subject: str | None = None,
+    fallback_body: str | None = None,
 ) -> Sequence:
     seq = Sequence(
         campaign_id=campaign_id,
@@ -225,6 +230,9 @@ async def make_sequence(
         subject=subject,
         body=body,
         wait_days_after_previous=wait_days_after_previous,
+        sequence_type=sequence_type,
+        fallback_subject=fallback_subject,
+        fallback_body=fallback_body,
     )
     session.add(seq)
     await session.flush()

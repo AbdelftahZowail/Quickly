@@ -9,6 +9,12 @@ import { Card } from '../components/ui/Card';
 import DatePicker from '../components/ui/DatePicker';
 import { useConfirm } from '../context/ConfirmContext';
 import { useAppMode } from '../context/AppModeContext';
+import {
+  addDaysToDateKey,
+  formatDateKey,
+  formatTimeKey,
+  normalizeTimeZone,
+} from '../utils/datetime';
 import ReactQuill from 'react-quill';
 import 'react-quill/dist/quill.snow.css';
 import {
@@ -121,16 +127,16 @@ export default function CampaignDetail() {
 
   function formatTime(isoStr) {
     if (!isoStr) return '';
-    const d = new Date(isoStr);
-    const base = `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
-    return isProduction ? base : base + `:${String(d.getSeconds()).padStart(2,'0')}`;
+    return formatTimeKey(isoStr, normalizeTimeZone(campaign?.timezone), !isProduction);
   }
 
   function renderQueue() {
     const filter = queueFilter;
     const sent     = filter ? sentData.filter(s => s.lead_email === filter) : sentData;
     const upcoming = filter ? queueData.filter(q => q.lead_email === filter) : queueData;
-    const today    = new Date().toISOString().slice(0, 10);
+    const tz = normalizeTimeZone(campaign?.timezone);
+    const today    = formatDateKey(new Date(), tz);
+    const tomorrow = addDaysToDateKey(today, 1);
 
     if (!sent.length && !upcoming.length)
       return <p className="text-gray-500">No emails sent or scheduled.</p>;
@@ -156,8 +162,8 @@ export default function CampaignDetail() {
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.keys(sent.reduce((acc,s)=>{const d=s.sent_date||'?'; (acc[d]=acc[d]||[]).push(s); return acc;},{})).sort()
-                    .flatMap(d => sent.filter(s=>(s.sent_date||'')=== d).map((s,i)=>(
+                  {Object.keys(sent.reduce((acc,s)=>{const d=formatDateKey(s.sent_at||s.sent_date, tz); (acc[d]=acc[d]||[]).push(s); return acc;},{})).sort()
+                    .flatMap(d => sent.filter(s=>formatDateKey(s.sent_at||s.sent_date, tz)=== d).map((s,i)=>(
                       <tr key={s.log_id} className={`border-b ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
                         onClick={()=>!filter&&setQueueFilter(s.lead_email)}>
                         <td className="px-3 py-1.5">{i===0?d:''}</td>
@@ -185,9 +191,9 @@ export default function CampaignDetail() {
                 </tr>
               </thead>
               <tbody>
-                {Object.keys(upcoming.reduce((acc,q)=>{const d=(q.scheduled_date||'').slice(0,10); (acc[d]=acc[d]||[]).push(q); return acc;},{})).sort()
+                {Object.keys(upcoming.reduce((acc,q)=>{const d=formatDateKey(q.scheduled_date, tz); (acc[d]=acc[d]||[]).push(q); return acc;},{})).sort()
                   .flatMap(d => upcoming
-                    .filter(q=>(q.scheduled_date||'').slice(0,10)===d)
+                    .filter(q=>formatDateKey(q.scheduled_date, tz)===d)
                     .sort((a,b)=>(a.scheduled_date||'').localeCompare(b.scheduled_date||'')||a.position_in_day-b.position_in_day)
                     .map((q,i)=>{
                       const isPast = d < today;
@@ -195,7 +201,15 @@ export default function CampaignDetail() {
                       return (
                         <tr key={q.slot_id} className={`border-b ${isPast?'text-gray-400':''} ${!filter?'cursor-pointer hover:bg-gray-50':''}`}
                           onClick={()=>!filter&&setQueueFilter(q.lead_email)}>
-                          <td className="px-3 py-1.5">{i===0?d:''}</td>
+                          <td className="px-3 py-1.5">
+                            {i===0 ? (
+                              <>
+                                {d}
+                                {d === today && <span className="ml-1 text-xs text-green-600">today</span>}
+                                {d === tomorrow && <span className="ml-1 text-xs text-blue-600">tomorrow</span>}
+                              </>
+                            ) : ''}
+                          </td>
                           <td className="px-3 py-1.5">{t}</td>
                           <td className="px-3 py-1.5">{q.position_in_day}</td>
                           <td className="px-3 py-1.5 font-mono text-xs max-w-[200px] truncate" title={q.inbox_email || ''}>{q.inbox_email || '—'}</td>
@@ -1804,6 +1818,7 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     send_first_as_text:    campaign.send_first_as_text    ?? false,
     send_all_as_text:      campaign.send_all_as_text      ?? false,
     match_lead_provider:   campaign.match_lead_provider   ?? true,
+    custom_sequence_mode:  campaign.custom_sequence_mode  ?? 'wait_for_all',
     paused:                campaign.paused               ?? false,
     timezone:              campaign.timezone              ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
   });
@@ -1878,7 +1893,7 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
     { key: 'add_unsubscribe_header',   label: 'Add List-Unsubscribe header (recommended)' },
     { key: 'send_first_as_text',       label: 'Send first email as plain text', disabled: form.send_all_as_text },
     { key: 'send_all_as_text',         label: 'Send all emails as plain text' },
-    { key: 'match_lead_provider',      label: 'Match lead provider — send from Google inboxes to Google leads, Office 365 to Office 365 (falls back to any inbox if none match)' },
+    { key: 'match_lead_provider',      label: 'Match lead provider — send from Google inboxes to Google leads, Office 365 to Office 365 (falls back to any inbox if none match)' },
   ];
 
   return (
@@ -1900,6 +1915,39 @@ function SettingsTab({ campaign, inboxes, onSave, campaignId }) {
             value={form.name}
             onChange={e => setForm(f=>({...f, name: e.target.value}))}
           />
+        </div>
+
+        {/* Custom sequence mode */}
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Custom sequence mode</label>
+          <div className="space-y-2">
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="custom_sequence_mode"
+                className="mt-0.5"
+                checked={form.custom_sequence_mode === 'wait_for_all'}
+                onChange={() => setForm(f => ({ ...f, custom_sequence_mode: 'wait_for_all' }))}
+              />
+              <div>
+                <span className="text-sm text-gray-700 font-medium">Wait for all emails</span>
+                <p className="text-xs text-gray-400">Don't start sending until every custom email is written for each lead.</p>
+              </div>
+            </label>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input
+                type="radio"
+                name="custom_sequence_mode"
+                className="mt-0.5"
+                checked={form.custom_sequence_mode === 'asap'}
+                onChange={() => setForm(f => ({ ...f, custom_sequence_mode: 'asap' }))}
+              />
+              <div>
+                <span className="text-sm text-gray-700 font-medium">Send ASAP</span>
+                <p className="text-xs text-gray-400">Start sending each custom email as soon as it's written — no need to wait for all.</p>
+              </div>
+            </label>
+          </div>
         </div>
 
         {/* Inboxes */}
@@ -2336,7 +2384,7 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null, ed
 }
 
 // ─── Sequences Tab ────────────────────────────────────────────────────────────
-function PersonalizedSequenceSection({ sequence, sequences, personalizedSequences, leads, campaignId, onWriteCustom, onRefresh }) {
+function PersonalizedSequenceSection({ sequence, sequences, personalizedSequences, leads, campaignId, campaign, onWriteCustom, onRefresh }) {
   const [filter, setFilter] = useState('needs_writing');
   const [searchQuery, setSearchQuery] = useState('');
   const [bulkState, setBulkState] = useState({ busy: false, text: 'Use fallback for remaining' });
@@ -2465,8 +2513,20 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
     { key: 'all', label: 'All' },
   ];
 
+  const campaignMode = campaign?.custom_sequence_mode || 'wait_for_all';
+
   return (
     <div className="mt-6 pt-6 border-t border-gray-200">
+      {campaignMode === 'asap' && (
+        <div className="mb-3 p-2 bg-teal-50 border border-teal-200 rounded-lg text-xs text-teal-700">
+          <strong>Send ASAP mode is on.</strong> Each custom email will be scheduled and sent as soon as it's written — no need to wait for all leads.
+        </div>
+      )}
+      {campaignMode !== 'asap' && (
+        <div className="mb-3 p-2 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
+          <strong>Wait-for-all mode is on.</strong> Emails won't be sent until every custom email is written for each lead.
+        </div>
+      )}
       <div className="flex items-center justify-between mb-3 gap-2">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Custom Emails per Lead</span>
         <div className="flex items-center gap-2">
@@ -2988,6 +3048,12 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                 <>
                   <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-700">
                     This is a personalized step. Write fallback content that will appear as placeholder text when composing each lead's custom email.
+                    {campaign?.custom_sequence_mode === 'asap' && (
+                      <span className="block mt-1 font-medium text-purple-800">Campaign is in "Send ASAP" mode — emails will start sending as soon as each custom email is written.</span>
+                    )}
+                    {(!campaign?.custom_sequence_mode || campaign?.custom_sequence_mode === 'wait_for_all') && (
+                      <span className="block mt-1">Campaign is in "Wait for all" mode — no emails will be sent until every custom email is written for each lead.</span>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">Fallback subject</label>
@@ -3039,7 +3105,14 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                   <option value="personalized">Personalized — custom content per lead</option>
                 </select>
                 {(editing.sequence_type || 'standard') === 'personalized' && (
-                  <p className="text-xs text-purple-600 mt-1">Leads will need a custom email written for this step before sending starts.</p>
+                  <p className="text-xs text-purple-600 mt-1">
+                    Leads will need a custom email written for this step before sending starts.
+                    {campaign?.custom_sequence_mode === 'asap' ? (
+                      <span className="block mt-0.5 font-medium">Send ASAP mode is on — each email will be sent as soon as it's written.</span>
+                    ) : (
+                      <span className="block mt-0.5">Wait-for-all mode is on — nothing sends until all custom emails are written.</span>
+                    )}
+                  </p>
                 )}
               </div>
               <div>
@@ -3098,6 +3171,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                   personalizedSequences={personalizedSequences}
                   leads={leads}
                   campaignId={campaignId}
+                  campaign={campaign}
                   onWriteCustom={(lead, seq) => setCustomEmailTarget({ lead, sequence: seq })}
                   onRefresh={refresh}
                 />

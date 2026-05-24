@@ -831,6 +831,54 @@ def _filter_inboxes_for_lead_provider(
     return filtered if filtered else inboxes  # Fallback to all if none match
 
 
+async def _get_asap_ready_sequences_for_leads(
+    session: AsyncSession,
+    campaign_id: int,
+    campaign_leads: list[CampaignLead],
+    sequences: list[Sequence],
+) -> dict[int, list[Sequence]]:
+    """For ASAP mode, return per-lead filtered sequences.
+
+    Non-personalized sequences are always included.
+    Personalized sequences are included ONLY if the lead has an actual
+    CustomEmailOverride for that specific sequence. Fallback content
+    does NOT count — it is a writing aid, not a sending substitute.
+    """
+    from app.models import CustomEmailOverride
+
+    pers_seqs = [s for s in sequences if getattr(s, "sequence_type", "standard") == "personalized"]
+    if not pers_seqs:
+        return {cl.id: sequences for cl in campaign_leads}
+
+    pers_seq_ids = {s.id for s in pers_seqs}
+    cl_ids = [cl.id for cl in campaign_leads]
+
+    ov_result = await session.execute(
+        select(CustomEmailOverride.campaign_lead_id, CustomEmailOverride.sequence_id)
+        .where(
+            CustomEmailOverride.campaign_lead_id.in_(cl_ids),
+            CustomEmailOverride.sequence_id.in_(pers_seq_ids),
+        )
+    )
+    override_map: dict[int, set[int]] = {}
+    for clid, sid in ov_result.all():
+        override_map.setdefault(clid, set()).add(sid)
+
+    result: dict[int, list[Sequence]] = {}
+    for cl in campaign_leads:
+        allowed = []
+        for seq in sequences:
+            if getattr(seq, "sequence_type", "standard") != "personalized":
+                allowed.append(seq)
+            else:
+                has_override = seq.id in override_map.get(cl.id, set())
+                if has_override:
+                    allowed.append(seq)
+        result[cl.id] = allowed
+
+    return result
+
+
 async def _fetch_campaign_scheduling_data(
     session: AsyncSession, campaign_id: int
 ) -> Optional[Tuple[Campaign, List[Tuple[int, int, int]], List[Sequence]]]:
@@ -1014,12 +1062,19 @@ async def reserve_slots_for_new_leads_bulk(
             lead_providers = {row.id: row.provider for row in prov_result.all()}
 
     base_start = start_date or time_provider.today()
+    is_asap = getattr(campaign, 'custom_sequence_mode', 'wait_for_all') == "asap"
+    asap_sequences_by_lead = {}
+    if is_asap:
+        asap_sequences_by_lead = await _get_asap_ready_sequences_for_leads(
+            session, campaign_id, campaign_leads, sequences
+        )
     for cl in campaign_leads:
         effective_inboxes = _filter_inboxes_for_lead_provider(
             inboxes, lead_providers.get(cl.lead_id), match_provider
         )
+        lead_sequences = asap_sequences_by_lead.get(cl.id, sequences) if is_asap else sequences
         await reserve_slots_for_lead(
-            session, cl.id, campaign, effective_inboxes, sequences,
+            session, cl.id, campaign, effective_inboxes, lead_sequences,
             lead_id=cl.lead_id,
             start_date=base_start,
             last_sent_sequence_index=-1,  # brand-new leads: schedule everything
@@ -1254,6 +1309,16 @@ async def _recalculate_queue_for_campaign_leads(
         log.info("%s: done for campaign %s", log_prefix, campaign_id)
         return
 
+    # For ASAP mode, filter sequences per lead so only personalized sequences
+    # with an override (or fallback) are scheduled.
+    campaign_mode = getattr(campaign, 'custom_sequence_mode', 'wait_for_all')
+    is_asap = campaign_mode == "asap"
+    asap_sequences_by_lead: dict[int, list[Sequence]] = {}
+    if is_asap:
+        asap_sequences_by_lead = await _get_asap_ready_sequences_for_leads(
+            session, campaign_id, ordered_leads, sequences
+        )
+
     for cl in ordered_leads:
         last_sent = last_sent_by_lead.get(cl.lead_id, -1)
 
@@ -1281,8 +1346,9 @@ async def _recalculate_queue_for_campaign_leads(
             if preferred_inbox not in effective_inbox_ids:
                 preferred_inbox = None
 
+        lead_sequences = asap_sequences_by_lead.get(cl.id, sequences) if is_asap else sequences
         await reserve_slots_for_lead(
-            session, cl.id, campaign, effective_inboxes, sequences,
+            session, cl.id, campaign, effective_inboxes, lead_sequences,
             lead_id=cl.lead_id,
             start_date=start_date,
             last_sent_sequence_index=last_sent,
@@ -1640,6 +1706,15 @@ async def recalculate_queue_round_robin(
     # ===========================================================================
     campaign_queues: dict = {cid: list(leads_by_campaign[cid]) for cid in active_campaign_ids}
 
+    # Pre-compute ASAP-mode filtered sequences per campaign per lead
+    asap_sequences_by_campaign: dict[int, dict[int, list[Sequence]]] = {}
+    for cid in active_campaign_ids:
+        campaign_c, _, sequences_c = campaign_data[cid]
+        if getattr(campaign_c, 'custom_sequence_mode', 'wait_for_all') == "asap":
+            asap_sequences_by_campaign[cid] = await _get_asap_ready_sequences_for_leads(
+                session, cid, leads_by_campaign[cid], sequences_c
+            )
+
     total_reserved = 0
     any_remaining = True
     while any_remaining:
@@ -1657,6 +1732,8 @@ async def recalculate_queue_round_robin(
                 any_remaining = True
 
             match_provider = getattr(campaign, "match_lead_provider", False)
+            is_asap_campaign = getattr(campaign, 'custom_sequence_mode', 'wait_for_all') == "asap"
+            asap_seq_map = asap_sequences_by_campaign.get(cid, {})
             for cl in batch:
                 last_sent = last_sent_by_cl.get(cl.id, -1)
                 forced_inbox = preferred_inbox_by_cl.get(cl.id, None)
@@ -1673,8 +1750,9 @@ async def recalculate_queue_round_robin(
                     if forced_inbox not in effective_inbox_ids:
                         forced_inbox = None
 
+                lead_sequences = asap_seq_map.get(cl.id, sequences) if is_asap_campaign else sequences
                 await reserve_slots_for_lead(
-                    session, cl.id, campaign, effective_inboxes, sequences,
+                    session, cl.id, campaign, effective_inboxes, lead_sequences,
                     lead_id=cl.lead_id,
                     start_date=start_date,
                     last_sent_sequence_index=last_sent,

@@ -108,6 +108,8 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS sequence_type VARCHAR(32) NOT NULL DEFAULT 'standard'",
         # 2026-05-23: pre-assigned A/B variant on queue slots
         "ALTER TABLE queue_slot ADD COLUMN IF NOT EXISTS variant_id INTEGER NULL REFERENCES sequence_variant(id)",
+        # 2026-05-24: custom sequence mode for personalized sequences (wait_for_all | asap)
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS custom_sequence_mode VARCHAR(32) NOT NULL DEFAULT 'wait_for_all'",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

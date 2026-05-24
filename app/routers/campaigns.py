@@ -102,6 +102,7 @@ def _campaign_to_response(
         send_all_as_text=bool(getattr(campaign, 'send_all_as_text', False)),
         timezone=getattr(campaign, 'timezone', None),
         match_lead_provider=bool(getattr(campaign, 'match_lead_provider', False)),
+        custom_sequence_mode=getattr(campaign, 'custom_sequence_mode', 'wait_for_all'),
         created_at=campaign.created_at,
         stats=stats,
     )
@@ -298,6 +299,7 @@ async def create_campaign(data: CampaignCreate, db: AsyncSession = Depends(get_d
         send_all_as_text=data.send_all_as_text,
         timezone=data.timezone,
         match_lead_provider=data.match_lead_provider,
+        custom_sequence_mode=data.custom_sequence_mode,
     )
     db.add(campaign)
     await db.flush()
@@ -568,6 +570,19 @@ async def update_campaign(
                 campaign_id, old_match, data.match_lead_provider,
             )
             needs_global_recalc = True
+    if data.custom_sequence_mode is not None:
+        old_mode = getattr(campaign, 'custom_sequence_mode', 'wait_for_all')
+        campaign.custom_sequence_mode = data.custom_sequence_mode
+        if old_mode != data.custom_sequence_mode:
+            await db.flush()
+            log.info(
+                "Campaign %s custom_sequence_mode changed (%s -> %s); triggering queue recalculation",
+                campaign_id, old_mode, data.custom_sequence_mode,
+            )
+            # Mode change affects which leads are eligible for scheduling.
+            # Always run reconcile so statuses match the new mode, then recalc.
+            await reconcile_personalized_status(db, campaign_id, background_tasks)
+            needs_global_recalc = True
     if data.timezone is not None:
         old_tz = campaign.timezone
         campaign.timezone = data.timezone if data.timezone else None
@@ -619,6 +634,7 @@ async def duplicate_campaign(campaign_id: int, db: AsyncSession = Depends(get_db
         send_first_as_text=original.send_first_as_text,
         send_all_as_text=original.send_all_as_text,
         match_lead_provider=original.match_lead_provider,
+        custom_sequence_mode=getattr(original, 'custom_sequence_mode', 'wait_for_all'),
     )
     db.add(new_campaign)
     await db.flush()
@@ -1215,6 +1231,12 @@ async def reconcile_personalized_status(
             "total_checked": 0,
         }
 
+    # Fetch campaign to check mode
+    camp_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = camp_result.scalar_one_or_none()
+    campaign_mode = getattr(campaign, 'custom_sequence_mode', 'wait_for_all') if campaign else 'wait_for_all'
+    is_asap = campaign_mode == "asap"
+
     if not personalized_seqs:
         # No personalized sequences — move any stuck needs_custom_email leads back to active
         to_active = 0
@@ -1285,14 +1307,21 @@ async def reconcile_personalized_status(
             if seq_pos not in lead_sent and seq_id not in lead_overrides:
                 pending += 1
 
-        if pending > 0:
-            if current in ("active", "contacted"):
-                cl.enrollment_status = "needs_custom_email"
-                to_needs_custom += 1
-        else:
+        if is_asap:
+            # In ASAP mode, never block leads — transition any stuck ones back to active
             if current == "needs_custom_email":
                 cl.enrollment_status = "active"
                 to_active += 1
+        else:
+            # wait_for_all mode (default)
+            if pending > 0:
+                if current in ("active", "contacted"):
+                    cl.enrollment_status = "needs_custom_email"
+                    to_needs_custom += 1
+            else:
+                if current == "needs_custom_email":
+                    cl.enrollment_status = "active"
+                    to_active += 1
 
     await db.flush()
     if to_needs_custom > 0 or to_active > 0:
@@ -1301,8 +1330,8 @@ async def reconcile_personalized_status(
             from app.routers.schedule import enqueue_global_recalculate
             enqueue_global_recalculate(background_tasks)
             log.info(
-                "reconcile_personalized: campaign=%s → needs_custom=%d → active=%d checked=%d",
-                campaign_id, to_needs_custom, to_active, len(campaign_leads),
+                "reconcile_personalized: campaign=%s mode=%s → needs_custom=%d → active=%d checked=%d",
+                campaign_id, campaign_mode, to_needs_custom, to_active, len(campaign_leads),
             )
 
     return {
@@ -1347,6 +1376,12 @@ async def write_custom_email(
     lead, the enrollment status transitions from ``needs_custom_email`` to
     ``active`` and queue slots are created.
     """
+    # Fetch campaign to check custom_sequence_mode
+    camp_result = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = camp_result.scalar_one_or_none()
+    if not campaign:
+        raise HTTPException(404, "Campaign not found")
+
     # Validate sequence belongs to campaign and is personalized
     seq_result = await db.execute(
         select(Sequence).where(
@@ -1421,6 +1456,7 @@ async def write_custom_email(
     written_count = ov_count_result.scalar() or 0
 
     lead_transitioned = False
+    campaign_mode = getattr(campaign, 'custom_sequence_mode', 'wait_for_all')
     if total_personalized > 0 and written_count >= total_personalized:
         if cl.enrollment_status == "needs_custom_email":
             cl.enrollment_status = "active"
@@ -1433,6 +1469,27 @@ async def write_custom_email(
                 "write_custom_email: lead %s campaign %s all custom emails written → active; triggering recalc",
                 lead_id, campaign_id,
             )
+    elif campaign_mode == "asap" and cl.enrollment_status == "needs_custom_email":
+        # In ASAP mode, transition lead to active as soon as the first custom email is written
+        cl.enrollment_status = "active"
+        lead_transitioned = True
+        await db.flush()
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+        enqueue_global_recalculate(background_tasks)
+        log.info(
+            "write_custom_email: lead %s campaign %s ASAP mode — first custom email written → active; triggering recalc",
+            lead_id, campaign_id,
+        )
+    elif campaign_mode == "asap":
+        # Already active — still trigger recalc so the newly-written email gets scheduled
+        await db.commit()
+        from app.routers.schedule import enqueue_global_recalculate
+        enqueue_global_recalculate(background_tasks)
+        log.info(
+            "write_custom_email: lead %s campaign %s ASAP mode — new custom email written; triggering recalc",
+            lead_id, campaign_id,
+        )
 
     return {
         "ok": True,
@@ -1674,16 +1731,21 @@ async def list_queue(campaign_id: int, db: AsyncSession = Depends(get_db)):
     )
     rows = result.all()
     log.info("list_queue: campaign=%s joined_rows=%d", campaign_id, len(rows))
+    campaign_res = await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    campaign = campaign_res.scalar_one_or_none()
+    tz = campaign.timezone if campaign else None
+
     return [
         {
             "slot_id": slot.id,
-            "scheduled_date": slot.scheduled_date.isoformat(),
+            "scheduled_date": slot.scheduled_date.isoformat() + "Z",
             "position_in_day": slot.position_in_day,
             "sequence_index": slot.sequence_index,
             "inbox_id": slot.inbox_id,
             "inbox_email": inbox.email,
             "lead_email": lead.email,
             "lead_name": lead.name,
+            "campaign_timezone": tz or "UTC",
         }
         for slot, _cl, lead, inbox in rows
     ]
@@ -1828,7 +1890,7 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
         {
             "log_id": el.id,
             "sent_date": el.sent_at.date().isoformat() if el.sent_at else None,
-            "sent_at": el.sent_at.isoformat() if el.sent_at else None,
+            "sent_at": (el.sent_at.isoformat() + "Z") if el.sent_at else None,
             "sequence_index": el.sequence_index,
             "subject": el.subject or "",
             "lead_id": el.lead_id,
@@ -1881,9 +1943,9 @@ async def remove_lead_from_campaign(
 async def bulk_add_leads_to_campaign(
     campaign_id: int,
     leads_data: list[CampaignLeadAdd],
-    skip_duplicates: bool = Query(True, description="When True, leads already enrolled in any campaign are skipped and reported in duplicate_leads. When False, leads are added normally (already-enrolled leads in this campaign are silently skipped)."),
-    verify_emails: bool = Query(False, description="When True and email verification is configured, verify each lead's email in the background after adding."),
-    confirm_only: bool = Query(False, description="When True, return a preview (counts, providers, issues) without actually creating leads."),
+    skip_duplicates: bool = True,
+    verify_emails: bool = False,
+    confirm_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -2023,7 +2085,8 @@ async def bulk_add_leads_to_campaign(
             db.add(cl)
             await db.flush()
             _apply_campaign_lead_add_options(cl, lead, entry)
-            if has_personalized and (cl.enrollment_status or "active") == "active":
+            campaign_mode = getattr(campaign_obj, 'custom_sequence_mode', 'wait_for_all')
+            if has_personalized and (cl.enrollment_status or "active") == "active" and campaign_mode != "asap":
                 cl.enrollment_status = "needs_custom_email"
             await db.flush()
             can_send = campaign_lead_may_receive_sends(cl, lead)
@@ -2556,9 +2619,9 @@ async def export_campaign_leads(
 async def import_campaign_leads(
     campaign_id: int,
     file: UploadFile = File(...),
-    skip_duplicates: bool = Query(True, description="When True, leads already enrolled in any campaign are skipped and reported in duplicate_leads. When False, leads are added normally (already-enrolled leads in this campaign are silently skipped)."),
-    verify_emails: bool = Query(False, description="When True, triggers background email verification for added leads"),
-    confirm_only: bool = Query(False, description="When True, return a preview (counts, providers, issues) without actually creating leads."),
+    skip_duplicates: bool = True,
+    verify_emails: bool = False,
+    confirm_only: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """Import leads from a CSV file. Expects columns: email, name, and any custom fields."""
@@ -2757,7 +2820,8 @@ async def import_campaign_leads(
                 email_verification_status=_csv_cell("email_verification_status"),
             )
             _apply_campaign_lead_add_options(cl, lead, _row_opts)
-            if has_personalized_import and (cl.enrollment_status or "active") == "active":
+            campaign_mode = getattr(campaign_obj, 'custom_sequence_mode', 'wait_for_all')
+            if has_personalized_import and (cl.enrollment_status or "active") == "active" and campaign_mode != "asap":
                 cl.enrollment_status = "needs_custom_email"
             await db.flush()
             can_send_csv = campaign_lead_may_receive_sends(cl, lead)

@@ -6,6 +6,13 @@ import { useConfirm } from '../context/ConfirmContext';
 import { useAppMode } from '../context/AppModeContext';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
+import {
+  addDaysToDateKey,
+  formatDateKey,
+  formatDateTimeKey,
+  formatTimeKey,
+  normalizeTimeZone,
+} from '../utils/datetime';
 
 const DAY_NAMES = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 const SCHEDULE_DAYS_BACK = 7;
@@ -280,18 +287,13 @@ export default function Schedule() {
   const filteredSent = sent.filter(matchesFilter);
   const filteredScheduled = scheduled.filter(matchesFilter);
 
-  const fmtTime = iso => {
+  const fmtTime = (iso, tz) => {
     if (!iso) return '';
-    const d = new Date(iso);
-    const base = String(d.getHours()).padStart(2,'0')+':' + String(d.getMinutes()).padStart(2,'0');
-    return isProduction ? base : base + ':' + String(d.getSeconds()).padStart(2,'0');
+    return formatTimeKey(iso, normalizeTimeZone(tz), !isProduction);
   };
-  const fmtDateTime = iso => {
+  const fmtDateTime = (iso, tz) => {
     if (!iso) return '—';
-    const d = new Date(iso);
-    const base = String(d.getHours()).padStart(2,'0')+':' + String(d.getMinutes()).padStart(2,'0');
-    const t = isProduction ? base : base + ':' + String(d.getSeconds()).padStart(2,'0');
-    return d.toLocaleDateString() + ' ' + t;
+    return formatDateTimeKey(iso, normalizeTimeZone(tz), !isProduction);
   };
   const renderLastRun = iso => {
     if (!iso) return '—';
@@ -376,20 +378,25 @@ export default function Schedule() {
   const groupByDate = (items, reverse=false) => {
     const by = {};
     items.forEach(i => {
-      const d = (reverse ? i.sent_date : i.scheduled_date) || 'unknown';
-      if (!by[d]) by[d] = [];
-      by[d].push(i);
+      const tz = normalizeTimeZone(i.campaign_timezone);
+      const dateSource = reverse ? i.sent_at : i.scheduled_at;
+      const dateKey = formatDateKey(dateSource || (reverse ? i.sent_date : i.scheduled_date), tz);
+      const groupKey = `${tz}|${dateKey}`;
+      if (!by[groupKey]) by[groupKey] = { tz, dateKey, items: [] };
+      by[groupKey].items.push(i);
     });
-    const keys = Object.keys(by).sort();
-    if (reverse) keys.reverse();
-    const ordered = {};
-    keys.forEach(k=>{ordered[k]=by[k];});
+    const ordered = Object.values(by).sort((a,b) => {
+      if (a.dateKey === b.dateKey) return a.tz.localeCompare(b.tz);
+      return a.dateKey.localeCompare(b.dateKey);
+    });
+    if (reverse) ordered.reverse();
     return ordered;
   };
 
   const renderRow = (item, uid) => {
     const isSent = item.type === 'sent';
-    const time = isSent ? fmtTime(item.sent_at) : fmtTime(item.scheduled_at);
+    const tz = normalizeTimeZone(item.campaign_timezone);
+    const time = isSent ? fmtTime(item.sent_at, tz) : fmtTime(item.scheduled_at, tz);
     const statusCls = isSent ? 'sent' : 'scheduled';
     const statusLabel = isSent ? 'Sent' : 'Scheduled';
     const subject = item.subject || '(no subject)';
@@ -422,9 +429,9 @@ export default function Schedule() {
             <div className="dp-grid">
               <div><span className="dp-label">Status</span><br/><span className={`badge-status ${statusCls}`} style={{fontSize:'0.8rem'}}>{statusLabel}</span></div>
               {isSent ? (
-                <div><span className="dp-label">Sent at</span><br/><span className="dp-val">{fmtDateTime(item.sent_at)}</span></div>
+                <div><span className="dp-label">Sent at</span><br/><span className="dp-val">{fmtDateTime(item.sent_at, tz)}</span></div>
               ) : (
-                <div><span className="dp-label">Scheduled for</span><br/><span className="dp-val">{fmtDateTime(item.scheduled_at)}</span></div>
+                <div><span className="dp-label">Scheduled for</span><br/><span className="dp-val">{fmtDateTime(item.scheduled_at, tz)}</span></div>
               )}
               <div><span className="dp-label">Lead</span><br/><span className="dp-val mono">{item.lead_email}</span>{item.lead_name ? ` (${item.lead_name})` : ''}<br/><span className={`badge ${item.lead_status}`}>{item.lead_status}</span></div>
               <div><span className="dp-label">Campaign</span><br/><span className="dp-val"><a href={`/campaigns/${item.campaign_id}`}>{item.campaign_name}</a></span></div>
@@ -485,7 +492,8 @@ export default function Schedule() {
         <div className="inbox-col">Inbox</div>
       </div>
     );
-    const today = new Date().toISOString().slice(0,10);
+    const todayByTz = new Map();
+    const tomorrowByTz = new Map();
     const parts = [];
     if (filteredSent.length) {
       const totalSent = stats.total_sent ?? filteredSent.length;
@@ -494,10 +502,13 @@ export default function Schedule() {
           <div className="section-hdr" onClick={() => setPastExpanded(pe=>!pe)}>
             <span className={`arrow ${pastExpanded?'open':''}`}>&#9654;</span> Sent ({totalSent} email{totalSent!==1?'s':''})
           </div>
-          {pastExpanded && Object.entries(groupByDate(filteredSent,true)).map(([d,items]) => (
-            <div key={d}>
-              <div className="date-hdr">{d}</div>
-              {items.map(i=>renderRow(i,`sent-${i.log_id}`))}
+          {pastExpanded && groupByDate(filteredSent,true).map(group => (
+            <div key={`${group.tz}-${group.dateKey}`}>
+              <div className="date-hdr">
+                {group.dateKey}
+                <span className="ml-2 text-xs text-gray-400">{group.tz}</span>
+              </div>
+              {group.items.map(i=>renderRow(i,`sent-${i.log_id}`))}
             </div>
           ))}
         </div>
@@ -510,12 +521,32 @@ export default function Schedule() {
           <div className="section-hdr" onClick={() => setScheduledExpanded(se => !se)}>
             <span className={`arrow ${scheduledExpanded ? 'open' : ''}`}>&#9654;</span> Scheduled ({totalScheduled} email{totalScheduled!==1?'s':''})
           </div>
-          {scheduledExpanded && Object.entries(groupByDate(filteredScheduled,false)).map(([d,items]) => (
-            <div key={d}>
-              <div className="date-hdr">{d}{d===today && <span style={{color:'var(--success)',fontWeight:400,fontSize:'0.8rem',marginLeft:'0.5rem'}}>today</span>}</div>
-              {items.sort((a,b)=>(a.scheduled_at||'').localeCompare(b.scheduled_at||'')||((a.position_in_day||0)-(b.position_in_day||0))).map(i=>renderRow(i,`sched-${i.slot_id}`))}
-            </div>
-          ))}
+          {scheduledExpanded && groupByDate(filteredScheduled,false).map(group => {
+            if (!todayByTz.has(group.tz)) {
+              const todayKey = formatDateKey(new Date(), group.tz);
+              todayByTz.set(group.tz, todayKey);
+              tomorrowByTz.set(group.tz, addDaysToDateKey(todayKey, 1));
+            }
+            const todayKey = todayByTz.get(group.tz);
+            const tomorrowKey = tomorrowByTz.get(group.tz);
+            return (
+              <div key={`${group.tz}-${group.dateKey}`}>
+                <div className="date-hdr">
+                  {group.dateKey}
+                  <span className="ml-2 text-xs text-gray-400">{group.tz}</span>
+                  {group.dateKey === todayKey && (
+                    <span style={{color:'var(--success)',fontWeight:400,fontSize:'0.8rem',marginLeft:'0.5rem'}}>today</span>
+                  )}
+                  {group.dateKey === tomorrowKey && (
+                    <span style={{color:'var(--info)',fontWeight:400,fontSize:'0.8rem',marginLeft:'0.5rem'}}>tomorrow</span>
+                  )}
+                </div>
+                {group.items
+                  .sort((a,b)=>(a.scheduled_at||'').localeCompare(b.scheduled_at||'')||((a.position_in_day||0)-(b.position_in_day||0)))
+                  .map(i=>renderRow(i,`sched-${i.slot_id}`))}
+              </div>
+            );
+          })}
         </div>
       );
     }
@@ -531,8 +562,8 @@ export default function Schedule() {
     <div className="min-h-0 flex-1 overflow-y-auto p-8">
       <div className="flex items-center gap-3">
         <h1 className="text-2xl font-bold">Schedule</h1>
-        <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5" title="Times are stored in UTC and displayed in your local timezone below">
-          🕐 Times in {Intl.DateTimeFormat().resolvedOptions().timeZone.replace(/_/g, ' ')}
+        <span className="text-xs text-gray-400 bg-gray-100 rounded px-2 py-0.5" title="Times are stored in UTC and displayed in each campaign's timezone below">
+          🕐 Times in campaign timezone
         </span>
       </div>
       <Card className="flex flex-wrap justify-between items-center mb-4 p-2">
