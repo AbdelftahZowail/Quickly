@@ -1055,7 +1055,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             return "Complete"
         return f"Step {next_step + 1}"
 
-    def custom_email_status_for_cl(cl_id: int, lead_id: int) -> dict:
+    def custom_email_status_for_cl(cl_id: int, lead_id: int, enrollment_status: str | None) -> dict:
         if not personalized_sequences:
             return {"needs_custom_email": False, "personalized": []}
         written = override_map.get(cl_id, set())
@@ -1063,19 +1063,27 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
         statuses = []
         all_written = True
         for sid, spos in personalized_sequences:
-            is_written = sid in written
+            already_sent = spos in sent_for_lead
+            is_written = sid in written or already_sent
             details = override_details.get(cl_id, {}).get(sid, {})
             statuses.append({
                 "sequence_id": sid,
                 "sequence_position": spos,
                 "subject": details.get("subject"),
                 "written": is_written,
-                "already_sent": spos in sent_for_lead,
+                "already_sent": already_sent,
             })
             if not is_written:
                 all_written = False
+
+        terminal = (enrollment_status or "").lower() in (
+            "completed",
+            "bounced",
+            "unsubscribed",
+            "wrong_person",
+        )
         return {
-            "needs_custom_email": not all_written,
+            "needs_custom_email": False if terminal else not all_written,
             "personalized": statuses,
         }
 
@@ -1098,7 +1106,7 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
             "provider": lead.provider,
             "from_inbox_email": inbox_by_lead.get((lead.id, campaign_id)),
             "interactions": interactions_map.get(lead.id, []),
-            **custom_email_status_for_cl(cl.id, lead.id),
+            **custom_email_status_for_cl(cl.id, lead.id, cl.enrollment_status),
         }
         for cl, lead in rows
     ]
@@ -1362,6 +1370,8 @@ async def write_custom_email(
     cl = cl_result.scalar_one_or_none()
     if not cl:
         raise HTTPException(404, "Lead not enrolled in this campaign")
+    if cl.enrollment_status in ("completed", "bounced", "unsubscribed", "wrong_person"):
+        raise HTTPException(400, f"Lead enrollment status is '{cl.enrollment_status}' — custom emails are not needed for terminal statuses")
 
     # Upsert the custom email override
     ov_result = await db.execute(

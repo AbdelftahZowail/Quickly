@@ -2336,9 +2336,12 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null, ed
 }
 
 // ─── Sequences Tab ────────────────────────────────────────────────────────────
-function PersonalizedSequenceSection({ sequence, sequences, personalizedSequences, leads, campaignId, onWriteCustom }) {
-  const [filter, setFilter] = useState('all');
+function PersonalizedSequenceSection({ sequence, sequences, personalizedSequences, leads, campaignId, onWriteCustom, onRefresh }) {
+  const [filter, setFilter] = useState('needs_writing');
   const [searchQuery, setSearchQuery] = useState('');
+  const [bulkState, setBulkState] = useState({ busy: false, text: 'Use fallback for remaining' });
+  const confirm = useConfirm();
+  const notify = useNotify();
 
   const psIds = useMemo(() => personalizedSequences.map(s => s.id), [personalizedSequences]);
 
@@ -2363,18 +2366,19 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
   }, [leadsForCurrentStep, psIds]);
 
   const filtered = useMemo(() => {
-    let result = leadsWithProgress;
-    if (filter === 'needs_writing') {
-      result = result.filter(l => {
-        const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
-        return ps && !ps.written && !ps.already_sent;
-      });
-    } else if (filter === 'written') {
-      result = result.filter(l => {
-        const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
-        return ps && (ps.written || ps.already_sent);
-      });
-    }
+      let result = leadsWithProgress;
+      if (filter === 'needs_writing') {
+        result = result.filter(l => {
+          if (['completed', 'bounced', 'unsubscribed', 'wrong_person'].includes(l.status)) return false;
+          const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+          return ps && !ps.written && !ps.already_sent;
+        });
+      } else if (filter === 'written') {
+        result = result.filter(l => {
+          const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+          return ps && (ps.written || ps.already_sent);
+        });
+      }
     if (searchQuery) {
       const q = searchQuery.toLowerCase();
       result = result.filter(l =>
@@ -2393,6 +2397,42 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
     return ps?.written || ps?.already_sent;
   }).length;
 
+  const remainingLeads = useMemo(() => {
+    return leadsForCurrentStep.filter(l => {
+      if (['completed', 'bounced', 'unsubscribed', 'wrong_person'].includes(l.status)) return false;
+      const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
+      return ps && !ps.written && !ps.already_sent;
+    });
+  }, [leadsForCurrentStep, sequence.id]);
+
+  const applyFallbackToRemaining = async () => {
+    if (!remainingLeads.length) return;
+    if ((sequence.position ?? 0) === 0 && !sequence?.fallback_subject?.trim()) {
+      notify({ type: 'error', message: 'Fallback subject is required for the first email.' });
+      return;
+    }
+    if (!sequence?.fallback_body?.trim()) {
+      notify({ type: 'error', message: 'Fallback body is required before applying to all remaining leads.' });
+      return;
+    }
+    if (!await confirm(`Use the fallback content for ${remainingLeads.length} remaining lead(s)?`)) return;
+    setBulkState({ busy: true, text: 'Applying…' });
+    try {
+      await Promise.all(
+        remainingLeads.map(l => api.patch(
+          `/campaigns/${campaignId}/leads/${l.lead_id}/custom-email/${sequence.id}`,
+          { subject: null, body: null, is_html: sequence?.is_html ?? false },
+        ))
+      );
+      notify({ type: 'success', message: 'Fallback applied to remaining leads' });
+      onRefresh?.();
+    } catch (e) {
+      notify({ type: 'error', message: e.message });
+    } finally {
+      setBulkState({ busy: false, text: 'Use fallback for remaining' });
+    }
+  };
+
   if (leadsForCurrentStep.length === 0) {
     return (
       <div className="mt-6 pt-6 border-t border-gray-200">
@@ -2405,7 +2445,7 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
   const dotColor = (sid, lead) => {
     const perLead = lead.personalized || [];
     const entry = perLead.find(p => p.sequence_id === sid);
-    if (entry?.already_sent) return 'bg-gray-300';
+    if (entry?.already_sent) return 'bg-emerald-400';
     if (entry?.written) return 'bg-emerald-400';
     return 'bg-purple-300';
   };
@@ -2414,22 +2454,32 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
     const perLead = lead.personalized || [];
     const entry = perLead.find(p => p.sequence_id === sid);
     const stepNum = (personalizedSequences.find(s => s.id === sid)?.position ?? 0) + 1;
-    if (entry?.already_sent) return `Step ${stepNum}: Sent`;
+    if (entry?.already_sent) return `Step ${stepNum}: Written (sent)`;
     if (entry?.written) return `Step ${stepNum}: Written`;
     return `Step ${stepNum}: Needs writing`;
   };
 
   const FILTERS = [
-    { key: 'all', label: 'All' },
     { key: 'needs_writing', label: 'Needs writing' },
     { key: 'written', label: 'Written' },
+    { key: 'all', label: 'All' },
   ];
 
   return (
     <div className="mt-6 pt-6 border-t border-gray-200">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-3 gap-2">
         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Custom Emails per Lead</span>
-        <span className="text-xs text-gray-400">{writtenCount} of {leadsForCurrentStep.length} written</span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-gray-400">{writtenCount} of {leadsForCurrentStep.length} written</span>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={applyFallbackToRemaining}
+            disabled={bulkState.busy || remainingLeads.length === 0}
+          >
+            {bulkState.busy ? 'Applying…' : bulkState.text}
+          </Button>
+        </div>
       </div>
 
       <div className="flex gap-1 mb-3">
@@ -2479,8 +2529,10 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
             ) : (
               filtered.map(l => {
                 const ps = (l.personalized || []).find(p => p.sequence_id === sequence.id);
-                const isWritten = ps?.written;
+                const isWritten = ps?.written || ps?.already_sent;
                 const alreadySent = ps?.already_sent;
+                const isTerminal = ['completed', 'bounced', 'unsubscribed', 'wrong_person'].includes(l.status);
+                const terminalLabel = isTerminal ? l.status.charAt(0).toUpperCase() + l.status.slice(1) : '';
                 return (
                   <tr key={l.lead_id} className="border-b border-gray-100 hover:bg-gray-50">
                     <td className="px-3 py-2">
@@ -2502,7 +2554,9 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
                     )}
                     <td className="px-3 py-2">
                       {alreadySent ? (
-                        <span className="text-gray-400 text-xs font-medium">Sent</span>
+                        <span className="text-green-600 text-xs font-medium">✓ Written</span>
+                      ) : isTerminal ? (
+                        <span className="text-gray-400 text-xs font-medium">{terminalLabel}</span>
                       ) : isWritten ? (
                         <span className="text-green-600 text-xs font-medium">✓ Written</span>
                       ) : (
@@ -2510,8 +2564,8 @@ function PersonalizedSequenceSection({ sequence, sequences, personalizedSequence
                       )}
                     </td>
                     <td className="px-3 py-2 text-right">
-                      {alreadySent ? (
-                        <span className="text-xs text-gray-400 italic">Sent</span>
+      {(alreadySent || isTerminal) ? (
+        <span className="text-xs text-gray-400 italic">{alreadySent ? 'Sent' : terminalLabel}</span>
                       ) : (
                         <button
                           onClick={() => onWriteCustom(l, sequence)}
@@ -2546,7 +2600,7 @@ function CustomEmailEditorModal({ target, campaignId, onClose, onSaved }) {
     if (lead) {
       const personalized = lead.personalized || [];
       const ps = personalized.find(p => p.sequence_id === sequence?.id);
-      if (ps?.written) {
+      if (ps?.written || ps?.already_sent) {
         setSubject(ps.subject ?? '');
         setBody(ps.body ?? '');
       } else {
@@ -2727,6 +2781,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
 
   const openEdit = (seq) => {
     const copy = { ...seq, is_html: seq.is_html ?? false, preview_text: seq.preview_text ?? '', sequence_type: seq.sequence_type ?? 'standard', fallback_subject: seq.fallback_subject ?? '', fallback_body: seq.fallback_body ?? '' };
+    copy._previous_type = copy.sequence_type;
     setEditing(copy);
     setOriginalEditing(copy);
     setEditDirty(false);
@@ -2763,7 +2818,8 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
     e.preventDefault();
     loadingCtrl.start();
     try {
-      await api.patch(`/campaigns/${campaignId}/sequences/${editing.id}`, editing);
+      const { _previous_type, ...payload } = editing || {};
+      await api.patch(`/campaigns/${campaignId}/sequences/${editing.id}`, payload);
       notify({ type: 'success', message: 'Sequence updated' });
       setEditing(null);
       setEditDirty(false);
@@ -2867,7 +2923,10 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                     >
                       <div className="flex items-center gap-1 min-w-0">
                         <span className={`text-sm font-medium truncate min-w-0 flex-1 ${isActive ? 'text-teal-700' : 'text-gray-800'}`}>
-                          {s.subject || (s.sequence_type === 'personalized' ? <em className="text-purple-400 font-normal text-xs">Custom per lead</em> : <em className="text-gray-400 font-normal text-xs">Reply in thread</em>)}
+                          {s.sequence_type === 'personalized'
+                            ? (s.fallback_subject || <em className="text-purple-400 font-normal text-xs">Custom per lead</em>)
+                            : (s.subject || <em className="text-gray-400 font-normal text-xs">Reply in thread</em>)
+                          }
                         </span>
                         {s.is_html && <span className="text-[9px] bg-blue-100 text-blue-600 rounded px-1 py-0.5 font-medium shrink-0">HTML</span>}
                         {s.sequence_type === 'personalized' && <span className="text-[9px] bg-purple-100 text-purple-600 rounded px-1 py-0.5 font-medium shrink-0">Personalized</span>}
@@ -2957,7 +3016,24 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                 <select
                   className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
                   value={editing.sequence_type || 'standard'}
-                  onChange={e => updateEditing({ sequence_type: e.target.value })}
+                  onChange={e => {
+                    const nextType = e.target.value;
+                    setEditing(ed => {
+                      if (!ed) return ed;
+                      const next = { ...ed, sequence_type: nextType };
+                      if ((ed.sequence_type || 'standard') !== nextType) {
+                        if (nextType === 'personalized') {
+                          next.fallback_subject = ed.subject || '';
+                          next.fallback_body = ed.body || '';
+                        } else {
+                          next.subject = ed.fallback_subject || '';
+                          next.body = ed.fallback_body || '';
+                        }
+                      }
+                      return next;
+                    });
+                    setEditDirty(true);
+                  }}
                 >
                   <option value="standard">Standard — same content for all leads</option>
                   <option value="personalized">Personalized — custom content per lead</option>
@@ -2982,7 +3058,10 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
           <div className="flex-1 flex flex-col overflow-y-auto">
             <div className="px-6 py-4 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
               <div>
-                <h3 className="font-semibold text-gray-800">Step {selectedSeq.position + 1}{selectedSeq.subject ? ` — ${selectedSeq.subject}` : (selectedSeq.sequence_type === 'personalized' ? ' — Custom per lead' : ' — Reply in thread')}</h3>
+                <h3 className="font-semibold text-gray-800">Step {selectedSeq.position + 1}{selectedSeq.sequence_type === 'personalized'
+                  ? (selectedSeq.fallback_subject ? ` — ${selectedSeq.fallback_subject}` : ' — Custom per lead')
+                  : (selectedSeq.subject ? ` — ${selectedSeq.subject}` : ' — Reply in thread')
+                }</h3>
                 <p className="text-xs text-gray-400">{selectedSeq.wait_days_after_previous}d wait{selectedSeq.is_html ? ' · HTML' : ' · Plain text'}{' · Day ' + getCumulativeDay(selectedIdx)}</p>
               </div>
               <div className="flex gap-2">
@@ -3142,7 +3221,22 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                 <select
                   className="w-full border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
                   value={form.sequence_type || 'standard'}
-                  onChange={e => { const newType = e.target.value; setForm(f => ({ ...f, sequence_type: newType })); }}
+                  onChange={e => {
+                    const newType = e.target.value;
+                    setForm(f => {
+                      const next = { ...f, sequence_type: newType };
+                      if ((f.sequence_type || 'standard') !== newType) {
+                        if (newType === 'personalized') {
+                          next.fallback_subject = f.subject || '';
+                          next.fallback_body = f.body || '';
+                        } else {
+                          next.subject = f.fallback_subject || '';
+                          next.body = f.fallback_body || '';
+                        }
+                      }
+                      return next;
+                    });
+                  }}
                 >
                   <option value="standard">Standard — same content for all leads</option>
                   <option value="personalized">Personalized — custom content per lead</option>

@@ -351,9 +351,18 @@ async def run_send_job():
                         v for v in getattr(sequence, 'variants', []) if v.enabled
                     ]
                     if enabled_variants:
-                        # options: None = default content, or any enabled variant
-                        options = [None] + enabled_variants
-                        chosen = random.choice(options)
+                        # Use the pre-assigned variant if one exists on the slot
+                        chosen = None
+                        if slot.variant_id is not None:
+                            chosen = next(
+                                (v for v in enabled_variants if v.id == slot.variant_id),
+                                None,
+                            )
+                        # Fallback: random selection (legacy slots without pre-assignment)
+                        if chosen is None:
+                            # options: None = default content, or any enabled variant
+                            options = [None] + enabled_variants
+                            chosen = random.choice(options)
                         if chosen is not None:
                             chosen_variant_id = chosen.id
                             if chosen.subject is not None:
@@ -1117,8 +1126,17 @@ async def send_slot_job(slot_id: int) -> None:
         if getattr(sequence, "sequence_type", "standard") != "personalized":
             enabled_variants = [v for v in getattr(sequence, "variants", []) if v.enabled]
             if enabled_variants:
-                options = [None] + enabled_variants
-                chosen = random.choice(options)
+                # Use the pre-assigned variant if one exists on the slot
+                chosen = None
+                if slot.variant_id is not None:
+                    chosen = next(
+                        (v for v in enabled_variants if v.id == slot.variant_id),
+                        None,
+                    )
+                # Fallback: random selection (legacy slots without pre-assignment)
+                if chosen is None:
+                    options = [None] + enabled_variants
+                    chosen = random.choice(options)
                 if chosen is not None:
                     chosen_variant_id = chosen.id
                     if chosen.subject is not None:

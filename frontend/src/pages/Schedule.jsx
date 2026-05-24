@@ -178,20 +178,20 @@ export default function Schedule() {
     try {
       const effectiveBack = opts.daysBack ?? daysBack;
       const effectiveAhead = opts.daysAhead ?? daysAhead;
-      const [s, sch, st, srv, stratData] = await Promise.all([
-        api.get(buildQuery('/schedule/sent', {
-          days_back: effectiveBack,
-          limit: SCHEDULE_LIMIT,
-          offset: 0,
-          include_body: true,
-          include_events: false,
-        })).catch(() => []),
-        api.get(buildQuery('/schedule/scheduled', {
-          days_ahead: effectiveAhead,
-          limit: SCHEDULE_LIMIT,
-          offset: 0,
-          include_body: false,
-        })).catch(() => []),
+    const [s, sch, st, srv, stratData] = await Promise.all([
+      api.get(buildQuery('/schedule/sent', {
+        days_back: effectiveBack,
+        limit: SCHEDULE_LIMIT,
+        offset: 0,
+        include_body: true,
+        include_events: false,
+      })).catch(() => []),
+      api.get(buildQuery('/schedule/scheduled', {
+        days_ahead: effectiveAhead,
+        limit: SCHEDULE_LIMIT,
+        offset: 0,
+        include_body: true,
+      })).catch(() => []),
         api.get('/schedule/stats').catch(() => ({})),
         api.get('/status').catch(() => ({})),
         api.get('/settings/scheduling-strategy').catch(() => ({})),
@@ -438,6 +438,9 @@ export default function Schedule() {
                   <div><span className="dp-label">Inbox max/day</span><br/><span className="dp-val">{item.inbox_max_per_day??'—'}</span></div>
                   <div><span className="dp-label">Position in day</span><br/><span className="dp-val">#{item.position_in_day??'—'}</span></div>
                 </>
+              )}
+              {item.has_variants && (
+                <div><span className="dp-label">A/B variant</span><br/><span className="dp-val">{item.variant_id ? `Variant #${item.variant_id}` : 'Default'}{item.has_variants ? <span className="badge-status" style={{marginLeft:'0.3rem',fontSize:'0.7rem',padding:'0.1rem 0.4rem',background:'#e0f2fe',color:'#0369a1'}}>A/B active</span> : ''}</span></div>
               )}
               {isSent && item.message_id && (
                 <div className="dp-full"><span className="dp-label">Message ID</span><br/><span className="dp-val mono" style={{fontSize:'0.78rem'}}>{item.message_id}</span></div>

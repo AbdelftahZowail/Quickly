@@ -325,8 +325,13 @@ class QueueSlot(Base):
     sequence_index = Column(Integer, nullable=False)  # 0, 1, 2 matching sequence position
     scheduled_date = Column(DateTime, nullable=False)  # date part used for "which day"
     position_in_day = Column(Integer, nullable=False)  # 1, 2, 3... for send order that day (per inbox)
+    # Pre-assigned A/B variant (set during recalculation; None = default sequence content)
+    variant_id = Column(
+        Integer, ForeignKey("sequence_variant.id", ondelete="SET NULL"), nullable=True, default=None
+    )
     campaign_lead = relationship("CampaignLead", back_populates="queue_slots")
     inbox = relationship("Inbox")
+    variant = relationship("SequenceVariant", foreign_keys=[variant_id])
 
 
 class EmailLog(Base):

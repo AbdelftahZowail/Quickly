@@ -106,6 +106,8 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE custom_email_override ALTER COLUMN body DROP NOT NULL",
         # 2026-05-22: personalized sequence type column (standard|personalized)
         "ALTER TABLE sequence ADD COLUMN IF NOT EXISTS sequence_type VARCHAR(32) NOT NULL DEFAULT 'standard'",
+        # 2026-05-23: pre-assigned A/B variant on queue slots
+        "ALTER TABLE queue_slot ADD COLUMN IF NOT EXISTS variant_id INTEGER NULL REFERENCES sequence_variant(id)",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

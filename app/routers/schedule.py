@@ -12,9 +12,10 @@ from app import database as _app_db
 from app.database import get_db
 from app.campaign_lead_status import campaign_lead_schedule_eligibility_clause
 from app.models import (
-    QueueSlot, CampaignLead, Campaign, Sequence, Lead, Inbox, EmailLog,
-    EmailOpen, EmailClick, CustomEmailOverride,
+    QueueSlot, CampaignLead, Campaign, Sequence, SequenceVariant,
+    Lead, Inbox, EmailLog, EmailOpen, EmailClick, CustomEmailOverride,
 )
+from app.sender import render_body, get_lead_data
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app import time as time_provider
 from app.app_settings import (
@@ -71,13 +72,25 @@ def _utc_iso(dt) -> "str | None":
 
 
 def _serialize_sent(
-    el, lead, campaign, seq, inbox, campaign_lead, include_body: bool, include_events: bool
+    el, lead, campaign, seq, inbox, campaign_lead, include_body: bool, include_events: bool,
+    resolved_content: dict | None = None,
 ) -> dict:
     enr = (
         (getattr(campaign_lead, "enrollment_status", None) or "active")
         if campaign_lead is not None
         else (lead.status or "active")
     )
+    # Use pre-resolved content (with variables rendered, variant applied) if available
+    if resolved_content and include_body:
+        body = resolved_content["body"]
+        is_html = resolved_content["is_html"]
+        variant_id = resolved_content.get("variant_id")
+        has_variants = resolved_content.get("has_variants", False)
+    else:
+        body = seq.body if (seq and include_body) else ""
+        is_html = bool(seq.is_html) if seq else False
+        variant_id = None
+        has_variants = False
     return {
         "type": "sent",
         "log_id": el.id,
@@ -87,9 +100,11 @@ def _serialize_sent(
         "message_id": el.message_id or "",
         "sequence_index": el.sequence_index,
         "sequence_id": seq.id if seq else None,
-        "sequence_body": seq.body if (seq and include_body) else "",
-        "sequence_is_html": bool(seq.is_html) if seq else False,
+        "sequence_body": body,
+        "sequence_is_html": is_html,
         "sequence_wait_days": seq.wait_days_after_previous if seq else 0,
+        "variant_id": variant_id,
+        "has_variants": has_variants,
         "lead_id": lead.id,
         "lead_email": lead.email,
         "lead_name": lead.name or "",
@@ -118,13 +133,26 @@ def _serialize_sent(
     }
 
 
-def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, include_body: bool, override_subject: str | None = None) -> dict:
+def _serialize_scheduled(
+    slot, campaign_lead, lead, campaign, inbox, seq,
+    include_body: bool,
+    resolved_content: dict | None = None,
+) -> dict:
     enr = getattr(campaign_lead, "enrollment_status", None) or "active"
-    # Subject: override → fallback → seq.subject → "(reply in thread)"
-    effective_subject = override_subject
-    if effective_subject is None and seq is not None:
-        effective_subject = seq.fallback_subject or seq.subject
-    subject_display = effective_subject or "(reply in thread)"
+    # Use pre-resolved content (with variables rendered, overrides applied) if available
+    if resolved_content:
+        subject_display = resolved_content["subject"]
+        body = resolved_content["body"] if include_body else ""
+        is_html = resolved_content["is_html"]
+        variant_id = resolved_content.get("variant_id")
+        has_variants = resolved_content.get("has_variants", False)
+    else:
+        # Fallback: raw sequence content (no resolution)
+        subject_display = (seq.fallback_subject or seq.subject or "(reply in thread)") if seq else "(reply in thread)"
+        body = seq.body if (seq and include_body) else ""
+        is_html = bool(seq.is_html) if seq else False
+        variant_id = None
+        has_variants = False
     return {
         "type": "scheduled",
         "slot_id": slot.id,
@@ -134,9 +162,11 @@ def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, includ
         "sequence_index": slot.sequence_index,
         "subject": subject_display,
         "sequence_id": seq.id if seq else None,
-        "sequence_body": seq.body if (seq and include_body) else "",
-        "sequence_is_html": bool(seq.is_html) if seq else False,
+        "sequence_body": body,
+        "sequence_is_html": is_html,
         "sequence_wait_days": seq.wait_days_after_previous if seq else 0,
+        "variant_id": variant_id,
+        "has_variants": has_variants,
         "inbox_id": inbox.id,
         "inbox_email": inbox.email,
         "inbox_display_name": inbox.display_name or "",
@@ -154,6 +184,225 @@ def _serialize_scheduled(slot, campaign_lead, lead, campaign, inbox, seq, includ
         "campaign_wait_minutes": inbox.wait_minutes_between or 5,
         "campaign_stop_on_reply": campaign.stop_on_reply,
     }
+
+
+def _variants_loaded(sequence) -> bool:
+    """Check if ``sequence.variants`` is already in the instance dict
+    (pre-loaded via selectinload) without triggering a lazy load."""
+    try:
+        from sqlalchemy.orm.attributes import instance_state
+        state = instance_state(sequence)
+        return "variants" in state.dict
+    except Exception:
+        return False
+
+
+async def _resolve_content(
+    db: AsyncSession,
+    sequence: Sequence | None,
+    lead: Lead,
+    campaign_lead: CampaignLead | None,
+    campaign: Campaign | None,
+    variant_id: int | None,
+) -> dict:
+    """Resolve the effective subject, body, and is_html for a sent or scheduled email.
+
+    This mirrors the resolution logic from ``jobs.py``'s ``run_send_job``:
+      1. A/B variant selected via *variant_id* (from slot or email log)
+      2. Personalized sequence override (CustomEmailOverride)
+      3. Fallback content for personalized sequences
+      4. Variable substitution via ``render_body()``
+
+    Returns ``{subject, body, is_html, variant_id, has_variants}``.
+    """
+    if sequence is None:
+        return {
+            "subject": "(reply in thread)",
+            "body": "",
+            "is_html": False,
+            "variant_id": None,
+            "has_variants": False,
+        }
+
+    # ── Step 1: Resolve base content (variant → default) ──────────────────
+    seq_subject = sequence.subject
+    seq_body = sequence.body
+    seq_is_html = sequence.is_html
+    chosen_variant_id = None
+    has_variants = False
+
+    if getattr(sequence, "sequence_type", "standard") != "personalized":
+        # Standard sequence: check for A/B variant
+        variants = (
+            sequence.variants
+            if _variants_loaded(sequence)
+            else []
+        )
+        enabled_variants = [v for v in variants if v.enabled]
+        if enabled_variants:
+            has_variants = True
+            # Use the pre-assigned (or sent) variant if one exists
+            if variant_id is not None:
+                chosen = next(
+                    (v for v in enabled_variants if v.id == variant_id),
+                    None,
+                )
+                if chosen is not None:
+                    chosen_variant_id = chosen.id
+                    if chosen.subject is not None:
+                        seq_subject = chosen.subject
+                    if chosen.body:
+                        seq_body = chosen.body
+                    if chosen.is_html is not None:
+                        seq_is_html = chosen.is_html
+            # If no variant, default content is shown
+
+    # ── Step 2: Personalized sequence override ────────────────────────────
+    if getattr(sequence, "sequence_type", "standard") == "personalized":
+        if campaign_lead is not None:
+            ov_res = await db.execute(
+                select(CustomEmailOverride).where(
+                    CustomEmailOverride.campaign_lead_id == campaign_lead.id,
+                    CustomEmailOverride.sequence_id == sequence.id,
+                )
+            )
+            override = ov_res.scalar_one_or_none()
+            if override:
+                if override.subject is not None:
+                    seq_subject = override.subject
+                elif sequence.fallback_subject:
+                    seq_subject = sequence.fallback_subject
+                if override.body is not None:
+                    seq_body = override.body
+                elif sequence.fallback_body:
+                    seq_body = sequence.fallback_body
+                if override.is_html is not None:
+                    seq_is_html = override.is_html
+            elif sequence.fallback_subject or sequence.fallback_body:
+                if sequence.fallback_subject:
+                    seq_subject = sequence.fallback_subject
+                if sequence.fallback_body:
+                    seq_body = sequence.fallback_body
+
+    # ── Step 3: Subject resolution ────────────────────────────────────────
+    effective_subject = seq_subject
+    subject_display = (effective_subject or "").strip()
+    if not subject_display:
+        subject_display = "(reply in thread)"
+
+    # ── Step 4: is_html resolution ────────────────────────────────────────
+    if seq_is_html is not None:
+        is_html = bool(seq_is_html)
+    else:
+        import re
+        is_html = bool(re.search(r'<[a-zA-Z][^>]*>', seq_body or ""))
+
+    # ── Step 5: Variable substitution ─────────────────────────────────────
+    lead_data = get_lead_data(lead)
+    rendered_subject = render_body(subject_display, lead_data)
+    rendered_body = render_body(seq_body, lead_data) if seq_body else ""
+
+    return {
+        "subject": rendered_subject,
+        "body": rendered_body,
+        "is_html": is_html,
+        "variant_id": chosen_variant_id,
+        "has_variants": has_variants,
+    }
+
+
+async def _resolve_scheduled_content(
+    db: AsyncSession,
+    slot: QueueSlot,
+    sequence: Sequence | None,
+    lead: Lead,
+    campaign_lead: CampaignLead | None,
+    campaign: Campaign,
+    inbox: Inbox,
+) -> dict:
+    """Resolve content for a scheduled slot (reads variant_id from slot)."""
+    return await _resolve_content(
+        db, sequence, lead, campaign_lead, campaign, slot.variant_id
+    )
+
+
+async def _resolve_sent_content(
+    db: AsyncSession,
+    email_log: EmailLog,
+    sequence: Sequence | None,
+    lead: Lead,
+    campaign_lead: CampaignLead | None,
+    campaign: Campaign,
+) -> dict:
+    """Resolve the effective body/is_html for a sent email.
+
+    The subject is taken from *email_log.subject* (already rendered at send
+    time).  The body is reconstructed from the sequence and the variant that
+    was actually sent (*email_log.variant_id*), with variable substitution.
+    """
+    resolved = await _resolve_content(
+        db, sequence, lead, campaign_lead, campaign, email_log.variant_id
+    )
+    # Override subject with the sent-time rendered value
+    resolved["subject"] = email_log.subject or resolved["subject"]
+    return resolved
+
+
+async def _assign_variants_to_slots(db: AsyncSession) -> None:
+    """Pre-assign A/B variants to all queue slots that have sequences with
+    enabled variants.  Runs after every recalculation.
+
+    For each slot whose sequence has enabled A/B variants, randomly pick one
+    variant and store its id on the slot.  Slots for sequences without
+    variants or with only disabled variants are left with ``variant_id = NULL``
+    (meaning default content will be used at send time).
+    """
+    import random
+
+    # Fetch all queue slots joined with campaign_lead → campaign → sequence
+    # to get the sequence for each slot.
+    SeqAlias = aliased(Sequence)
+    rows = await db.execute(
+        select(QueueSlot, SeqAlias)
+        .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
+        .join(Campaign, CampaignLead.campaign_id == Campaign.id)
+        .join(
+            SeqAlias,
+            (SeqAlias.campaign_id == Campaign.id)
+            & (SeqAlias.position == QueueSlot.sequence_index),
+        )
+        .options(selectinload(SeqAlias.variants))
+    )
+
+    updates = 0
+    for slot, seq in rows.all():
+        enabled_variants = [
+            v for v in getattr(seq, 'variants', []) if v.enabled
+        ]
+        if not enabled_variants:
+            # No variants to assign — leave variant_id as NULL
+            if slot.variant_id is not None:
+                slot.variant_id = None
+                updates += 1
+            continue
+        # options: None = default content, or any enabled variant
+        chosen = random.choice([None] + enabled_variants)
+        if chosen is None:
+            # Default content chosen — set variant_id to None
+            if slot.variant_id is not None:
+                slot.variant_id = None
+                updates += 1
+            continue
+        if slot.variant_id != chosen.id:
+            slot.variant_id = chosen.id
+            updates += 1
+
+    if updates:
+        await db.flush()
+        log.info("_assign_variants_to_slots: updated %d slot(s)", updates)
+    else:
+        log.info("_assign_variants_to_slots: no changes needed")
+
 
 
 @router.get("/sent")
@@ -201,8 +450,31 @@ async def global_sent(
     result = await db.execute(query)
     rows = result.all()
 
+    # When include_body is requested, resolve content for all sent emails
+    resolved_map: dict[int, dict] = {}  # log_id -> resolved_content
+    if include_body:
+        # Pre-load sequence variants for all relevant sequences
+        seq_ids = {seq.id for _el, _lead, _camp, seq, _inbox, _cl in rows if seq is not None}
+        if seq_ids:
+            seqs_result = await db.execute(
+                select(Sequence)
+                .options(selectinload(Sequence.variants))
+                .where(Sequence.id.in_(seq_ids))
+            )
+            seqs_with_variants = {s.id: s for s in seqs_result.scalars().all()}
+            for row_idx in range(len(rows)):
+                el, lead, campaign, seq, inbox, cl = rows[row_idx]
+                if seq is not None and seq.id in seqs_with_variants:
+                    seq.variants = seqs_with_variants[seq.id].variants
+
+        for el, lead, campaign, seq, inbox, cl in rows:
+            resolved_map[el.id] = await _resolve_sent_content(
+                db, el, seq, lead, cl, campaign
+            )
+
     return [
-        _serialize_sent(el, lead, campaign, seq, inbox, cl, include_body, include_events)
+        _serialize_sent(el, lead, campaign, seq, inbox, cl, include_body, include_events,
+                        resolved_content=resolved_map.get(el.id))
         for el, lead, campaign, seq, inbox, cl in rows
     ]
 
@@ -246,21 +518,33 @@ async def global_scheduled(
     result = await db.execute(query)
     rows = result.all()
 
-    # Batch-fetch custom email overrides for personalized sequences
-    override_subjects: dict[tuple[int, int], str] = {}  # (campaign_lead_id, sequence_id) -> subject
-    cl_override_ids = {cl.id for _slot, cl, _camp, _lead, _inbox, seq in rows if seq is not None}
-    if cl_override_ids:
-        ov_result = await db.execute(
-            select(CustomEmailOverride).where(CustomEmailOverride.campaign_lead_id.in_(cl_override_ids))
-        )
-        for ov in ov_result.scalars().all():
-            if ov.subject:
-                override_subjects[(ov.campaign_lead_id, ov.sequence_id)] = ov.subject
+    # When include_body is requested, batch-resolve content for all slots
+    resolved_map: dict[int, dict] = {}  # slot_id -> resolved_content
+    if include_body:
+        # Pre-load sequence variants for all relevant sequences
+        seq_ids = {seq.id for _slot, _cl, _camp, _lead, _inbox, seq in rows if seq is not None}
+        if seq_ids:
+            seqs_result = await db.execute(
+                select(Sequence)
+                .options(selectinload(Sequence.variants))
+                .where(Sequence.id.in_(seq_ids))
+            )
+            seqs_with_variants = {s.id: s for s in seqs_result.scalars().all()}
+            # Re-attach variants to the aliased sequences in rows
+            for row_idx in range(len(rows)):
+                slot, cl, campaign, lead, inbox, seq = rows[row_idx]
+                if seq is not None and seq.id in seqs_with_variants:
+                    seq.variants = seqs_with_variants[seq.id].variants
+
+        for slot, cl, campaign, lead, inbox, seq in rows:
+            resolved_map[slot.id] = await _resolve_scheduled_content(
+                db, slot, seq, lead, cl, campaign, inbox
+            )
 
     return [
         _serialize_scheduled(
             slot, cl, lead, campaign, inbox, seq, include_body,
-            override_subject=override_subjects.get((cl.id, seq.id)) if seq else None,
+            resolved_content=resolved_map.get(slot.id),
         )
         for slot, cl, campaign, lead, inbox, seq in rows
     ]
@@ -268,7 +552,7 @@ async def global_scheduled(
 
 @router.get("/sent/{log_id}")
 async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
-    """Fetch a single sent email with full sequence body and events."""
+    """Fetch a single sent email with full sequence body, variables rendered, and events."""
     SeqAlias = aliased(Sequence)
     InboxAlias = aliased(Inbox)
     ClAlias = aliased(CampaignLead)
@@ -277,6 +561,7 @@ async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
         .options(
             selectinload(EmailLog.opens),
             selectinload(EmailLog.clicks),
+            selectinload(SeqAlias.variants),
         )
         .join(Lead, EmailLog.lead_id == Lead.id)
         .join(Campaign, EmailLog.campaign_id == Campaign.id)
@@ -297,15 +582,19 @@ async def sent_detail(log_id: int, db: AsyncSession = Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail="Sent email not found")
     el, lead, campaign, seq, inbox, cl = row
-    return _serialize_sent(el, lead, campaign, seq, inbox, cl, include_body=True, include_events=True)
+    resolved = await _resolve_sent_content(db, el, seq, lead, cl, campaign)
+    return _serialize_sent(el, lead, campaign, seq, inbox, cl, include_body=True, include_events=True,
+                           resolved_content=resolved)
 
 
 @router.get("/scheduled/{slot_id}")
 async def scheduled_detail(slot_id: int, db: AsyncSession = Depends(get_db)):
-    """Fetch a single scheduled slot with full sequence body."""
+    """Fetch a single scheduled slot with full sequence body, variables rendered,
+    and all overrides/applicable variants applied."""
     SeqAlias = aliased(Sequence)
     result = await db.execute(
         select(QueueSlot, CampaignLead, Campaign, Lead, Inbox, SeqAlias)
+        .options(selectinload(SeqAlias.variants))
         .join(CampaignLead, QueueSlot.campaign_lead_id == CampaignLead.id)
         .join(Campaign, CampaignLead.campaign_id == Campaign.id)
         .join(Lead, CampaignLead.lead_id == Lead.id)
@@ -321,7 +610,8 @@ async def scheduled_detail(slot_id: int, db: AsyncSession = Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail="Scheduled slot not found")
     slot, _cl, campaign, lead, inbox, seq = row
-    return _serialize_scheduled(slot, _cl, lead, campaign, inbox, seq, include_body=True)
+    resolved = await _resolve_scheduled_content(db, slot, seq, lead, _cl, campaign, inbox)
+    return _serialize_scheduled(slot, _cl, lead, campaign, inbox, seq, include_body=True, resolved_content=resolved)
 
 
 
@@ -588,6 +878,9 @@ async def recalculate_all_campaigns(db: AsyncSession) -> dict:
             log.warning("recalculate_all_campaigns[priority]: no leads to process")
 
     campaigns_processed = len(campaigns)
+
+    # Pre-assign A/B variants to all newly created slots
+    await _assign_variants_to_slots(db)
 
     slot_count = await db.execute(select(func.count(QueueSlot.id)))
     total_slots = slot_count.scalar() or 0
