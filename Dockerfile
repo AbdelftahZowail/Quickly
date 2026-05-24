@@ -1,7 +1,7 @@
 # multi-stage Dockerfile for quick, minimal production image
 
 # 1. build the React frontend
-FROM node:18-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 WORKDIR /app/frontend
 
 # copy only package.json files first to leverage layer caching
