@@ -110,6 +110,25 @@ async def _run_migrations(conn) -> None:
         "ALTER TABLE queue_slot ADD COLUMN IF NOT EXISTS variant_id INTEGER NULL REFERENCES sequence_variant(id)",
         # 2026-05-24: custom sequence mode for personalized sequences (wait_for_all | asap)
         "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS custom_sequence_mode VARCHAR(32) NOT NULL DEFAULT 'wait_for_all'",
+        # 2026-05-24: notification table for in-app notification center
+        """
+        CREATE TABLE IF NOT EXISTS notification (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES app_user(id) ON DELETE CASCADE,
+            event_type VARCHAR(64) NOT NULL,
+            title VARCHAR(255) NOT NULL,
+            message TEXT NOT NULL,
+            data_json JSONB DEFAULT '{}',
+            lead_id INTEGER REFERENCES lead(id) ON DELETE SET NULL,
+            campaign_id INTEGER REFERENCES campaign(id) ON DELETE SET NULL,
+            inbox_id INTEGER REFERENCES inbox(id) ON DELETE SET NULL,
+            read_at TIMESTAMP WITHOUT TIME ZONE,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_notification_user_created ON notification (user_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS ix_notification_user_read ON notification (user_id, read_at)",
+        "CREATE INDEX IF NOT EXISTS ix_notification_event ON notification (event_type)",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

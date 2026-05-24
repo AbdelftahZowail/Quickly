@@ -13,12 +13,14 @@ import DeliverabilityTips from './pages/DeliverabilityTips';
 import SystemHealth from './pages/SystemHealth';
 import Leads from './pages/Leads';
 import LeadDetail from './pages/LeadDetail';
+import Notifications from './pages/Notifications';
 import Login from './pages/Login';
 import { api } from './api';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import SplashScreen from './components/SplashScreen';
 import { DarkModeProvider } from './context/DarkModeContext';
 import { SystemHealthProvider } from './context/SystemHealthContext';
+import { NotificationsProvider } from './context/NotificationsContext';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -67,6 +69,7 @@ function AppRoutes() {
               <Route path="/settings" element={<Settings />} />
               <Route path="/deliverability-tips" element={<DeliverabilityTips />} />
               <Route path="/system-health" element={<SystemHealth />} />
+              <Route path="/notifications" element={<Notifications />} />
               <Route path="*" element={<Navigate to="/" />} />
             </Routes>
           </Layout>
@@ -81,7 +84,9 @@ export default function App() {
     <DarkModeProvider>
       <AuthProvider>
         <SystemHealthProvider>
-          <AppRoutes />
+          <NotificationsProvider>
+            <AppRoutes />
+          </NotificationsProvider>
         </SystemHealthProvider>
       </AuthProvider>
     </DarkModeProvider>

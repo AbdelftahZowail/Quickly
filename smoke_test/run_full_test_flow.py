@@ -35,7 +35,8 @@ import asyncio
 # workspace root so imports like ``from app...`` succeed.
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.database import AsyncSessionLocal, init_db
+from app.database import AsyncSessionLocal
+from app.settings_manager import initialize_settings
 from app import time as time_provider
 
 # We'll call endpoint logic directly instead of using TestClient to avoid
@@ -65,6 +66,7 @@ async def _recalculate_all() -> None:
     print("-> performing global recalculation")
     async with AsyncSessionLocal() as session:
         result = await recalculate_all_campaigns(session)
+        await session.commit()  # recalculate_all_campaigns doesn't auto-commit
 
     print(f"-> recalculation complete: strategy={result.get('strategy')} "
           f"processed={result.get('campaigns_processed')} "
@@ -106,8 +108,9 @@ async def _simulate_two_days() -> None:
 
 async def main() -> None:
     validation_failed = False
-    # make sure database is initialized (tables/migrations)
-    await init_db()
+    # DB already initialized by the running backend; just ensure settings are loaded
+    async with AsyncSessionLocal() as session:
+        await initialize_settings(session)
 
     # 1. delete existing test data and reset time
     print("STEP 1: cleanup old test data")

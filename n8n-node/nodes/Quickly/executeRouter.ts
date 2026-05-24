@@ -933,6 +933,43 @@ async function runNotification(
   credentials: IDataObject,
   operation: string,
 ): Promise<IDataObject> {
+  if (operation === 'list') {
+    const qs: IDataObject = {};
+    const unreadOnly = ctx.getNodeParameter('unreadOnly', i, false) as boolean;
+    if (unreadOnly) qs.unread_only = 'true';
+    qs.limit = String(ctx.getNodeParameter('limit', i, 50));
+    return (await quicklyRequest.call(ctx, credentials, {
+      method: 'GET',
+      path: '/api/notifications',
+      qs,
+    })) as IDataObject;
+  }
+  if (operation === 'markRead') {
+    const id = ctx.getNodeParameter('notificationId', i, 0) as number;
+    return (await quicklyRequest.call(ctx, credentials, {
+      method: 'PATCH',
+      path: `/api/notifications/${id}/read`,
+    })) as IDataObject;
+  }
+  if (operation === 'markAllRead') {
+    return (await quicklyRequest.call(ctx, credentials, {
+      method: 'POST',
+      path: '/api/notifications/read-all',
+    })) as IDataObject;
+  }
+  if (operation === 'delete') {
+    const id = ctx.getNodeParameter('notificationId', i, 0) as number;
+    return (await quicklyRequest.call(ctx, credentials, {
+      method: 'DELETE',
+      path: `/api/notifications/${id}`,
+    })) as IDataObject;
+  }
+  if (operation === 'unreadCount') {
+    return (await quicklyRequest.call(ctx, credentials, {
+      method: 'GET',
+      path: '/api/notifications/unread-count',
+    })) as IDataObject;
+  }
   if (operation === 'getConfig') {
     return (await quicklyRequest.call(ctx, credentials, {
       method: 'GET',

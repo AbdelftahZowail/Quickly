@@ -914,15 +914,11 @@ async def run_send_job():
                     # ~15% chance of reply
                     if random.random() < 0.15:
                         fake_reply = LeadReply(
-                            lead_id=lead.id,
-                            campaign_id=campaign.id,
-                            inbox_id=inbox.id,
-                            thread_id=email_log_entry.thread_id or "fake-thread",
-                            message_id=f"<fake-reply-{email_log_entry.id}@test>",
-                            snippet="This is a simulated test reply.",
-                            received_at=time_provider.utcnow(),
+                            lead_id=lead.id, campaign_id=campaign.id,
+                            replied_at=time_provider.utcnow(),
                         )
                         session.add(fake_reply)
+                        await session.flush()
                         await fire_webhook_event(session, "lead.replied", {
                             "lead_id": lead.id,
                             "lead_email": lead.email,
@@ -930,7 +926,7 @@ async def run_send_job():
                             "thread_id": email_log_entry.thread_id,
                             "inbox_id": inbox.id,
                             "inbox_email": inbox.email,
-                            "message_id": fake_reply.message_id,
+                            "reply_id": fake_reply.id,
                             "timestamp": time_provider.utcnow().isoformat() + "Z",
                         })
                         log.info("TEST MODE: simulated reply for email_log_id=%s lead_id=%s", email_log_entry.id, lead.id)
@@ -1589,17 +1585,15 @@ async def send_slot_job(slot_id: int) -> None:
             if random.random() < 0.15:
                 fake_reply = LeadReply(
                     lead_id=lead.id, campaign_id=campaign.id,
-                    inbox_id=inbox.id,
-                    thread_id=email_log_entry.thread_id or "fake-thread",
-                    message_id=f"<fake-reply-{email_log_entry.id}@test>",
-                    snippet="This is a simulated test reply.",
-                    received_at=time_provider.utcnow(),
+                    replied_at=time_provider.utcnow(),
                 )
                 session.add(fake_reply)
+                await session.flush()  # get the assigned id
                 await fire_webhook_event(session, "lead.replied", {
                     "lead_id": lead.id, "lead_email": lead.email, "lead_name": lead.name or "",
-                    "thread_id": email_log_entry.thread_id, "inbox_id": inbox.id,
-                    "inbox_email": inbox.email, "message_id": fake_reply.message_id,
+                    "thread_id": email_log_entry.thread_id or "fake-thread",
+                    "inbox_id": inbox.id, "inbox_email": inbox.email,
+                    "reply_id": fake_reply.id,
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })
 

@@ -65,6 +65,7 @@ class User(Base):
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     api_keys = relationship("APIKey", back_populates="user", cascade="all, delete-orphan")
     notification_config = relationship("EmailNotificationConfig", back_populates="user", uselist=False, cascade="all, delete-orphan")
+    notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan", order_by="Notification.created_at.desc()")
 
 
 class APIKey(Base):
@@ -784,16 +785,38 @@ class PendingOAuthConnect(Base):
     created_at = Column(DateTime, default=_utcnow)
 
 
-class EmailNotificationConfig(Base):
-    """Per-user email notification preferences (alternative to webhooks).
+class Notification(Base):
+    """Persisted in-app notification for a user.
 
-    When enabled, event notifications are sent as human-readable emails
-    from the user's own OAuth-connected account.
+    Each row represents one event the user should be notified about.
+    When ``read_at`` is NULL the notification is unread.
+    Foreign keys to lead / campaign / inbox enable deep-linking in the UI.
+    """
+    __tablename__ = "notification"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False, index=True)
+    title = Column(String(255), nullable=False)
+    message = Column(Text, nullable=False)
+    data_json = Column(JSON, default=dict)  # raw payload snapshot
+    lead_id = Column(Integer, ForeignKey("lead.id", ondelete="SET NULL"), nullable=True, index=True)
+    campaign_id = Column(Integer, ForeignKey("campaign.id", ondelete="SET NULL"), nullable=True, index=True)
+    inbox_id = Column(Integer, ForeignKey("inbox.id", ondelete="SET NULL"), nullable=True, index=True)
+    read_at = Column(DateTime, nullable=True, index=True)
+    created_at = Column(DateTime, default=_utcnow)
+    user = relationship("User", back_populates="notifications")
+
+
+class EmailNotificationConfig(Base):
+    """Per-user notification preferences (channels: in-app + optional email).
+
+    Controls which event types generate notifications and whether an
+    email is also sent for each event type.
     """
     __tablename__ = "email_notification_config"
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("app_user.id", ondelete="CASCADE"), nullable=False, unique=True)
-    enabled = Column(Boolean, default=False, nullable=False)
+    enabled = Column(Boolean, default=False, nullable=False)  # master toggle for email channel
     notification_email = Column(String(255), default="")  # override recipient; empty = user.email
     events = Column(JSON, default=list)  # empty list = all events
     rate_limit_per_hour = Column(Integer, default=10, nullable=False)

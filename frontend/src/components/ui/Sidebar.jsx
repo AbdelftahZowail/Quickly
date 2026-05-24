@@ -12,8 +12,10 @@ import {
   RiInformationLine,
   RiHeartPulseLine,
   RiContactsLine,
+  RiNotification3Line,
 } from 'react-icons/ri';
 import { useUniboxNotifications } from '../../context/UniboxNotificationsContext';
+import { useNotifications } from '../../context/NotificationsContext';
 import { useOnboarding } from '../../context/OnboardingContext';
 import { useSystemHealth } from '../../context/SystemHealthContext';
 
@@ -25,6 +27,7 @@ const links = [
   { to: '/inboxes', label: 'Inboxes', icon: <RiMailLine size={20} /> },
   { to: '/unibox', label: 'Unibox', icon: <RiInboxLine size={20} /> },
   { to: '/schedule', label: 'Schedule', icon: <RiCalendarScheduleLine size={20} /> },
+  { to: '/notifications', label: 'Notifications', icon: <RiNotification3Line size={20} /> },
   { to: '/settings#general', label: 'Settings', icon: <RiSettingsLine size={20} /> },
 ];
 
@@ -95,6 +98,7 @@ function buildFeatureUrl() {
 export default function Sidebar({ collapsed, onToggle }) {
   const location = useLocation();
   const { count: unreadCount } = useUniboxNotifications();
+  const { count: notifUnreadCount } = useNotifications();
   const { startOnboarding } = useOnboarding();
   const { overallStatus } = useSystemHealth();
   const [helpOpen, setHelpOpen] = useState(false);
@@ -160,6 +164,11 @@ export default function Sidebar({ collapsed, onToggle }) {
                 {l.to === '/unibox' && unreadCount > 0 && (
                   <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white leading-none">
                     {unreadCount > 99 ? '99+' : unreadCount}
+                  </span>
+                )}
+                {l.to === '/notifications' && notifUnreadCount > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[10px] font-bold text-white leading-none">
+                    {notifUnreadCount > 99 ? '99+' : notifUnreadCount}
                   </span>
                 )}
               </span>

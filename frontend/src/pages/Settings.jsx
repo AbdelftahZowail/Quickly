@@ -65,11 +65,8 @@ export default function Settings() {
   // MCP (Cursor / AI agents)
   const [mcpSetup, setMcpSetup] = useState(null);
 
-  // Notifications
+  // Notifications (config managed in the dedicated Notifications page)
   const [notifConfig, setNotifConfig] = useState({ enabled: false, notification_email: '', events: [], rate_limit_per_hour: 10 });
-  const [notifSaving, setNotifSaving] = useState(false);
-  const [notifOpen, setNotifOpen] = useState(false);
-  const savedNotifRef = useRef(null); // snapshot of last-saved config
 
   // Webhooks (new CRUD system)
   const [webhooks, setWebhooks] = useState(() => apiCache.get('/settings/webhooks') || []);
@@ -280,7 +277,6 @@ export default function Settings() {
       setApiKeys(keysData || []);
       if (notifData) {
         setNotifConfig(notifData);
-        savedNotifRef.current = notifData;
       }
       if (gmailSyncData) {
         const snap = {
@@ -514,18 +510,6 @@ export default function Settings() {
       setApiKeys(prev => prev.filter(k => k.id !== id));
       notify({ type: 'success', message: 'API key revoked.' });
     } catch (e) { notify({ type: 'error', message: e.message }); }
-  };
-
-  /* ── Notification settings ── */
-  const saveNotifConfig = async () => {
-    setNotifSaving(true);
-    try {
-      const res = await api.put('/notifications/config', notifConfig);
-      setNotifConfig(res);
-      savedNotifRef.current = res;
-      notify({ type: 'success', message: 'Notification settings saved.' });
-    } catch (e) { notify({ type: 'error', message: e.message }); }
-    finally { setNotifSaving(false); }
   };
 
   /* ── AI settings — per-feature helpers ── */
@@ -1725,95 +1709,22 @@ export default function Settings() {
           </p>
 
           <div className="mb-8">
-            <h3 className="mb-2 text-base font-semibold text-gray-800 dark:text-gray-100">Email notifications</h3>
+            <h3 className="mb-2 text-base font-semibold text-gray-800 dark:text-gray-100">Notifications</h3>
             <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
-              Receive email notifications for campaign events instead of (or in addition to) webhooks.
-              Notifications are sent from your own OAuth login account.
+              View your in-app notification history and manage email delivery preferences.
             </p>
-            <Card>
-              <div
-                className="flex cursor-pointer select-none items-center justify-between"
-                onClick={() => setNotifOpen(v => !v)}
-              >
-                <div className="flex min-w-0 items-center gap-3">
-                  <span className={`text-xs text-gray-400 transition-transform ${notifOpen ? 'rotate-90' : ''}`}>▶</span>
-                  <h4 className="truncate text-sm font-semibold text-gray-800 dark:text-gray-100">Notification settings</h4>
+            <Card className="flex items-center justify-between">
+              <div>
+                <h4 className="text-sm font-semibold text-gray-800 dark:text-gray-100">Notification center</h4>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   {notifConfig.enabled
-                    ? <span className="shrink-0 rounded-full border border-green-200 bg-green-100 px-2 py-0.5 text-[10px] font-medium text-green-700">Enabled</span>
-                    : <span className="shrink-0 rounded-full border bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-500">Disabled</span>
-                  }
-                </div>
-                <label
-                  className="ml-4 flex shrink-0 cursor-pointer items-center gap-1.5"
-                  onClick={e => e.stopPropagation()}
-                >
-                  <input
-                    type="checkbox"
-                    checked={notifConfig.enabled}
-                    className="rounded"
-                    onChange={async e => {
-                      const next = { ...notifConfig, enabled: e.target.checked };
-                      setNotifConfig(next);
-                      try {
-                        await api.put('/notifications/config', next);
-                        notify({ type: 'success', message: `Notifications ${next.enabled ? 'enabled' : 'disabled'}` });
-                      } catch (err) { notify({ type: 'error', message: err.message }); }
-                    }}
-                  />
-                  <span className="whitespace-nowrap text-xs font-medium text-gray-600">Enable</span>
-                </label>
+                    ? 'Email notifications are enabled. Click to view history and preferences.'
+                    : 'Email notifications are disabled. Click to view history and preferences.'}
+                </p>
               </div>
-
-              <div className={`grid transition-[grid-template-rows] duration-200 ease-in-out ${notifOpen ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
-                <div className={`min-h-0 ${notifOpen ? 'overflow-visible' : 'overflow-hidden'}`}>
-                  <div className="mt-4 space-y-4 border-t pt-4">
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-gray-600">Notification email address</label>
-                      <input
-                        type="email"
-                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        placeholder="you@example.com"
-                        value={notifConfig.notification_email}
-                        onChange={e => { setNotifConfig(prev => ({ ...prev, notification_email: e.target.value })); }}
-                      />
-                      <p className="mt-1 text-[11px] text-gray-400">Where notification emails will be sent to.</p>
-                    </div>
-
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-gray-600">Rate limit (emails per hour)</label>
-                      <input
-                        type="number"
-                        min={1}
-                        max={100}
-                        className="w-24 rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        value={notifConfig.rate_limit_per_hour}
-                        onChange={e => { setNotifConfig(prev => ({ ...prev, rate_limit_per_hour: Math.max(1, Math.min(100, parseInt(e.target.value) || 1)) })); }}
-                      />
-                    </div>
-
-                    <div>
-                      <label className="mb-1 block text-xs font-medium text-gray-600">Events</label>
-                      <EventSelector
-                        events={notifConfig.events}
-                        onChange={evts => { setNotifConfig(prev => ({ ...prev, events: evts })); }}
-                      />
-                    </div>
-
-                    <div className="space-y-2 pt-2">
-                      {savedNotifRef.current != null && (
-                        notifConfig.notification_email !== savedNotifRef.current.notification_email ||
-                        notifConfig.rate_limit_per_hour !== savedNotifRef.current.rate_limit_per_hour ||
-                        [...notifConfig.events].sort().join(',') !== [...(savedNotifRef.current.events || [])].sort().join(',')
-                      ) && (
-                        <p className="text-xs font-medium text-amber-600">⚠ Unsaved changes — click Save to apply</p>
-                      )}
-                      <Button onClick={saveNotifConfig} disabled={notifSaving} size="sm">
-                        {notifSaving ? 'Saving…' : 'Save notification settings'}
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <Button size="sm" variant="outline" onClick={() => window.location.href = '/notifications'}>
+                Open notifications
+              </Button>
             </Card>
           </div>
 

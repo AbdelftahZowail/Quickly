@@ -113,12 +113,12 @@ async def fire_webhook_event(
 
             success = await _post_webhook(wh, event_type, data)
 
-    # Email notifications (separate system, failures never propagate)
+    # In-app + email notifications (separate system, failures never propagate)
     try:
-        from app.notifications import fire_email_notification
-        await fire_email_notification(db, event_type, data)
+        from app.notifications import dispatch_notification
+        await dispatch_notification(db, event_type, data)
     except Exception:
-        log.debug("Email notification dispatch failed for event=%s", event_type, exc_info=True)
+        log.debug("Notification dispatch failed for event=%s", event_type, exc_info=True)
 
 
 # ── Convenience aliases kept for backward compatibility with callers ──────

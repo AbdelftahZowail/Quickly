@@ -10,7 +10,8 @@ import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import asyncio
-from sqlalchemy import select
+from sqlalchemy import select, func
+from fastapi import BackgroundTasks
 from app.database import AsyncSessionLocal
 from app.models import Lead, Campaign, Inbox, Sequence
 from app import time as time_provider
@@ -22,8 +23,9 @@ from app.routers.schedule import recalculate_all_campaigns
 
 # ========== CONFIGURATION ==========
 # Adjust these values to control the test data generation
-NUM_LEADS = 500                  # How many test leads to create
-NUM_CAMPAIGNS = 5               # How many test campaigns to create
+NUM_LEADS = 600                  # How many test leads to create (100 per campaign)
+NUM_CAMPAIGNS = 5               # How many standard (wait_for_all) test campaigns to create
+NUM_ASAP_CAMPAIGNS = 1          # Extra ASAP-mode campaign with mixed personalized/standard sequences
 # NOTE: sequence position 0 is the first email, follow-ups are replies in thread.
 NUM_SEQUENCES_PER_CAMPAIGN = 3  # How many email sequences per campaign
 # WAIT_DAYS_BETWEEN_SEQUENCES = [1]  # Days to wait between follow-up sequences (cycles in order)
@@ -31,6 +33,9 @@ WAIT_DAYS_BETWEEN_SEQUENCES = [2, 3, 1, 3, 3, 5, 3, 3, 1, 1]  # Days to wait bet
 INBOX_NUMBER = 3  # How many inboxes to be available for campaigns to link to
 # Whether to wait for background queue build to finish before exiting
 WAIT_FOR_RECALC = True
+# For the ASAP campaign: what fraction of leads get custom email overrides
+# for the personalized sequence (0.0-1.0)
+ASAP_OVERRIDE_FRACTION = 0.35
 # ===================================
 
 TEST_PREFIX = "[TEST]"
@@ -129,13 +134,72 @@ async def main(skip_duplicates: bool = True):
                     is_html=False,
                     preview_text=None,
                 )
-                await create_sequence(camp_id, seq_data, db=session)
+                await create_sequence(camp_id, seq_data, BackgroundTasks(), db=session)
         
-        # 3. Create Test Leads
+        # 2b. Create ASAP campaign with mixed personalized/standard sequences
+        asap_campaign_id = None
+        if NUM_ASAP_CAMPAIGNS > 0:
+            asap_camp_name = f"{TEST_PREFIX} Campaign ASAP"
+            exists = await session.execute(select(Campaign).where(Campaign.name == asap_camp_name))
+            existing = exists.scalar_one_or_none()
+            if not existing:
+                asap_data = CampaignCreate(
+                    name=asap_camp_name,
+                    inbox_ids=[i.id for i in inboxes],
+                    sending_days=sending_days,
+                    sending_hours_start="09:00",
+                    sending_hours_end="17:00",
+                    stop_on_reply=True,
+                    paused=False,
+                    priority=NUM_CAMPAIGNS + 1,
+                    track_opens=False,
+                    track_clicks=False,
+                    add_unsubscribe_header=True,
+                    send_first_as_text=False,
+                    send_all_as_text=False,
+                    timezone=None,
+                    match_lead_provider=True,
+                    custom_sequence_mode="asap",
+                )
+                camp_resp = await create_campaign(asap_data, db=session)
+                asap_campaign_id = camp_resp.id
+            else:
+                asap_campaign_id = existing.id
+                print(f"ASAP campaign already exists (id={asap_campaign_id}).")
+            
+            # Create mixed sequences for ASAP campaign
+            seq_result = await session.execute(
+                select(Sequence).where(Sequence.campaign_id == asap_campaign_id)
+            )
+            existing_seqs = {s.position for s in seq_result.scalars().all()}
+            asap_seq_configs = [
+                {"position": 0, "seq_type": "standard", "subject": "ASAP Standard Intro", "body": "Standard intro for ASAP campaign."},
+                {"position": 1, "seq_type": "personalized", "subject": "PLACEHOLDER", "body": "PLACEHOLDER — overwritten by custom email", "fallback_subject": "ASAP Fallback Subject", "fallback_body": "This is fallback content — should not be sent unless an override exists."},
+                {"position": 2, "seq_type": "standard", "subject": "ASAP Follow-up", "body": "Standard follow-up for ASAP campaign.", "wait_days": WAIT_DAYS_BETWEEN_SEQUENCES[0]},
+            ]
+            for cfg in asap_seq_configs:
+                pos = cfg["position"]
+                if pos in existing_seqs:
+                    continue
+                seq_data = SequenceCreate(
+                    position=pos,
+                    subject=cfg.get("subject"),
+                    body=cfg["body"],
+                    wait_days_after_previous=cfg.get("wait_days", 0) if pos > 0 else 0,
+                    is_html=False,
+                    preview_text=None,
+                    sequence_type=cfg["seq_type"],
+                    fallback_subject=cfg.get("fallback_subject"),
+                    fallback_body=cfg.get("fallback_body"),
+                )
+                await create_sequence(asap_campaign_id, seq_data, BackgroundTasks(), db=session)
+            print(f"ASAP campaign (id={asap_campaign_id}) ready with mixed standard/personalized sequences.")
+        
+        # 3. Create Test Leads (distributed across all campaigns including ASAP)
         print(f"Preparing {NUM_LEADS} test leads...")
         leads_by_campaign: dict[int, list[CampaignLeadAdd]] = {}
         campaigns_result = await session.execute(
-            select(Campaign).where(Campaign.name.like(f"{TEST_PREFIX}%"))
+            select(Campaign).where(Campaign.name.like(f"{TEST_PREFIX}%")).order_by(Campaign.id)
         )
         campaigns = campaigns_result.scalars().all()
 
@@ -174,6 +238,43 @@ async def main(skip_duplicates: bool = True):
 
         await session.commit()
 
+        # 4b. Write custom email overrides for ASAP campaign leads
+        # Must use a separate committed session so recalculate_all_campaigns sees them
+        if asap_campaign_id and asap_campaign_id in leads_by_campaign:
+            from app.models import CampaignLead as CL2, CustomEmailOverride as CEO2
+            async with AsyncSessionLocal() as ov_session:
+                # Find the personalized sequence
+                seq_r = await ov_session.execute(
+                    select(Sequence).where(
+                        Sequence.campaign_id == asap_campaign_id,
+                        Sequence.sequence_type == "personalized",
+                    )
+                )
+                pers_seq = seq_r.scalar_one_or_none()
+
+                if pers_seq:
+                    cl_r = await ov_session.execute(
+                        select(CL2).where(CL2.campaign_id == asap_campaign_id)
+                    )
+                    asap_cls = cl_r.scalars().all()
+                    total_asap = len(asap_cls)
+                    num_overrides = max(1, int(total_asap * ASAP_OVERRIDE_FRACTION))
+                    asap_cls_with_override = asap_cls[:num_overrides]
+                    asap_cls_without = asap_cls[num_overrides:]
+
+                    for cl in asap_cls_with_override:
+                        ov_session.add(CEO2(
+                            campaign_lead_id=cl.id,
+                            sequence_id=pers_seq.id,
+                            subject=f"Custom ASAP for lead {cl.lead_id}",
+                            body=f"Personalized body for lead {cl.lead_id} in ASAP campaign.",
+                        ))
+                    await ov_session.commit()
+                    print(f"ASAP campaign: wrote {num_overrides} custom email overrides ("
+                          f"{len(asap_cls_without)} leads without override will skip personalized seq)")
+                else:
+                    print("ASAP campaign: no personalized sequence found — skipping overrides")
+
         # 5. Run global recalculation endpoint (fresh session)
         print("Triggering global recalculation...")
         async with AsyncSessionLocal() as recalc_session:
@@ -190,6 +291,36 @@ async def main(skip_duplicates: bool = True):
                 await asyncio.sleep(1)
             else:
                 print("Background recalculation still running; check /api/schedule/status for progress.")
+
+        # 5b. Verify ASAP campaign slot distribution
+        if asap_campaign_id:
+            from app.models import QueueSlot, CampaignLead
+            async with AsyncSessionLocal() as check_session:
+                # Count slots per lead in ASAP campaign
+                cl_result = await check_session.execute(
+                    select(CampaignLead.id, CampaignLead.lead_id)
+                    .where(CampaignLead.campaign_id == asap_campaign_id)
+                )
+                asap_check = cl_result.all()
+                asap_with_3 = 0
+                asap_with_2 = 0
+                asap_other = 0
+                for cl_id, _ in asap_check:
+                    slot_count = await check_session.execute(
+                        select(func.count(QueueSlot.id))
+                        .where(QueueSlot.campaign_lead_id == cl_id)
+                    )
+                    n = slot_count.scalar() or 0
+                    if n == 3:
+                        asap_with_3 += 1
+                    elif n == 2:
+                        asap_with_2 += 1
+                    else:
+                        asap_other += 1
+
+                print(f"ASAP campaign slot distribution: {asap_with_3} leads with 3 slots "
+                      f"(have override), {asap_with_2} leads with 2 slots "
+                      f"(no override, skip personalized), {asap_other} leads with other counts")
 
         print("Done! Test data populated.")
         print(f"Added {total_added} lead(s) across {len(campaigns)} campaigns.")
