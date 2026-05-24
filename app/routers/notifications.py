@@ -82,11 +82,10 @@ async def list_notifications(
     result = await db.execute(stmt)
     items = result.scalars().all()
 
-    # total count (for pagination)
-    count_stmt = select(func.count(Notification.id)).where(Notification.user_id == user.id)
-    if unread_only:
-        count_stmt = count_stmt.where(Notification.read_at.is_(None))
-    total_result = await db.execute(count_stmt)
+    # total count (always global, regardless of unread_only filter)
+    total_result = await db.execute(
+        select(func.count(Notification.id)).where(Notification.user_id == user.id)
+    )
     total = total_result.scalar() or 0
 
     unread = await get_unread_notification_count(db, user.id)
