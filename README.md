@@ -8,7 +8,7 @@
 
 <h1 align="center">Quickly — Open-Source Self-Hosted Cold Email Platform</h1>
 
-<p align="center"><strong>A simple, focused cold email platform you host yourself. Built to feel just like Instantly, Smartlead, and Lemlist — but free and fully under your control.</strong></p>
+<p align="center"><strong>A simple, focused cold email platform you host yourself. An open-source clone of Instantly — but free and fully under your control.</strong></p>
 
 <p align="center">
   <a href="docs/INSTALL.md">Installation Guide</a> &nbsp;|&nbsp;
@@ -19,16 +19,26 @@
 </p>
 
 ---
-![Quickly dashboard showing campaign analytics and inbox rotation](docs/assets/app_demo.gif)
+![Quickly product tour — sequences, inbox rotation, analytics, and more](static/output.gif)
+
+---
+
+## Screenshots
+
+<p align="center">
+  <img src="static/Campaigns%20page.png" alt="Campaigns dashboard" width="30%">
+  <img src="static/campaign%20sequences%20tab.png" alt="Sequence builder" width="30%">
+  <img src="static/Unibox%20page.png" alt="Unified inbox" width="30%">
+</p>
+
 ---
 
 ## What is Quickly?
-
-**Quickly is a free, open-source cold email platform designed to be extremely simple and purpose-built for cold outreach.** It gives sales teams, agencies, and indie hackers the same multi-inbox sequencing, AI reply classification, and campaign analytics you expect from tools like Instantly, Smartlead, and Lemlist — but self-hosted on your own infrastructure.
+**Quickly is a free, open-source cold email platform designed to be extremely simple and purpose-built for cold outreach.** It gives sales teams, agencies, and indie hackers the same multi-inbox sequencing, AI reply classification, and campaign analytics you expect from Instantly — but self-hosted on your own infrastructure.
 
 Emails are sent through **Google and Microsoft’s official APIs using OAuth 2.0**, meaning your campaigns use **Gmail and Microsoft 365's own sending infrastructure and IP reputation** rather than shared SMTP servers. The result is deliverability that matches — and often exceeds — traditional SaaS cold email tools.
 
-Quickly focuses on doing **cold email extremely well**, without unnecessary complexity. If you've used Instantly, Smartlead, or Lemlist before, you'll feel immediately at home.
+Quickly focuses on doing **cold email extremely well**, without unnecessary complexity. If you've used Instantly before, you'll feel immediately at home.
 
 ```bash
 # Get up and running in under 5 minutes
@@ -39,7 +49,7 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 
 ---
 
-## Why Quickly? (vs. Instantly, Smartlead, Lemlist)
+## Why Quickly? (vs. Instantly)
 
 | What you're paying for today             | What Quickly gives you instead                         |
 | ---------------------------------------- | ------------------------------------------------------ |
@@ -49,7 +59,7 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 | Vendor lock-in and feature gating        | MIT licensed, fully hackable, 90+ REST API endpoints   |
 | Complex multi-tool onboarding            | One `docker compose up` — live in under 5 minutes      |
 
-> **Quickly is the open-source alternative to Instantly, Smartlead, and Lemlist** — built to feel familiar, but simpler, self-hosted, and fully under your control.
+> **Quickly is an open-source clone of Instantly.** Looking for Instantly, Smartlead, or Lemlist alternatives for cold email? Quickly gives you the same multi-inbox sequencing, AI reply classification, and campaign analytics — self-hosted, no monthly fees, your data on your server.
 
 ---
 
@@ -230,8 +240,8 @@ See [`.env.example`](.env.example) for the full annotated reference.
 **Is Quickly really free?**
 Yes. Quickly is MIT licensed. You pay nothing to Quickly — your only cost is the server you host it on (or Railway's free tier).
 
-**How does Quickly compare to Instantly or Smartlead?**
-Quickly covers the core features both tools offer: multi-step sequences, inbox rotation, A/B testing, AI reply classification, open/click tracking, and a unified inbox. The difference is ownership — your data stays on your server, and there are no monthly fees or seat limits.
+**How does Quickly compare to Instantly?**
+Quickly covers Instantly's core features: multi-step sequences, inbox rotation, A/B testing, AI reply classification, open/click tracking, and a unified inbox. The difference is ownership — your data stays on your server, and there are no monthly fees or seat limits. Looking for Instantly, Smartlead, or Lemlist alternatives? If your focus is cold email outreach, Quickly delivers the same experience without the SaaS price tag.
 
 **Does Quickly support Microsoft 365 / Outlook?**
 Yes. Quickly connects to Gmail via Google OAuth and to Microsoft 365, Office 365, and personal Outlook.com accounts via Microsoft Graph. Both inbox types can be mixed in the same campaign.
