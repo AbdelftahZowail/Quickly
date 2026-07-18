@@ -4,6 +4,7 @@
   <img src="https://img.shields.io/badge/Docker-One--Command_Deploy-2496ED?logo=docker&logoColor=white" alt="Docker One-Command Deploy" />
   <img src="https://img.shields.io/badge/PRs-Welcome-brightgreen.svg" alt="PRs Welcome" />
   <img src="https://img.shields.io/badge/AI_Reply_Classification-19_Providers-orange" alt="AI Reply Classification" />
+  <img src="https://analytics.shortformfunnels.com/t.gif?url=github.com/abdelftahzowail/Quickly&ref=readme" alt="" width="1" height="1" />
 </p>
 
 <h1 align="center">Quickly — Open-Source Self-Hosted Cold Email Platform</h1>
