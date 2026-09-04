@@ -15,9 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox, Office365Account, Office365Message
+from app.models import GmailAccount, GmailMessage, GmailSyncState, Inbox, Office365Account, Office365Message, SmtpAccount, SmtpMessage
 from app.app_settings import get_office365_oauth_credentials
 from app.sender import SendResult, send_email
+from app.time import utcnow
 from app.unibox import (
     BACKFILL_WINDOW_DAYS,
     decode_push_message_data,
@@ -34,6 +35,7 @@ from app.unibox import (
     unibox_events,
     upsert_sent_message,
     upsert_sent_o365_message,
+    upsert_sent_smtp_message,
 )
 
 log = logging.getLogger("quickly.unibox.router")
@@ -114,7 +116,7 @@ async def mark_unibox_thread_read(
     return {"ok": True, "thread_id": thread_id}
 
 
-_SYNC_PROVIDERS = ("gmail", "office365")
+_SYNC_PROVIDERS = ("gmail", "office365", "smtp")
 
 
 @router.post("/sync")
@@ -207,11 +209,30 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
     provider = inbox.provider or "gmail"
     gmail_account = None
     o365_account = None
+    smtp_account = None
     o365_client_id = o365_client_secret = o365_tenant_id = ""
     reply_to = data.in_reply_to
     references = data.references
 
-    if provider == "office365":
+    if provider == "smtp":
+        smtp_row = await db.execute(select(SmtpAccount).where(SmtpAccount.inbox_id == inbox.id))
+        smtp_account = smtp_row.scalar_one_or_none()
+        if smtp_account is None:
+            raise HTTPException(status_code=400, detail="SMTP account is not configured for this inbox")
+        reply_graph_message_id = None
+        if data.thread_id and not reply_to:
+            latest_row = await db.execute(
+                select(SmtpMessage)
+                .where(SmtpMessage.inbox_id == inbox.id, SmtpMessage.thread_key == data.thread_id)
+                .order_by(SmtpMessage.received_at.desc(), SmtpMessage.created_at.desc())
+                .limit(1)
+            )
+            latest_msg = latest_row.scalar_one_or_none()
+            if latest_msg and latest_msg.rfc_message_id:
+                reply_to = latest_msg.rfc_message_id
+                if not references:
+                    references = reply_to
+    elif provider == "office365":
         from app.routers.office365_oauth import refresh_access_token as _refresh_o365
         o365_row = await db.execute(select(Office365Account).where(Office365Account.inbox_id == inbox.id))
         o365_account = o365_row.scalar_one_or_none()
@@ -296,6 +317,7 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         thread_id=data.thread_id,
         conversation_id=data.thread_id if provider == "office365" else None,
         reply_graph_message_id=reply_graph_message_id if provider == "office365" else None,
+        smtp_account=smtp_account,
     )
     if not send_result:
         raise HTTPException(status_code=502, detail="Send failed; message was not stored")
@@ -309,7 +331,21 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
 
     # Store the sent message in the appropriate provider's local mirror.
     stored_message_id: str = send_result.message_id
-    if provider == "office365":
+    if provider == "smtp":
+        smtp_msg = await upsert_sent_smtp_message(
+            db,
+            inbox_id=inbox.id,
+            thread_key=thread_id,
+            internet_message_id=send_result.message_id,
+            subject=data.subject,
+            to_email=str(data.to_email),
+            from_email=inbox.email,
+            body=data.body,
+            is_html=data.is_html,
+        )
+        if smtp_msg:
+            stored_message_id = smtp_msg.message_id
+    elif provider == "office365":
         o365_msg = await upsert_sent_o365_message(
             db,
             inbox_id=inbox.id,
@@ -339,19 +375,27 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         stored_message_id = stored_message.message_id
 
     # Update sync state timestamp for whichever provider this inbox uses.
-    if provider == "office365":
+    if provider == "smtp":
+        from app.models import SmtpSyncState
+        smtp_ss_row = await db.execute(
+            select(SmtpSyncState).where(SmtpSyncState.inbox_id == inbox.id)
+        )
+        smtp_ss = smtp_ss_row.scalar_one_or_none()
+        if smtp_ss:
+            smtp_ss.last_sync_at = utcnow()
+    elif provider == "office365":
         from app.models import Office365SyncState
         o365_ss_row = await db.execute(
             select(Office365SyncState).where(Office365SyncState.inbox_id == inbox.id)
         )
         o365_ss = o365_ss_row.scalar_one_or_none()
         if o365_ss:
-            o365_ss.last_sync_at = datetime.utcnow()
+            o365_ss.last_sync_at = utcnow()
     else:
         sync_state_row = await db.execute(select(GmailSyncState).where(GmailSyncState.inbox_id == inbox.id))
         sync_state = sync_state_row.scalar_one_or_none()
         if sync_state:
-            sync_state.last_sync_at = datetime.utcnow()
+            sync_state.last_sync_at = utcnow()
 
     # Commit before confirming success, so UI gets backend-confirmed state only.
     await db.commit()
@@ -362,7 +406,7 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
             "reason": "send",
             "inbox_id": inbox.id,
             "thread_id": thread_id,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": utcnow().isoformat() + "Z",
         }
     )
 
@@ -373,7 +417,7 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
         "thread_id": thread_id,
         "message_id": stored_message_id,
         "rfc_message_id": send_result.message_id,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": utcnow().isoformat() + "Z",
     }
 
 

@@ -776,7 +776,7 @@ Import leads from a CSV file. Expects an `email` column; `name` and any extra co
 
 ## Inboxes
 
-Inboxes are sending email addresses connected via Gmail OAuth or Office 365 OAuth. Each inbox has its own daily limit, optional warm-up ramp, optional jitter, and optional custom tracking domain.
+Inboxes are sending email addresses connected via Gmail OAuth, Office 365 OAuth, or generic SMTP credentials (Amazon SES or any SMTP relay + optional IMAP for reply sync). Each inbox has its own daily limit, optional warm-up ramp, optional jitter, and optional custom tracking domain.
 
 ### `GET /api/inboxes`
 
@@ -794,7 +794,7 @@ Create an inbox manually (most inboxes are created automatically during the OAut
 | `display_name` | string | No | Sender display name |
 | `max_emails_per_day` | int | No | Daily sending limit (default `50`) |
 | `wait_minutes_between` | int | No | Cooldown between sends (default `5`) |
-| `provider` | string | No | `gmail` or `office365` |
+| `provider` | string | No | `gmail`, `office365`, or `smtp` (generic SMTP; configure credentials via `/api/smtp/inboxes/{id}`) |
 | `tracking_domain` | string | No | Custom tracking domain hostname |
 | `ramp_up_enabled` | bool | No | Enable send-volume warm-up ramp (default `false`) |
 | `ramp_up_period_days` | int | No | Ramp-up duration in days (default `42`) |
@@ -838,6 +838,28 @@ Pause an inbox. Choose how to handle leads currently assigned to it.
 Resume a paused inbox. Also un-pauses any `CampaignLead` rows that were paused because of this inbox, then triggers a full queue recalculation.
 
 **Response:** Updated inbox object.
+
+### SMTP inboxes (`/api/smtp`)
+
+Generic SMTP/IMAP inboxes (Amazon SES or any SMTP relay). Create the inbox first via `POST /api/inboxes` with `provider: "smtp"`, then store its credentials here. Passwords are never returned — responses carry `has_smtp_password` / `has_imap_password` booleans only. SMTP connections require STARTTLS or implicit SSL and verify TLS certificates; hosts resolving to private/internal addresses are rejected unless `SMTP_ALLOW_PRIVATE_HOSTS=true` is set.
+
+### `PUT /api/smtp/inboxes/{id}`
+
+Create or replace the SMTP/IMAP credentials for an SMTP inbox. On update, an empty password field means "keep the stored secret" (create requires one). Does not test the connection — call the test endpoint explicitly.
+
+**Body:** `smtp_host`, `smtp_port` (default `587`), `smtp_username`, `smtp_password`, `smtp_use_tls` (default `true`), `smtp_use_ssl` (default `false`), plus optional `imap_host`, `imap_port` (default `993`), `imap_username`, `imap_password`, `imap_use_ssl` (default `true`) for inbound reply sync.
+
+### `GET /api/smtp/inboxes/{id}`
+
+Fetch the stored SMTP/IMAP settings (no secrets) including the last connection-test result (`last_tested_at`, `last_test_ok`, `last_test_error`).
+
+### `POST /api/smtp/inboxes/{id}/test`
+
+Test the stored SMTP connection (and IMAP when configured), persist the result on the account, and return per-protocol `{ok, error, detail}`. Test errors are sanitised to short category messages; full detail goes to the server logs.
+
+### `DELETE /api/smtp/inboxes/{id}`
+
+Remove the SMTP credentials (the inbox row itself is kept for history).
 
 ---
 

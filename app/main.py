@@ -37,6 +37,7 @@ from app.routers import unibox as unibox_router
 from app.routers import tracking as tracking_router
 from app.routers import beacon_ingest as beacon_ingest_router
 from app.routers import email_provider as email_provider_router
+from app.routers import smtp as smtp_router
 from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
 from app.routers import system_health as system_health_router
@@ -234,6 +235,7 @@ app.include_router(schedule_router.router, dependencies=_auth_deps)
 app.include_router(settings_router.router, dependencies=_auth_deps)
 app.include_router(backup_router.router, dependencies=_auth_deps)
 app.include_router(unibox_router.router, dependencies=_auth_deps)
+app.include_router(smtp_router.router, dependencies=_auth_deps)
 app.include_router(tracking_router.router)
 app.include_router(beacon_ingest_router.router)
 app.include_router(notifications_router.router, dependencies=_auth_deps)

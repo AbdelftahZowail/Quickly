@@ -51,7 +51,7 @@ Build campaigns with unlimited follow-up steps. Set custom wait days between eac
 Create multiple subject line or body variants per sequence step. Quickly randomly selects a variant at send time and tracks open rates, click rates, and reply rates per variant — so you always know what messaging wins.
 
 ### Smart Inbox Rotation, Warm-Up & Jitter
-Spread sends across as many inboxes as you want — **Gmail and Microsoft accounts are both supported**, including personal Outlook.com addresses and business Microsoft 365 / Office 365 accounts. Quickly's queue engine respects per-inbox daily limits, business-day schedules, configurable sending windows, and per-inbox cooldowns. New accounts? The **ramp-up warm-up** gradually increases daily send volume over a configurable period to protect deliverability. **Random jitter** adds a configurable random delay (up to N seconds) to each scheduled send time so your outreach doesn't fire in perfectly uniform bursts — configurable per inbox.
+Spread sends across as many inboxes as you want — **Gmail, Microsoft, and generic SMTP accounts are all supported**, including personal Outlook.com addresses, business Microsoft 365 / Office 365 accounts, and relays like Amazon SES. Quickly's queue engine respects per-inbox daily limits, business-day schedules, configurable sending windows, and per-inbox cooldowns. New accounts? The **ramp-up warm-up** gradually increases daily send volume over a configurable period to protect deliverability. **Random jitter** adds a configurable random delay (up to N seconds) to each scheduled send time so your outreach doesn't fire in perfectly uniform bursts — configurable per inbox.
 
 ### AI-Powered Reply Classification
 Every reply is automatically classified by AI into one of six categories: `interested`, `not_interested`, `out_of_office`, `wrong_person`, `auto_reply`, or `unsubscribed`. Supports 19 AI providers including OpenAI, Anthropic Claude, Google Gemini, Mistral, Groq, and Ollama (for fully offline classification).
@@ -170,7 +170,7 @@ Quickly is optimized to run on any Docker-compatible platform: Railway, Render, 
 Yes. Quickly is MIT-licensed open-source software with no per-contact fees, no seat limits, and no feature tiers. You can run it completely free on platforms like Railway — no server costs at all. If you prefer full control, deploying to your own VPS typically costs $5–$20/month.
 
 **What email providers does Quickly support?**
-Quickly supports **Gmail** (via Google OAuth) and **Microsoft accounts** — including personal Outlook.com addresses and business Microsoft 365 / Office 365 accounts (via Microsoft Graph API OAuth2). You can mix Gmail and Microsoft inboxes in the same campaign.
+Quickly supports **Gmail** (via Google OAuth), **Microsoft accounts** — including personal Outlook.com addresses and business Microsoft 365 / Office 365 accounts (via Microsoft Graph API OAuth2) — and **any SMTP relay** (Amazon SES, Brevo, self-hosted, …) with optional IMAP reply sync. You can mix all inbox types in the same campaign.
 
 **How is Quickly different from Instantly or Smartlead?**
 Instantly and Smartlead are hosted SaaS products that store your data on their servers and charge monthly fees per inbox or contact. Quickly runs entirely on your infrastructure — your leads never leave your server.
@@ -250,8 +250,8 @@ The `.env` file is intentionally minimal. All runtime settings (test mode, time 
 
 | Document | What's inside |
 |---|---|
-| [INSTALL.md](INSTALL.md) | **Interactive installation guide** — choose Railway, fresh VPS, nginx, or local dev, then follow step-by-step through Gmail/Office 365 OAuth setup and first campaign |
-| [OFFICE365_SETUP.md](OFFICE365_SETUP.md) | Full Azure portal walkthrough for connecting Office 365 / Outlook inboxes |
+| [INSTALL.md](INSTALL.md) | **Interactive installation guide** — choose Railway, fresh VPS, nginx, or local dev, then follow step-by-step through Gmail / Office 365 / SMTP setup and first campaign |
+| [INSTALL.md — Step 3B](INSTALL.md#step-3b-connect-office-365--outlook-inboxes) | Azure portal walkthrough for connecting Office 365 / Outlook inboxes |
 | [API.md](API.md) | Complete REST API reference — all endpoints including auth, system health, provider matching, notifications |
 | [N8N.md](N8N.md) | **n8n automation** — custom Quickly node, credentials, pointers to install and [full package README](../n8n-node/README.md) |
 | [WEBHOOKS.md](WEBHOOKS.md) | All 15 event types, payload schemas, auth setup |

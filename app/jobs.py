@@ -203,6 +203,7 @@ async def run_send_job():
             gmail_token = ""
             ga = None
             o365_account = None
+            smtp_account = None
             simulate_send = False
 
             if inbox.provider == "office365":
@@ -210,11 +211,26 @@ async def run_send_job():
                     select(Office365Account).where(Office365Account.inbox_id == inbox.id)
                 )
                 o365_account = o365_res.scalar_one_or_none()
-                if o365_account:
-                    pass
-                else:
+                if o365_account is None:
                     log.warning("Office 365 inbox %s (%s) has no Office365Account — skipping", inbox.id, inbox.email)
                     continue
+            elif inbox.provider == "smtp":
+                from app.models import SmtpAccount as _SmtpAccount
+                smtp_res = await session.execute(
+                    select(_SmtpAccount).where(_SmtpAccount.inbox_id == inbox.id)
+                )
+                smtp_account = smtp_res.scalar_one_or_none()
+                if smtp_account is None:
+                    if settings.test_mode:
+                        log.info(
+                            "Test mode: SMTP inbox %s (%s) has no SmtpAccount -- simulating send",
+                            inbox.id,
+                            inbox.email,
+                        )
+                        simulate_send = True
+                    else:
+                        log.warning("SMTP inbox %s (%s) has no SmtpAccount — skipping", inbox.id, inbox.email)
+                        continue
             else:
                 # Default: Gmail
                 ga_result = await session.execute(
@@ -744,6 +760,7 @@ async def run_send_job():
                         office365_tenant_id=o365_tenant_id,
                         conversation_id=prev_thread_id if inbox.provider == "office365" else None,
                         reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                        smtp_account=smtp_account,
                     )
 
                 # ── Handle permanent failure (bounce / auth) ─────────────────
@@ -812,7 +829,7 @@ async def run_send_job():
 
                 # For Gmail: save the sent message to the local mirror so the body
                 # is available for quoting in future follow-up emails.
-                if inbox.provider != "office365" and email_log_entry.thread_id:
+                if inbox.provider not in ("office365", "smtp") and email_log_entry.thread_id:
                     try:
                         from app.unibox import upsert_sent_message as _upsert_sent_gmail
                         await _upsert_sent_gmail(
@@ -853,6 +870,29 @@ async def run_send_job():
                     except Exception:
                         log.exception(
                             "Failed to upsert sent O365 message to unibox "
+                            "inbox_id=%s lead=%s",
+                            inbox.id, lead.email,
+                        )
+
+                # For SMTP: immediately save the sent message to the local
+                # mirror so it appears in the unibox thread before the next sync.
+                if inbox.provider == "smtp" and email_log_entry.thread_id:
+                    try:
+                        from app.unibox import upsert_sent_smtp_message
+                        await upsert_sent_smtp_message(
+                            session,
+                            inbox_id=inbox.id,
+                            thread_key=email_log_entry.thread_id,
+                            internet_message_id=result.message_id,
+                            subject=subject,
+                            to_email=lead.email,
+                            from_email=inbox.email,
+                            body=send_body,
+                            is_html=is_html,
+                        )
+                    except Exception:
+                        log.exception(
+                            "Failed to upsert sent SMTP message to unibox "
                             "inbox_id=%s lead=%s",
                             inbox.id, lead.email,
                         )
@@ -1071,6 +1111,7 @@ async def send_slot_job(slot_id: int) -> None:
         gmail_token = ""
         ga = None
         o365_account = None
+        smtp_account = None
         simulate_send = False
 
         from app.settings_manager import settings as _settings
@@ -1083,14 +1124,31 @@ async def send_slot_job(slot_id: int) -> None:
                 select(Office365Account).where(Office365Account.inbox_id == inbox.id)
             )
             o365_account = o365_res.scalar_one_or_none()
-            if o365_account:
-                pass
-            else:
+            if o365_account is None:
                 log.warning(
                     "send_slot_job: O365 inbox %s has no Office365Account – skipping slot %d",
                     inbox.email, slot_id,
                 )
                 return
+        elif inbox.provider == "smtp":
+            from app.models import SmtpAccount as _SmtpAccount2
+            smtp_res = await session.execute(
+                select(_SmtpAccount2).where(_SmtpAccount2.inbox_id == inbox.id)
+            )
+            smtp_account = smtp_res.scalar_one_or_none()
+            if smtp_account is None:
+                if settings.test_mode:
+                    log.info(
+                        "send_slot_job: test mode SMTP inbox %s has no SmtpAccount -- simulating send",
+                        inbox.email,
+                    )
+                    simulate_send = True
+                else:
+                    log.warning(
+                        "send_slot_job: SMTP inbox %s has no SmtpAccount – skipping slot %d",
+                        inbox.email, slot_id,
+                    )
+                    return
         else:
             ga_result = await session.execute(
                 select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
@@ -1459,6 +1517,7 @@ async def send_slot_job(slot_id: int) -> None:
                 office365_tenant_id=o365_tenant_id,
                 conversation_id=prev_thread_id if inbox.provider == "office365" else None,
                 reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                smtp_account=smtp_account,
             )
 
         # ── Permanent failure ─────────────────────────────────────────────
@@ -1508,7 +1567,7 @@ async def send_slot_job(slot_id: int) -> None:
         await session.delete(slot)
         await _update_enrollment_after_send(session, cl, campaign, sequence)
 
-        if inbox.provider != "office365" and email_log_entry.thread_id:
+        if inbox.provider not in ("office365", "smtp") and email_log_entry.thread_id:
             try:
                 from app.unibox import upsert_sent_message as _upsert_sent_gmail
                 await _upsert_sent_gmail(
@@ -1546,6 +1605,26 @@ async def send_slot_job(slot_id: int) -> None:
             except Exception:
                 log.exception(
                     "send_slot_job: failed to upsert sent O365 message "
+                    "inbox_id=%s lead=%s", inbox.id, lead.email,
+                )
+
+        if inbox.provider == "smtp" and email_log_entry.thread_id:
+            try:
+                from app.unibox import upsert_sent_smtp_message
+                await upsert_sent_smtp_message(
+                    session,
+                    inbox_id=inbox.id,
+                    thread_key=email_log_entry.thread_id,
+                    internet_message_id=result.message_id,
+                    subject=subject,
+                    to_email=lead.email,
+                    from_email=inbox.email,
+                    body=send_body,
+                    is_html=is_html,
+                )
+            except Exception:
+                log.exception(
+                    "send_slot_job: failed to upsert sent SMTP message "
                     "inbox_id=%s lead=%s", inbox.id, lead.email,
                 )
 

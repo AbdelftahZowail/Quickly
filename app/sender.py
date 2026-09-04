@@ -23,7 +23,7 @@ from googleapiclient.errors import HttpError
 
 from app.settings_manager import settings
 from app import time as time_provider
-from app.models import GmailAccount, Office365Account
+from app.models import GmailAccount, Office365Account, SmtpAccount
 from app.routers.gmail_oauth import refresh_access_token  # needed for token refresh when sending via gmail
 from app.routers.office365_oauth import refresh_access_token as refresh_office365_token
 
@@ -623,6 +623,7 @@ def send_email(
     office365_tenant_id: str = "",
     conversation_id: Optional[str] = None,
     reply_graph_message_id: Optional[str] = None,
+    smtp_account: Optional[SmtpAccount] = None,
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via Gmail API or Microsoft Graph API.
 
@@ -655,6 +656,23 @@ def send_email(
         return SendResult(
             message_id=fake_id,
             thread_id=thread_id or conversation_id or "fake-thread",
+        )
+
+    if provider == "smtp":
+        if not smtp_account:
+            log.error("send_email: no SMTP credentials for %s", from_email)
+            return SendFailure(error_type="auth_failed", message="No SMTP credentials provided")
+        return _send_via_smtp(
+            to_email=to_email,
+            subject=subject,
+            body=body,
+            from_email=from_email,
+            from_name=from_name,
+            reply_to_msg_id=reply_to_msg_id,
+            references=references,
+            is_html=is_html,
+            smtp_account=smtp_account,
+            list_unsubscribe_url=list_unsubscribe_url,
         )
 
     if provider == "office365":
@@ -964,6 +982,150 @@ def _send_via_office365(
             error=str(e),
         )
         log.error("Office 365 Graph API error: %s", e)
+        return None
+
+
+# ---- Generic SMTP sending ----
+
+_SMTP_LOG_PATH = _LOG_DIR / "smtp_api.log"
+
+
+def _log_smtp_call(
+    to_email: str,
+    from_email: str,
+    subject: str,
+    *,
+    thread_id: Optional[str] = None,
+    status: str = "SENDING",
+    response: str = "",
+    error: Optional[str] = None,
+) -> None:
+    """Append a log entry for every SMTP send (mirrors the Gmail/O365 logs)."""
+    entry = {
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+        "to": to_email,
+        "from": from_email,
+        "subject": subject,
+        "thread_id": thread_id,
+        "status": status,
+    }
+    if response:
+        entry["response"] = response
+    if error:
+        entry["error"] = error
+    try:
+        with open(_SMTP_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, indent=2) + "\n---\n")
+    except OSError:
+        log.warning("Could not write to smtp log file at %s", _SMTP_LOG_PATH)
+
+
+def _send_via_smtp(
+    to_email: str,
+    subject: str,
+    body: str,
+    from_email: str,
+    from_name: str = "",
+    reply_to_msg_id: Optional[str] = None,
+    references: Optional[str] = None,
+    is_html: bool = False,
+    smtp_account: SmtpAccount | None = None,
+    list_unsubscribe_url: Optional[str] = None,
+) -> Optional[SendResult | SendFailure]:
+    """Send one email via a generic SMTP relay (stdlib ``smtplib``).
+
+    Threading works exactly like the Gmail path: follow-ups carry
+    ``In-Reply-To`` / ``References`` and reuse the root ``Message-ID`` as the
+    thread key, so the unibox IMAP sync can group them without any
+    provider-specific thread API.
+    """
+    if not smtp_account:
+        log.error("SMTP send: no account provided for %s", from_email)
+        return SendFailure(error_type="auth_failed", message="No SMTP account")
+    if not (smtp_account.smtp_host or "").strip():
+        return SendFailure(error_type="auth_failed", message="SMTP host is not configured")
+
+    import smtplib
+    import socket
+
+    message_id = make_msgid()
+    mime_msg = _build_email_message(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        from_email=from_email,
+        from_name=from_name,
+        reply_to_msg_id=reply_to_msg_id,
+        references=references,
+        is_html=is_html,
+        message_id=message_id,
+        list_unsubscribe_url=list_unsubscribe_url,
+    )
+    raw_bytes: bytes = mime_msg.as_bytes()
+    # Thread key: the root message of the chain (first References entry) or
+    # our own Message-ID for a new thread.  Stored on EmailLog.thread_id so
+    # follow-ups, unibox grouping, and In-Reply-To all stay consistent.
+    if references:
+        thread_key = references.split()[0]
+    elif reply_to_msg_id:
+        thread_key = reply_to_msg_id if reply_to_msg_id.startswith("<") else f"<{reply_to_msg_id}>"
+    else:
+        thread_key = message_id
+
+    _log_smtp_call(to_email, from_email, subject, thread_id=thread_key)
+    try:
+        from app.smtp_utils import _smtp_connect
+
+        client = _smtp_connect(smtp_account, timeout=30)
+        try:
+            client.sendmail(from_email, [to_email], raw_bytes)
+        finally:
+            try:
+                client.quit()
+            except Exception:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        _log_smtp_call(
+            to_email, from_email, subject,
+            thread_id=thread_key,
+            status="250 OK",
+            response=json.dumps({"message_id": message_id, "thread_key": thread_key}),
+        )
+        log.info("SMTP: sent to=%s message_id=%s thread_key=%s", to_email, message_id, thread_key)
+        return SendResult(message_id=message_id, thread_id=thread_key, gmail_message_id=None)
+    except smtplib.SMTPRecipientsRefused as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        return SendFailure(error_type="invalid_recipient", message=f"SMTP recipient refused: {err}")
+    except smtplib.SMTPSenderRefused as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        # Sender-side failure (bad envelope auth, relay policy, MAIL FROM rejected) —
+        # NOT a recipient bounce. jobs.py handles "auth_failed" by pausing the inbox
+        # instead of marking leads as bounced (which would irreversibly poison the
+        # campaign when only the relay configuration is broken).
+        return SendFailure(error_type="auth_failed", message=f"SMTP sender refused: {err}")
+    except smtplib.SMTPDataError as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        # 5xx at DATA time is a permanent rejection (content/policy); 4xx is transient.
+        code = getattr(e, "smtp_code", 0) or 0
+        if 500 <= code < 600:
+            return SendFailure(error_type="bounce", message=f"SMTP rejected the message ({code}): {err}")
+        return None
+    except smtplib.SMTPAuthenticationError as e:
+        err = str(e)[:300]
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        return SendFailure(error_type="auth_failed", message=f"SMTP authentication failed: {err}")
+    except (smtplib.SMTPException, socket.error, OSError) as e:
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
+        log.error("SMTP send error: %s", e)
+        return None
+    except Exception as e:
+        _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
+        log.error("SMTP send error: %s", e)
         return None
 
 

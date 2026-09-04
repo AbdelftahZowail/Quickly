@@ -27,6 +27,7 @@ from app.database import AsyncSessionLocal
 from app.models import (
     GmailAccount, GmailMessage, GmailSyncState, GmailThread,
     Office365Account, Office365Message, Office365SyncState, Office365Thread,
+    SmtpAccount, SmtpMessage, SmtpSyncState, SmtpThread,
     Inbox, Lead, LeadReply, EmailLog, CampaignLead, QueueSlot,
 )
 from app.routers.gmail_oauth import refresh_access_token
@@ -278,9 +279,10 @@ _MAILER_DAEMON_RE = re.compile(r"^(mailer-daemon|postmaster)@", re.IGNORECASE)
 # Subjects that strongly suggest an NDR.
 _BOUNCE_SUBJECT_RE = re.compile(
     r"(delivery.*(failed|failure|status|notification|problem)"
-    r"|undeliverable"
+    r"|undeliver(ed|able)"
     r"|mail.*not.*deliver"
     r"|returned.*mail"
+    r"|returned.to.sender"
     r"|failure.*notice)",
     re.IGNORECASE,
 )
@@ -1019,7 +1021,7 @@ async def _upsert_message_from_gmail(
                 "inbox_id": inbox_id,
                 "inbox_email": inbox_obj.email if inbox_obj else "",
                 "message_id": gmail_msg_id,
-                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "timestamp": time_provider.utcnow().isoformat() + "Z",
             }
             # SSE notification fires immediately (in-memory, no commit needed).
             asyncio.create_task(
@@ -1031,7 +1033,7 @@ async def _upsert_message_from_gmail(
                         "thread_id": thread_id,
                         "lead_id": lead.id,
                         "lead_email": reply_from_addr,
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": time_provider.utcnow().isoformat() + "Z",
                     }
                 )
             )
@@ -1330,6 +1332,609 @@ async def _delete_message(db: AsyncSession, inbox_id: int, message_id: str) -> s
     return thread_id
 
 
+# ---------------------------------------------------------------------------
+# Generic SMTP / IMAP mirror + sync implementation
+# ---------------------------------------------------------------------------
+
+_SMTP_SYNC_FETCH_CAP = 200
+
+
+async def _upsert_smtp_thread(
+    db: AsyncSession,
+    *,
+    inbox_id: int,
+    thread_key: str,
+    subject: str = "",
+    last_received_at=None,
+) -> SmtpThread:
+    res = await db.execute(
+        select(SmtpThread).where(
+            SmtpThread.inbox_id == inbox_id,
+            SmtpThread.thread_key == thread_key,
+        )
+    )
+    thread = res.scalar_one_or_none()
+    if thread is None:
+        thread = SmtpThread(
+            inbox_id=inbox_id,
+            thread_key=thread_key,
+            subject=subject or "",
+            last_received_at=last_received_at,
+        )
+        db.add(thread)
+        await db.flush()
+        return thread
+    if subject:
+        thread.subject = subject
+    if last_received_at is not None and (
+        thread.last_received_at is None or last_received_at >= thread.last_received_at
+    ):
+        thread.last_received_at = last_received_at
+    return thread
+
+
+async def upsert_sent_smtp_message(
+    db: AsyncSession,
+    *,
+    inbox_id: int,
+    thread_key: str,
+    internet_message_id: str,
+    subject: str,
+    to_email: str,
+    from_email: str,
+    body: str,
+    is_html: bool,
+) -> SmtpMessage | None:
+    """Save a just-sent SMTP message to the local mirror (unibox-visible immediately)."""
+    import hashlib as _hashlib
+    import json as _json
+
+    if not thread_key:
+        return None
+    now_dt = time_provider.utcnow()
+    digest = _hashlib.sha1(internet_message_id.encode("utf-8"), usedforsecurity=False).hexdigest()[:24]
+    message_pk = f"local-{digest}"
+
+    body_html = body if is_html else ""
+    body_plain = _strip_html_tags(body) if is_html else body
+
+    await _upsert_smtp_thread(db, inbox_id=inbox_id, thread_key=thread_key, subject=subject, last_received_at=now_dt)
+
+    existing_res = await db.execute(
+        select(SmtpMessage).where(
+            SmtpMessage.inbox_id == inbox_id,
+            SmtpMessage.message_id == message_pk,
+        )
+    )
+    existing = existing_res.scalar_one_or_none()
+    if existing:
+        return existing
+
+    row = SmtpMessage(
+        inbox_id=inbox_id,
+        message_id=message_pk,
+        thread_key=thread_key,
+        rfc_message_id=internet_message_id,
+        in_reply_to=None,
+        received_at=now_dt,
+        subject=subject,
+        from_address=(from_email or "").lower(),
+        to_addresses=_json.dumps([(to_email or "").lower()]),
+        body_plain=body_plain,
+        body_html=body_html,
+        is_read=True,
+        direction="sent",
+    )
+    db.add(row)
+
+    lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == (to_email or "").lower()))
+    to_lead = lead_res.scalar_one_or_none()
+    if to_lead is not None:
+        thread_res = await db.execute(
+            select(SmtpThread).where(
+                SmtpThread.inbox_id == inbox_id,
+                SmtpThread.thread_key == thread_key,
+            )
+        )
+        thread_obj = thread_res.scalar_one_or_none()
+        if thread_obj is not None and not thread_obj.is_lead_thread:
+            thread_obj.is_lead_thread = True
+
+    await db.flush()
+    return row
+
+
+async def _get_smtp_thread_messages(
+    db: AsyncSession,
+    *,
+    thread_id: str,
+    inbox_id: int,
+) -> dict[str, Any] | None:
+    thread_row = await db.execute(
+        select(SmtpThread, Inbox.email)
+        .join(Inbox, Inbox.id == SmtpThread.inbox_id)
+        .where(
+            SmtpThread.inbox_id == inbox_id,
+            SmtpThread.thread_key == thread_id,
+        )
+    )
+    thread_with_account = thread_row.first()
+    if not thread_with_account:
+        return None
+    thread, account_email = thread_with_account
+
+    msg_rows = await db.execute(
+        select(SmtpMessage)
+        .where(
+            SmtpMessage.inbox_id == inbox_id,
+            SmtpMessage.thread_key == thread_id,
+        )
+        .order_by(SmtpMessage.received_at.asc(), SmtpMessage.created_at.asc())
+    )
+    messages = msg_rows.scalars().all()
+
+    out_messages: list[dict[str, Any]] = []
+    subject = thread.subject or "(no subject)"
+    for msg in messages:
+        try:
+            to_list = json.loads(msg.to_addresses or "[]")
+            to_str = ", ".join(to_list) if isinstance(to_list, list) else str(msg.to_addresses or "")
+        except Exception:
+            to_str = str(msg.to_addresses or "")
+        snippet = (msg.body_plain or _strip_html_tags(msg.body_html or ""))[:180]
+        snippet = " ".join(snippet.split())
+        out_messages.append(
+            {
+                "message_id": msg.message_id,
+                "thread_id": msg.thread_key,
+                "timestamp": _dt_to_iso(msg.received_at),
+                "snippet": snippet,
+                "body_plain": msg.body_plain,
+                "body_html": msg.body_html,
+                "subject": msg.subject or "",
+                "from": msg.from_address,
+                "to": to_str,
+                "direction": msg.direction or "received",
+                "label_ids": [],
+            }
+        )
+        if msg.subject and subject == "(no subject)":
+            subject = msg.subject
+
+    return {
+        "thread_id": thread_id,
+        "inbox_id": inbox_id,
+        "inbox_account": account_email,
+        "subject": subject,
+        "last_message_timestamp": _dt_to_iso(thread.last_received_at),
+        "messages": out_messages,
+    }
+
+
+def _fetch_smtp_new_messages(
+    account: SmtpAccount,
+    uidvalidity: int | None,
+    last_uid: int,
+    cap: int = _SMTP_SYNC_FETCH_CAP,
+) -> tuple[int | None, list[tuple[int, bytes]]]:
+    """Blocking IMAP fetch of messages with UID greater than *last_uid*.
+
+    Returns ``(uidvalidity, [(uid, rfc822_bytes), ...])``. Raises on
+    connection/auth errors so the caller can surface them.
+    """
+    from app.smtp_utils import _imap_connect
+
+    client = _imap_connect(account, timeout=30)
+    try:
+        typ, data = client.status("INBOX", "(UIDVALIDITY UIDNEXT)")
+        current_validity: int | None = uidvalidity
+        try:
+            status_raw = (data[0] or b"").decode("utf-8", errors="ignore") if data else ""
+            import re as _re
+
+            m = _re.search(r"UIDVALIDITY\s+(\d+)", status_raw)
+            if m:
+                current_validity = int(m.group(1))
+        except Exception:
+            pass
+        if current_validity != uidvalidity:
+            # Mailbox was recreated (or first sync) — fetch from scratch.
+            last_uid = 0
+
+        typ, uid_data = client.uid("search", None, f"UID {int(last_uid) + 1}:*")
+        if typ != "OK":
+            return current_validity, []
+        uid_bytes = uid_data[0] if uid_data else b""
+        uids = [int(u) for u in uid_bytes.split() if u.isdigit()]
+        # Only process genuinely-new UIDs (RFC 3501 `last+1:*` can re-return
+        # the highest existing message) and, when over the cap, keep the
+        # NEWEST ones so a busy INBOX cannot starve fresh reply detection.
+        uids = sorted(u for u in uids if u > int(last_uid))
+        cap = max(1, cap)
+        if len(uids) > cap:
+            deferred = len(uids) - cap
+            log.warning(
+                "SMTP sync: %d new UIDs beyond fetch cap %d — deferring the oldest %d "
+                "(next sync continues); watch for chronic backlog",
+                deferred, cap, deferred,
+            )
+            uids = uids[-cap:]
+
+        out: list[tuple[int, bytes]] = []
+        for uid in uids:
+            try:
+                typ, fetched = client.uid("fetch", str(uid), "(RFC822)")
+            except Exception:
+                log.warning("SMTP sync: fetch failed for UID %s", uid)
+                continue
+            if typ != "OK" or not fetched:
+                continue
+            for part in fetched:
+                if isinstance(part, tuple) and len(part) == 2 and isinstance(part[1], (bytes, bytearray)):
+                    out.append((uid, bytes(part[1])))
+                    break
+        return current_validity, out
+    finally:
+        try:
+            client.logout()
+        except Exception:
+            pass
+
+
+async def _process_smtp_inbound_message(
+    db: AsyncSession,
+    *,
+    inbox,
+    parsed: dict,
+    message_pk: str,
+    thread_key: str,
+) -> tuple[SmtpMessage, bool, tuple[int, str] | None]:
+    """Insert one parsed IMAP message and run lead-reply / bounce detection.
+
+    Returns ``(row, created, touched_or_None)`` mirroring the Gmail upsert shape.
+    """
+    import json as _json
+
+    res = await db.execute(
+        select(SmtpMessage).where(
+            SmtpMessage.inbox_id == inbox.id,
+            SmtpMessage.message_id == message_pk,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        return existing, False, None
+
+    # UIDVALIDITY changes reset last_uid and re-key message_pk, so the same
+    # physical message would be mirrored twice under different PKs. Dedup on
+    # the RFC Message-ID, which is stable across mailbox recreations.
+    rfc_mid = parsed.get("message_id") or ""
+    if rfc_mid:
+        dup_res = await db.execute(
+            select(SmtpMessage).where(
+                SmtpMessage.inbox_id == inbox.id,
+                SmtpMessage.rfc_message_id == rfc_mid,
+            ).limit(1)
+        )
+        dup = dup_res.scalar_one_or_none()
+        if dup is not None:
+            return dup, False, None
+
+    await _upsert_smtp_thread(
+        db,
+        inbox_id=inbox.id,
+        thread_key=thread_key,
+        subject=parsed.get("subject", ""),
+        last_received_at=parsed.get("date"),
+    )
+    row = SmtpMessage(
+        inbox_id=inbox.id,
+        message_id=message_pk,
+        thread_key=thread_key,
+        rfc_message_id=parsed.get("message_id") or None,
+        in_reply_to=parsed.get("in_reply_to") or None,
+        received_at=parsed.get("date"),
+        subject=parsed.get("subject", ""),
+        from_address=(parsed.get("from") or "").lower(),
+        to_addresses=_json.dumps(parsed.get("to") or []),
+        body_plain=parsed.get("body_plain", ""),
+        body_html=parsed.get("body_html", ""),
+        is_read=False,
+        direction="received",
+    )
+    db.add(row)
+    await db.flush()
+
+    from_addr = (parsed.get("from") or "").lower()
+    subject_hdr = parsed.get("subject", "") or ""
+
+    # ---------- NDR / bounce detection ----------
+    if _MAILER_DAEMON_RE.match(from_addr):
+        if not subject_hdr or _BOUNCE_SUBJECT_RE.search(subject_hdr):
+            bounced_addr = _extract_bounced_recipient(
+                parsed.get("body_plain", ""), parsed.get("body_html", ""), parsed.get("snippet", "")
+            )
+            if bounced_addr:
+                b_lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == bounced_addr))
+                b_lead = b_lead_res.scalar_one_or_none()
+                if b_lead is not None:
+                    b_rows = (
+                        await db.execute(select(CampaignLead).where(CampaignLead.lead_id == b_lead.id))
+                    ).scalars().all()
+                    if any(
+                        getattr(r, "enrollment_status", None) not in ("bounced", "unsubscribed")
+                        for r in b_rows
+                    ):
+                        log.info(
+                            "SMTP NDR bounce detected for lead_id=%s email=%s (inbox_id=%s)",
+                            b_lead.id, bounced_addr, inbox.id,
+                        )
+                        for _bcl in b_rows:
+                            _bcl.enrollment_status = "bounced"
+                        b_cl_ids = [r.id for r in b_rows]
+                        if b_cl_ids:
+                            await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(b_cl_ids)))
+                        await db.flush()
+                        for b_camp_id in list({r.campaign_id for r in b_rows}):
+                            try:
+                                from app.webhooks import fire_webhook_event as _fwe
+                                await _fwe(db, "email.bounced", {
+                                    "lead_id": b_lead.id,
+                                    "lead_email": b_lead.email,
+                                    "campaign_id": b_camp_id,
+                                    "inbox_id": inbox.id,
+                                    "error_type": "bounce",
+                                    "error_message": (parsed.get("snippet", "") or subject_hdr)[:300],
+                                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                                })
+                                await _fwe(db, "lead.status_changed", {
+                                    "lead_id": b_lead.id,
+                                    "lead_email": b_lead.email,
+                                    "campaign_id": b_camp_id,
+                                    "old_enrollment_status": "contacted",
+                                    "new_enrollment_status": "bounced",
+                                    "reason": f"NDR from {from_addr}",
+                                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                                })
+                            except Exception:
+                                log.exception("Failed to fire SMTP bounce webhook for lead_id=%s", b_lead.id)
+            await db.flush()
+            return row, True, (inbox.id, thread_key)
+
+    # ---------- Lead-reply detection ----------
+    lead: Lead | None = None
+    campaign_ids_from_thread_only: list[int] | None = None
+    if from_addr:
+        lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == from_addr))
+        lead = lead_res.scalar_one_or_none()
+    if lead is None:
+        pair = await _single_lead_campaign_pair_for_thread(db, thread_key)
+        if pair is not None:
+            lid, cid = pair
+            lead_res_fb = await db.execute(select(Lead).where(Lead.id == lid))
+            lead = lead_res_fb.scalar_one_or_none()
+            if lead is not None:
+                campaign_ids_from_thread_only = [cid]
+
+    if lead is not None:
+        thread_res = await db.execute(
+            select(SmtpThread).where(
+                SmtpThread.inbox_id == inbox.id,
+                SmtpThread.thread_key == thread_key,
+            )
+        )
+        thread_obj = thread_res.scalar_one_or_none()
+        if thread_obj is not None:
+            thread_obj.is_lead_thread = True
+            thread_obj.unread_lead_reply = True
+
+        if campaign_ids_from_thread_only is not None:
+            campaign_ids = list(campaign_ids_from_thread_only)
+        else:
+            log_res = await db.execute(
+                select(EmailLog.campaign_id).where(
+                    EmailLog.thread_id == thread_key,
+                    EmailLog.lead_id == lead.id,
+                ).distinct()
+            )
+            campaign_ids = [r[0] for r in log_res.all()]
+            if not campaign_ids:
+                cl_res = await db.execute(
+                    select(CampaignLead.campaign_id).where(CampaignLead.lead_id == lead.id)
+                )
+                campaign_ids = [r[0] for r in cl_res.all()]
+
+        for camp_id in campaign_ids:
+            existing_reply = await db.execute(
+                select(LeadReply).where(
+                    LeadReply.lead_id == lead.id,
+                    LeadReply.campaign_id == camp_id,
+                )
+            )
+            if existing_reply.scalar_one_or_none() is None:
+                db.add(LeadReply(lead_id=lead.id, campaign_id=camp_id))
+            cl_touch = await db.execute(
+                select(CampaignLead).where(
+                    CampaignLead.lead_id == lead.id,
+                    CampaignLead.campaign_id == camp_id,
+                )
+            )
+            _clt = cl_touch.scalar_one_or_none()
+            if _clt is not None and _clt.enrollment_status == "active":
+                _clt.enrollment_status = "contacted"
+
+        if campaign_ids:
+            cl_ids_res = await db.execute(
+                select(CampaignLead.id).where(
+                    CampaignLead.lead_id == lead.id,
+                    CampaignLead.campaign_id.in_(campaign_ids),
+                )
+            )
+            cl_ids = [r[0] for r in cl_ids_res.all()]
+            if cl_ids:
+                await db.execute(delete(QueueSlot).where(QueueSlot.campaign_lead_id.in_(cl_ids)))
+
+        await db.flush()
+        webhook_data: dict[str, Any] = {
+            "lead_email": from_addr or (lead.email or "").lower(),
+            "lead_id": lead.id,
+            "lead_name": lead.name or "",
+            "thread_id": thread_key,
+            "inbox_id": inbox.id,
+            "inbox_email": inbox.email,
+            "message_id": message_pk,
+            "timestamp": time_provider.utcnow().isoformat() + "Z",
+        }
+        asyncio.create_task(
+            unibox_events.publish(
+                {
+                    "type": "unibox.notification",
+                    "reason": "lead_reply",
+                    "inbox_id": inbox.id,
+                    "thread_id": thread_key,
+                    "lead_id": lead.id,
+                    "lead_email": from_addr,
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
+                }
+            )
+        )
+        asyncio.create_task(_fire_lead_reply_webhook_bg(webhook_data))
+        reply_body = parsed.get("body_plain") or parsed.get("body_html") or parsed.get("snippet") or ""
+        asyncio.create_task(
+            _classify_and_notify_bg(
+                lead_id=lead.id,
+                lead_email=from_addr or lead.email,
+                lead_name=lead.name or "",
+                campaign_ids=campaign_ids,
+                reply_text=reply_body,
+                thread_id=thread_key,
+            )
+        )
+    else:
+        # No known lead — still mark lead threads where the recipient is a lead
+        # (e.g. a manually-received message to a known contact).
+        for to_addr in (parsed.get("to") or []):
+            to_lead_res = await db.execute(select(Lead).where(func.lower(Lead.email) == (to_addr or "").lower()))
+            if to_lead_res.scalar_one_or_none() is not None:
+                thread_res = await db.execute(
+                    select(SmtpThread).where(
+                        SmtpThread.inbox_id == inbox.id,
+                        SmtpThread.thread_key == thread_key,
+                    )
+                )
+                thread_obj = thread_res.scalar_one_or_none()
+                if thread_obj is not None and not thread_obj.is_lead_thread:
+                    thread_obj.is_lead_thread = True
+                    await db.flush()
+                break
+
+    await db.flush()
+    return row, True, (inbox.id, thread_key)
+
+
+async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tuple[int, str]]:
+    """Poll an SMTP inbox's IMAP INBOX for new messages (reply + bounce detection)."""
+    from app.smtp_utils import normalise_message_id as _norm_mid
+    from app.smtp_utils import parse_imap_message as _parse_imap
+
+    touched: set[tuple[int, str]] = set()
+
+    acct_res = await db.execute(select(SmtpAccount).where(SmtpAccount.inbox_id == inbox.id))
+    acct = acct_res.scalar_one_or_none()
+    if acct is None:
+        return touched
+    if not (acct.imap_host or "").strip():
+        return touched  # send-only inbox — nothing to sync
+
+    state_res = await db.execute(select(SmtpSyncState).where(SmtpSyncState.inbox_id == inbox.id))
+    state = state_res.scalar_one_or_none()
+    if state is None:
+        state = SmtpSyncState(inbox_id=inbox.id)
+        db.add(state)
+        await db.flush()
+
+    try:
+        new_validity, fetched = await asyncio.to_thread(
+            _fetch_smtp_new_messages, acct, state.uidvalidity, state.last_uid or 0
+        )
+    except Exception as exc:
+        log.warning("SMTP IMAP sync failed for inbox_id=%s: %s", inbox.id, exc)
+        try:
+            await maybe_fire_email_event(
+                db,
+                "token_expired",
+                {"inbox_id": inbox.id, "at": time_provider.utcnow().isoformat()},
+            )
+        except Exception:
+            log.exception("failed firing token_expired webhook for SMTP inbox_id=%s", inbox.id)
+        return touched
+
+    if new_validity != state.uidvalidity:
+        state.uidvalidity = new_validity
+        state.last_uid = 0
+        await db.flush()
+
+    if not fetched:
+        state.last_sync_at = time_provider.utcnow()
+        await db.flush()
+        return touched
+
+    own_addr = (inbox.email or "").lower()
+    max_uid = state.last_uid or 0
+    for uid, raw in fetched:
+        max_uid = max(max_uid, uid)
+        try:
+            parsed = _parse_imap(raw)
+        except Exception:
+            log.warning("SMTP sync: failed to parse UID %s for inbox_id=%s", uid, inbox.id)
+            continue
+        # Skip our own sent copies to avoid self-reply loops.
+        if (parsed.get("from") or "").lower() == own_addr:
+            continue
+        message_pk = f"{new_validity}:{uid}" if new_validity else f"uid:{uid}"
+
+        # Resolve the thread: prefer a known sent message referenced by this
+        # reply; otherwise start a new thread on the inbound Message-ID.
+        candidates = [c for c in ([parsed.get("in_reply_to")] + list(parsed.get("references") or [])) if c]
+        thread_key = ""
+        if candidates:
+            log_res = await db.execute(
+                select(EmailLog.thread_id).where(
+                    EmailLog.inbox_id == inbox.id,
+                    EmailLog.message_id.in_(candidates),
+                ).limit(1)
+            )
+            hit = log_res.scalar_one_or_none()
+            if hit:
+                thread_key = hit
+        if not thread_key:
+            thread_key = parsed.get("message_id") or _norm_mid(f"smtp-{inbox.id}-{message_pk}")
+            # If the inbound message itself matches a sent log (e.g. delivery
+            # echo), reuse that thread instead of forking.
+            if parsed.get("message_id"):
+                echo_res = await db.execute(
+                    select(EmailLog.thread_id).where(
+                        EmailLog.inbox_id == inbox.id,
+                        EmailLog.message_id == parsed["message_id"],
+                    ).limit(1)
+                )
+                echo_hit = echo_res.scalar_one_or_none()
+                if echo_hit:
+                    thread_key = echo_hit
+
+        _row, _created, _touched = await _process_smtp_inbound_message(
+            db, inbox=inbox, parsed=parsed, message_pk=message_pk, thread_key=thread_key
+        )
+        if _touched:
+            touched.add(_touched)
+
+    state.last_uid = max_uid
+    state.last_sync_at = time_provider.utcnow()
+    await db.flush()
+    log.info("SMTP IMAP sync inbox_id=%s fetched=%s touched=%s", inbox.id, len(fetched), len(touched))
+    return touched
+
+
 async def _cleanup_thread_if_empty(db: AsyncSession, inbox_id: int, thread_id: str) -> None:
     count_res = await db.execute(
         select(func.count())
@@ -1533,6 +2138,59 @@ async def list_unibox_conversations(
 
     o365_rows = (await db.execute(o365_stmt)).all()
 
+    # ── SMTP threads ────────────────────────────────────────────────────
+    smtp_latest_msg_sq = (
+        select(
+            SmtpMessage.inbox_id.label("inbox_id"),
+            SmtpMessage.thread_key.label("thread_id"),
+            SmtpMessage.body_plain.label("snippet"),
+            func.row_number()
+            .over(
+                partition_by=(SmtpMessage.inbox_id, SmtpMessage.thread_key),
+                order_by=desc(SmtpMessage.received_at),
+            )
+            .label("rn"),
+        )
+        .subquery()
+    )
+
+    smtp_stmt = (
+        select(
+            SmtpThread.inbox_id,
+            SmtpThread.thread_key.label("thread_id"),
+            SmtpThread.last_received_at,
+            SmtpThread.subject,
+            SmtpThread.is_lead_thread,
+            SmtpThread.unread_lead_reply,
+            Inbox.email.label("account_email"),
+            smtp_latest_msg_sq.c.snippet.label("last_snippet"),
+            lead_sq.c.lead_email.label("lead_email"),
+            lead_sq.c.lead_status.label("lead_status"),
+        )
+        .join(Inbox, Inbox.id == SmtpThread.inbox_id)
+        .outerjoin(
+            smtp_latest_msg_sq,
+            and_(
+                smtp_latest_msg_sq.c.inbox_id == SmtpThread.inbox_id,
+                smtp_latest_msg_sq.c.thread_id == SmtpThread.thread_key,
+                smtp_latest_msg_sq.c.rn == 1,
+            ),
+        )
+        .outerjoin(
+            lead_sq,
+            and_(
+                lead_sq.c.thread_id == SmtpThread.thread_key,
+                lead_sq.c.rn == 1,
+            ),
+        )
+    )
+    if leads_only:
+        smtp_stmt = smtp_stmt.where(SmtpThread.is_lead_thread.is_(True))
+    if lead_status:
+        smtp_stmt = smtp_stmt.where(_unibox_lead_status_filter_criterion(lead_sq, lead_status))
+
+    smtp_rows = (await db.execute(smtp_stmt)).all()
+
     # ── Merge both providers into a single sorted list ────────────────────
     items: list[dict[str, Any]] = []
 
@@ -1576,6 +2234,25 @@ async def list_unibox_conversations(
             }
         )
 
+    for row in smtp_rows:
+        ts_dt = row.last_received_at
+        items.append(
+            {
+                "thread_id": row.thread_id,
+                "inbox_id": row.inbox_id,
+                "inbox_account": row.account_email,
+                "subject": row.subject or "(no subject)",
+                "last_message_snippet": (row.last_snippet or "")[:200],
+                "timestamp": _dt_to_iso(ts_dt),
+                "_sort_ts": ts_dt.timestamp() if ts_dt else 0.0,
+                "is_lead_thread": bool(row.is_lead_thread),
+                "unread_lead_reply": bool(row.unread_lead_reply),
+                "lead_email": row.lead_email or None,
+                "lead_status": row.lead_status or None,
+                "provider": "smtp",
+            }
+        )
+
     # Unread lead replies pinned to top, then most recent first.
     items.sort(key=lambda x: (int(x["unread_lead_reply"]), x["_sort_ts"]), reverse=True)
 
@@ -1593,16 +2270,20 @@ async def list_unibox_conversations(
 
 
 async def get_notification_count(db: AsyncSession) -> int:
-    """Return the number of threads with an unread lead reply (Gmail + Office 365)."""
+    """Return the number of threads with an unread lead reply (Gmail + Office 365 + SMTP)."""
     gmail_stmt = select(func.count()).select_from(GmailThread).where(
         GmailThread.unread_lead_reply.is_(True)
     )
     o365_stmt = select(func.count()).select_from(Office365Thread).where(
         Office365Thread.unread_lead_reply.is_(True)
     )
+    smtp_stmt = select(func.count()).select_from(SmtpThread).where(
+        SmtpThread.unread_lead_reply.is_(True)
+    )
     gmail_count = int((await db.execute(gmail_stmt)).scalar_one() or 0)
     o365_count = int((await db.execute(o365_stmt)).scalar_one() or 0)
-    return gmail_count + o365_count
+    smtp_count = int((await db.execute(smtp_stmt)).scalar_one() or 0)
+    return gmail_count + o365_count + smtp_count
 
 
 async def mark_thread_read(
@@ -1611,7 +2292,7 @@ async def mark_thread_read(
     thread_id: str,
     inbox_id: int,
 ) -> bool:
-    """Clear the unread_lead_reply flag on a thread (Gmail or Office 365).
+    """Clear the unread_lead_reply flag on a thread (Gmail, Office 365, or SMTP).
 
     Returns True if the thread was found and updated, False otherwise.
     """
@@ -1634,7 +2315,30 @@ async def mark_thread_read(
         )
         o365_thread = o365_res.scalar_one_or_none()
         if o365_thread is None:
-            return False
+            # Try SMTP thread
+            smtp_res = await db.execute(
+                select(SmtpThread).where(
+                    SmtpThread.inbox_id == inbox_id,
+                    SmtpThread.thread_key == thread_id,
+                )
+            )
+            smtp_thread = smtp_res.scalar_one_or_none()
+            if smtp_thread is None:
+                return False
+            if smtp_thread.unread_lead_reply:
+                smtp_thread.unread_lead_reply = False
+                await db.flush()
+                new_count = await get_notification_count(db)
+                asyncio.create_task(
+                    unibox_events.publish(
+                        {
+                            "type": "unibox.notification.count",
+                            "count": new_count,
+                            "timestamp": time_provider.utcnow().isoformat() + "Z",
+                        }
+                    )
+                )
+            return True
         if o365_thread.unread_lead_reply:
             o365_thread.unread_lead_reply = False
             await db.flush()
@@ -1644,7 +2348,7 @@ async def mark_thread_read(
                     {
                         "type": "unibox.notification.count",
                         "count": new_count,
-                        "timestamp": datetime.utcnow().isoformat() + "Z",
+                        "timestamp": time_provider.utcnow().isoformat() + "Z",
                     }
                 )
             )
@@ -1660,7 +2364,7 @@ async def mark_thread_read(
                 {
                     "type": "unibox.notification.count",
                     "count": new_count,
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
+                    "timestamp": time_provider.utcnow().isoformat() + "Z",
                 }
             )
         )
@@ -1758,13 +2462,34 @@ async def get_thread_messages(
             ).all()
             o365_inbox_ids = [int(row[0]) for row in o365_rows]
             if not o365_inbox_ids:
-                return None
+                # Not in O365 – try SMTP
+                smtp_rows = (
+                    await db.execute(
+                        select(SmtpMessage.inbox_id)
+                        .where(SmtpMessage.thread_key == thread_id)
+                        .distinct()
+                    )
+                ).all()
+                smtp_inbox_ids = [int(row[0]) for row in smtp_rows]
+                if not smtp_inbox_ids:
+                    return None
+                if len(smtp_inbox_ids) > 1:
+                    raise ValueError("thread_id exists in multiple inboxes; pass inbox_id explicitly")
+                return await _get_smtp_thread_messages(db, thread_id=thread_id, inbox_id=smtp_inbox_ids[0])
             if len(o365_inbox_ids) > 1:
                 raise ValueError("thread_id exists in multiple inboxes; pass inbox_id explicitly")
             return await _get_o365_thread_messages(db, thread_id=thread_id, inbox_id=o365_inbox_ids[0])
         if len(inbox_ids) > 1:
             raise ValueError("thread_id exists in multiple inboxes; pass inbox_id explicitly")
         chosen_inbox_id = inbox_ids[0]
+
+    # When the inbox is known, route straight to its provider mirror.
+    _prov_row = await db.execute(select(Inbox.provider).where(Inbox.id == chosen_inbox_id))
+    _prov = (_prov_row.scalar_one_or_none() or "gmail")
+    if _prov == "smtp":
+        return await _get_smtp_thread_messages(db, thread_id=thread_id, inbox_id=chosen_inbox_id)
+    if _prov == "office365":
+        return await _get_o365_thread_messages(db, thread_id=thread_id, inbox_id=chosen_inbox_id)
 
     thread_row = await db.execute(
         select(GmailThread, Inbox.email)
@@ -2447,13 +3172,16 @@ async def sync_single_inbox(inbox_id: int, reason: str = "scheduled") -> bool:
     hydrate_thread_ids: set[str] = set()
     try:
         async with AsyncSessionLocal() as db:
-            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365"])))
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365", "smtp"])))
             inbox = inbox_res.scalar_one_or_none()
             if not inbox:
                 await db.rollback()
                 return False
             if inbox.provider == "office365":
                 touched = await _sync_inbox_office365(db, inbox, reason)
+                hydrate_thread_ids = set()
+            elif inbox.provider == "smtp":
+                touched = await _sync_inbox_smtp(db, inbox, reason)
                 hydrate_thread_ids = set()
             else:
                 touched, hydrate_thread_ids = await _sync_inbox(db, inbox, reason)
@@ -2496,7 +3224,7 @@ async def backfill_single_inbox(
     touched: set[tuple[int, str]] = set()
     try:
         async with AsyncSessionLocal() as db:
-            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365"])))
+            inbox_res = await db.execute(select(Inbox).where(Inbox.id == inbox_id, Inbox.provider.in_(["gmail", "office365", "smtp"])))
             inbox = inbox_res.scalar_one_or_none()
             if not inbox:
                 await db.rollback()
@@ -2504,6 +3232,10 @@ async def backfill_single_inbox(
             if inbox.provider == "office365":
                 # Office 365 doesn't have a separate backfill; re-use full sync
                 touched = await _sync_inbox_office365(db, inbox, reason)
+                _meta = {}
+            elif inbox.provider == "smtp":
+                # IMAP has no date-window backfill API here; re-use full sync
+                touched = await _sync_inbox_smtp(db, inbox, reason)
                 _meta = {}
             else:
                 touched, _meta = await _backfill_older_window(db, inbox, window_days=window_days)
@@ -2529,7 +3261,7 @@ async def backfill_single_inbox(
 
 async def sync_all_inboxes(reason: str = "scheduled") -> int:
     async with AsyncSessionLocal() as db:
-        rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365"])))
+        rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365", "smtp"])))
         inbox_ids = [row[0] for row in rows.all()]
 
     synced = 0
@@ -2578,7 +3310,7 @@ async def queue_backfill_for_all_inboxes(
 ) -> None:
     async def _runner() -> None:
         async with AsyncSessionLocal() as db:
-            rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365"])))
+            rows = await db.execute(select(Inbox.id).where(Inbox.provider.in_(["gmail", "office365", "smtp"])))
             inbox_ids = [row[0] for row in rows.all()]
         for inbox_id in inbox_ids:
             await backfill_single_inbox(inbox_id, window_days=window_days, reason=reason)

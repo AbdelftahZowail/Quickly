@@ -529,6 +529,25 @@ export default function Inboxes() {
   };
   const [form, setForm] = useState(initialForm);
   const [message, setMessage] = useState(null);
+  // Generic SMTP / IMAP credentials for the Add form (used when provider === 'smtp')
+  const initialSmtpForm = {
+    smtp_host: '',
+    smtp_port: 587,
+    smtp_username: '',
+    smtp_password: '',
+    smtp_use_tls: true,
+    smtp_use_ssl: false,
+    imap_host: '',
+    imap_port: 993,
+    imap_username: '',
+    imap_password: '',
+    imap_use_ssl: true,
+  };
+  const [smtpForm, setSmtpForm] = useState(initialSmtpForm);
+  // SMTP credentials for the Edit panel (loaded on demand per inbox)
+  const [editingSmtp, setEditingSmtp] = useState(null);
+  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestMsg, setSmtpTestMsg] = useState(null);
   const [oauthConfigured, setOauthConfigured] = useState(false);
   const [redirectUri, setRedirectUri] = useState('');
   const [o365Configured, setO365Configured] = useState(false);
@@ -716,7 +735,42 @@ export default function Inboxes() {
       // allow click so user receives an error message if OAuth is not configured
       return true;
     }
+    if (form.provider === 'smtp') {
+      return form.email.trim() !== '' && smtpForm.smtp_host.trim() !== '';
+    }
     return form.email.trim() !== '';
+  };
+
+  const submitSmtp = async (inboxPayload) => {
+    // 1. create the inbox row, 2. save credentials, 3. test the connection
+    const created = await api.post('/inboxes', inboxPayload);
+    try {
+      await api.put(`/smtp/inboxes/${created.id}`, { ...smtpForm, smtp_port: +smtpForm.smtp_port, imap_port: +smtpForm.imap_port });
+    } catch (e) {
+      setMessage({ type: 'error', text: `Inbox created but SMTP credentials failed to save: ${e.message}` });
+      setForm(initialForm);
+      setSmtpForm(initialSmtpForm);
+      load();
+      setShowAdd(false);
+      return;
+    }
+    try {
+      const res = await api.post(`/smtp/inboxes/${created.id}/test`, {});
+      if (res.ok) {
+        setMessage({ type: 'success', text: 'SMTP inbox added and connection verified' });
+      } else {
+        const details = [res.smtp?.error, res.imap?.error].filter(Boolean).join(' ');
+        setMessage({ type: 'error', text: `Inbox added but connection test failed: ${details || 'unknown error'}` });
+      }
+    } catch (e) {
+      setMessage({ type: 'error', text: `Inbox added but connection test failed: ${e.message}` });
+    }
+    setForm(initialForm);
+    setSmtpForm(initialSmtpForm);
+    setAddTrackingMode('app');
+    setAddDomainVerified(false);
+    load();
+    setShowAdd(false);
   };
 
   const submit = async (e) => {
@@ -748,6 +802,27 @@ export default function Inboxes() {
       window.location.href = '/oauth/office365/authorize?' + params;
       return;
     }
+    if (form.provider === 'smtp') {
+      if (!form.email.trim()) {
+        setMessage({ type: 'error', text: 'Email address is required for SMTP inboxes.' });
+        return;
+      }
+      if (!smtpForm.smtp_host.trim() || !smtpForm.smtp_username.trim() || !smtpForm.smtp_password) {
+        setMessage({ type: 'error', text: 'SMTP host, username, and password are required.' });
+        return;
+      }
+      const addDomain = addTrackingMode === 'dns' ? form.tracking_domain.trim() : '';
+      if (addDomain && !addDomainVerified) {
+        setMessage({ type: 'error', text: 'Please verify the DNS tracking domain before saving.' });
+        return;
+      }
+      try {
+        await submitSmtp({ ...form, tracking_domain: addDomain || null });
+      } catch (e) {
+        setMessage({ type: 'error', text: e.message });
+      }
+      return;
+    }
     const addDomain = addTrackingMode === 'dns' ? form.tracking_domain.trim() : '';
     if (addDomain && !addDomainVerified) {
       setMessage({ type: 'error', text: 'Please verify the DNS tracking domain before saving.' });
@@ -773,6 +848,31 @@ export default function Inboxes() {
     setEditing({ ...inbox });
     setEditDirty(false);
     setEditMsg(null);
+    setEditingSmtp(null);
+    setSmtpTestMsg(null);
+    if (inbox.provider === 'smtp') {
+      api.get(`/smtp/inboxes/${inbox.id}`)
+        .then((d) => setEditingSmtp({
+          smtp_host: d.smtp_host || '',
+          smtp_port: d.smtp_port || 587,
+          smtp_username: d.smtp_username || '',
+          smtp_password: '',
+          smtp_use_tls: d.smtp_use_tls !== false,
+          smtp_use_ssl: !!d.smtp_use_ssl,
+          imap_host: d.imap_host || '',
+          imap_port: d.imap_port || 993,
+          imap_username: d.imap_username || '',
+          imap_password: '',
+          imap_use_ssl: d.imap_use_ssl !== false,
+          _meta: d,
+        }))
+        .catch(() => setEditingSmtp({
+          smtp_host: '', smtp_port: 587, smtp_username: '', smtp_password: '',
+          smtp_use_tls: true, smtp_use_ssl: false,
+          imap_host: '', imap_port: 993, imap_username: '', imap_password: '',
+          imap_use_ssl: true, _meta: null,
+        }));
+    }
     editOriginalDomain.current = inbox.tracking_domain || '';
     setEditDomainVerified(false);
     setBeaconSetupUrl('');
@@ -786,6 +886,8 @@ export default function Inboxes() {
   const closeEdit = () => {
     setEditing(null);
     setEditDirty(false);
+    setEditingSmtp(null);
+    setSmtpTestMsg(null);
   };
   const tryCloseEdit = () => {
     if (editDirty) {
@@ -859,6 +961,48 @@ export default function Inboxes() {
   const saveEdit = async (e) => {
     e.preventDefault();
     await doSave();
+  };
+
+  const saveEditingSmtp = async () => {
+    if (!editing || !editingSmtp) return;
+    setSmtpTestMsg(null);
+    try {
+      const { _meta, ...payload } = editingSmtp;
+      if (!payload.smtp_password && !(_meta?.has_smtp_password)) {
+        setSmtpTestMsg({ type: 'error', text: 'SMTP password is required.' });
+        return;
+      }
+      const saved = await api.put(`/smtp/inboxes/${editing.id}`, {
+        ...payload, smtp_port: +payload.smtp_port, imap_port: +payload.imap_port,
+      });
+      setEditingSmtp((prev) => ({ ...prev, smtp_password: '', imap_password: '', _meta: saved }));
+      setSmtpTestMsg({ type: 'success', text: 'SMTP settings saved' });
+      // SMTP credentials are saved independently of the outer inbox form —
+      // don't mark the edit as dirty, or closing the modal would trigger a
+      // false "unsaved changes" prompt.
+    } catch (err) {
+      setSmtpTestMsg({ type: 'error', text: err.message });
+    }
+  };
+
+  const testEditingSmtp = async () => {
+    if (!editing) return;
+    setSmtpTesting(true);
+    setSmtpTestMsg(null);
+    try {
+      const res = await api.post(`/smtp/inboxes/${editing.id}/test`, {});
+      if (res.ok) {
+        setSmtpTestMsg({ type: 'success', text: 'Connection test passed (SMTP' + (res.imap?.detail?.includes('skipped') ? '' : ' + IMAP') + ')' });
+      } else {
+        const details = [res.smtp?.error, res.imap?.error].filter(Boolean).join(' ');
+        setSmtpTestMsg({ type: 'error', text: `Connection test failed: ${details || 'unknown error'}` });
+      }
+      await refreshEditingInbox(editing.id);
+    } catch (err) {
+      setSmtpTestMsg({ type: 'error', text: err.message });
+    } finally {
+      setSmtpTesting(false);
+    }
   };
 
   const refreshEditingInbox = async (inboxId) => {
@@ -1092,7 +1236,7 @@ export default function Inboxes() {
       {/* header with add button */}
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Inboxes</h1>
-        <Button variant="default" onClick={() => { setForm(initialForm); setAddTrackingMode('app'); setMessage(null); setShowAdd(true); }}>
+        <Button variant="default" onClick={() => { setForm(initialForm); setSmtpForm(initialSmtpForm); setAddTrackingMode('app'); setMessage(null); setShowAdd(true); }}>
           Add Inbox
         </Button>
       </div>
@@ -1217,10 +1361,82 @@ export default function Inboxes() {
                         <select name="provider" value={editing.provider || 'gmail'} className="mt-1 block w-full border-gray-300 rounded-md bg-gray-100 text-sm" disabled>
                           <option value="gmail">Gmail / Google Workspace</option>
                           <option value="office365">Office 365 / Outlook</option>
+                          <option value="smtp">SMTP (any provider)</option>
                         </select>
                       </div>
                       {editing.provider === 'gmail' && <RedirectUriBlock uri={redirectUri} />}
                       {editing.provider === 'office365' && <RedirectUriBlock uri={o365RedirectUri} />}
+                      {editing.provider === 'smtp' && (
+                        <div className="border rounded p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                          <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">SMTP / IMAP</p>
+                          {smtpTestMsg && <div className={`text-sm ${smtpTestMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{smtpTestMsg.text}</div>}
+                          {!editingSmtp ? (
+                            <p className="text-xs text-gray-400">Loading SMTP settings…</p>
+                          ) : (
+                            <>
+                              <div className="grid grid-cols-3 gap-2">
+                                <div className="col-span-2">
+                                  <label className="block text-xs font-medium text-gray-700">SMTP host</label>
+                                  <input type="text" value={editingSmtp.smtp_host} onChange={e => setEditingSmtp(prev => ({ ...prev, smtp_host: e.target.value }))} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-medium text-gray-700">Port</label>
+                                  <input type="number" value={editingSmtp.smtp_port} onChange={e => setEditingSmtp(prev => ({ ...prev, smtp_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                </div>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700">SMTP username</label>
+                                <input type="text" value={editingSmtp.smtp_username} onChange={e => setEditingSmtp(prev => ({ ...prev, smtp_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700">SMTP password {editingSmtp._meta?.has_smtp_password && <span className="text-gray-400 font-normal">(saved — re-enter to change)</span>}</label>
+                                <input type="password" value={editingSmtp.smtp_password} onChange={e => setEditingSmtp(prev => ({ ...prev, smtp_password: e.target.value }))} autoComplete="new-password" placeholder={editingSmtp._meta?.has_smtp_password ? '••••••••' : ''} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                              </div>
+                              <div className="flex gap-4 text-sm text-gray-700">
+                                <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                                  <input type="checkbox" checked={!!editingSmtp.smtp_use_tls} onChange={e => setEditingSmtp(prev => ({ ...prev, smtp_use_tls: e.target.checked, smtp_use_ssl: e.target.checked ? false : prev.smtp_use_ssl }))} />
+                                  STARTTLS (587)
+                                </label>
+                                <label className="flex items-center gap-1.5 cursor-pointer text-xs">
+                                  <input type="checkbox" checked={!!editingSmtp.smtp_use_ssl} onChange={e => setEditingSmtp(prev => ({ ...prev, smtp_use_ssl: e.target.checked, smtp_use_tls: e.target.checked ? false : prev.smtp_use_tls }))} />
+                                  SSL (465)
+                                </label>
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700">IMAP host (optional — reply sync)</label>
+                                <input type="text" value={editingSmtp.imap_host} onChange={e => setEditingSmtp(prev => ({ ...prev, imap_host: e.target.value }))} placeholder="Leave empty for send-only" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                              </div>
+                              {editingSmtp.imap_host.trim() !== '' && (
+                                <>
+                                  <div className="grid grid-cols-3 gap-2">
+                                    <div>
+                                      <label className="block text-xs font-medium text-gray-700">Port</label>
+                                      <input type="number" value={editingSmtp.imap_port} onChange={e => setEditingSmtp(prev => ({ ...prev, imap_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                    </div>
+                                    <div className="col-span-2">
+                                      <label className="block text-xs font-medium text-gray-700">Username</label>
+                                      <input type="text" value={editingSmtp.imap_username} onChange={e => setEditingSmtp(prev => ({ ...prev, imap_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <label className="block text-xs font-medium text-gray-700">IMAP password {editingSmtp._meta?.has_imap_password && <span className="text-gray-400 font-normal">(saved — re-enter to change)</span>}</label>
+                                    <input type="password" value={editingSmtp.imap_password} onChange={e => setEditingSmtp(prev => ({ ...prev, imap_password: e.target.value }))} autoComplete="new-password" placeholder={editingSmtp._meta?.has_imap_password ? '••••••••' : ''} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                                  </div>
+                                </>
+                              )}
+                              {editingSmtp._meta?.last_tested_at && (
+                                <p className={`text-xs ${editingSmtp._meta.last_test_ok ? 'text-green-600' : 'text-red-600'}`}>
+                                  Last test: {editingSmtp._meta.last_test_ok ? 'passed' : `failed — ${editingSmtp._meta.last_test_error || 'unknown error'}`}
+                                </p>
+                              )}
+                              <div className="flex gap-2">
+                                <Button type="button" size="sm" variant="outline" onClick={saveEditingSmtp}>Save SMTP</Button>
+                                <Button type="button" size="sm" variant="outline" onClick={testEditingSmtp} disabled={smtpTesting}>{smtpTesting ? 'Testing…' : 'Test connection'}</Button>
+                              </div>
+                            </>
+                          )}
+                        </div>
+                      )}
                       <div>
                         <label className="block text-xs font-medium text-gray-700">Max emails per day</label>
                         <input type="number" name="max_emails_per_day" value={editing.max_emails_per_day} onChange={e => { setEditing(prev => ({ ...prev, max_emails_per_day: +e.target.value })); setEditDirty(true); }} min={1} max={1000} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
@@ -1526,8 +1742,17 @@ export default function Inboxes() {
                 <select name="provider" value={form.provider} onChange={handleProviderChange} className="mt-1 block w-full border-gray-300 rounded-md">
                   <option value="gmail">Gmail / Google Workspace</option>
                   <option value="office365">Office 365 / Outlook</option>
+                  <option value="smtp">SMTP (any provider)</option>
                 </select>
               </div>
+
+              {form.provider === 'smtp' && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700">Email address</label>
+                  <input type="email" name="email" value={form.email} onChange={handleChange} placeholder="you@yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md" />
+                  <p className="mt-1 text-xs text-gray-400">The From address used for sending. It should match your SMTP account.</p>
+                </div>
+              )}
 
               <div>
                 <label className="block text-sm font-medium text-gray-700">Display name</label>
@@ -1554,6 +1779,67 @@ export default function Inboxes() {
                 />
                 <p className="mt-1 text-xs text-gray-400">Random 0–N minute delay per send (default 3 min). Set to 0 to disable.</p>
               </div>
+              {form.provider === 'smtp' && (
+                <div className="border rounded p-3 space-y-3 bg-gray-50 min-w-0 max-w-full overflow-hidden">
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">SMTP (outbound)</p>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div className="col-span-2">
+                      <label className="block text-xs font-medium text-gray-700">Host</label>
+                      <input type="text" value={smtpForm.smtp_host} onChange={e => setSmtpForm(f => ({ ...f, smtp_host: e.target.value }))} placeholder="mail.yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-gray-700">Port</label>
+                      <input type="number" value={smtpForm.smtp_port} onChange={e => setSmtpForm(f => ({ ...f, smtp_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700">Username</label>
+                    <input type="text" value={smtpForm.smtp_username} onChange={e => setSmtpForm(f => ({ ...f, smtp_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700">Password</label>
+                    <input type="password" value={smtpForm.smtp_password} onChange={e => setSmtpForm(f => ({ ...f, smtp_password: e.target.value }))} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                  </div>
+                  <div className="flex gap-4 text-sm text-gray-700">
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input type="checkbox" checked={!!smtpForm.smtp_use_tls} onChange={e => setSmtpForm(f => ({ ...f, smtp_use_tls: e.target.checked, smtp_use_ssl: e.target.checked ? false : f.smtp_use_ssl }))} />
+                      STARTTLS (587)
+                    </label>
+                    <label className="flex items-center gap-1.5 cursor-pointer">
+                      <input type="checkbox" checked={!!smtpForm.smtp_use_ssl} onChange={e => setSmtpForm(f => ({ ...f, smtp_use_ssl: e.target.checked, smtp_use_tls: e.target.checked ? false : f.smtp_use_tls }))} />
+                      SSL (465)
+                    </label>
+                  </div>
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide pt-1">IMAP (inbound replies — optional)</p>
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700">Host</label>
+                    <input type="text" value={smtpForm.imap_host} onChange={e => setSmtpForm(f => ({ ...f, imap_host: e.target.value }))} placeholder="Leave empty for send-only" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                  </div>
+                  {smtpForm.imap_host.trim() !== '' && (
+                    <>
+                      <div className="grid grid-cols-3 gap-2">
+                        <div>
+                          <label className="block text-xs font-medium text-gray-700">Port</label>
+                          <input type="number" value={smtpForm.imap_port} onChange={e => setSmtpForm(f => ({ ...f, imap_port: +e.target.value }))} min={1} max={65535} className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-xs font-medium text-gray-700">Username</label>
+                          <input type="text" value={smtpForm.imap_username} onChange={e => setSmtpForm(f => ({ ...f, imap_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-gray-700">Password</label>
+                        <input type="password" value={smtpForm.imap_password} onChange={e => setSmtpForm(f => ({ ...f, imap_password: e.target.value }))} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      </div>
+                      <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
+                        <input type="checkbox" checked={!!smtpForm.imap_use_ssl} onChange={e => setSmtpForm(f => ({ ...f, imap_use_ssl: e.target.checked }))} />
+                        Use SSL (993)
+                      </label>
+                    </>
+                  )}
+                  <p className="text-xs text-gray-400">Connection is tested automatically after the inbox is created.</p>
+                </div>
+              )}
               <div className="border rounded p-3 space-y-4 bg-gray-50 min-w-0 max-w-full overflow-hidden">
                 <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Tracking</p>
                 <InboxTrackingOptions

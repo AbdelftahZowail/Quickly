@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.models import Inbox, GmailAccount, Office365Account, AppSetting
+from app.models import Inbox, GmailAccount, Office365Account, AppSetting, SmtpAccount
 
 log = logging.getLogger("quickly.system_health")
 
@@ -237,6 +237,9 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
     o365_rows = await db.execute(
         select(Office365Account, Inbox).join(Inbox, Office365Account.inbox_id == Inbox.id).order_by(Office365Account.created_at.desc())
     )
+    smtp_rows = await db.execute(
+        select(SmtpAccount, Inbox).join(Inbox, SmtpAccount.inbox_id == Inbox.id).order_by(SmtpAccount.created_at.desc())
+    )
     inbox_rows = await db.execute(select(Inbox).order_by(Inbox.id))
     ai_settings_rows = await db.execute(select(AppSetting).where(AppSetting.key.like("ai_%")))
 
@@ -245,6 +248,7 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
 
     gmail_rows_list = gmail_rows.all()
     o365_rows_list = o365_rows.all()
+    smtp_rows_list = smtp_rows.all()
     inbox_list = list(inbox_rows.scalars().all())
 
     gmail_probe_results = []
@@ -443,6 +447,24 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
         })
 
     # ------------------------------------------------------------------
+    # Generic SMTP
+    # ------------------------------------------------------------------
+    smtp_accounts = []
+    for sa, inbox in smtp_rows_list:
+        smtp_accounts.append({
+            "id": sa.id,
+            "inbox_id": sa.inbox_id,
+            "inbox_email": inbox.email,
+            "inbox_display_name": inbox.display_name,
+            "smtp_host": sa.smtp_host,
+            "smtp_port": sa.smtp_port,
+            "imap_configured": bool((sa.imap_host or "").strip()),
+            "last_tested_at": sa.last_tested_at.isoformat() if sa.last_tested_at else None,
+            "last_test_ok": bool(sa.last_test_ok),
+            "last_test_error": sa.last_test_error or "",
+        })
+
+    # ------------------------------------------------------------------
     # Inboxes
     # ------------------------------------------------------------------
     _reg_default = {
@@ -529,6 +551,9 @@ async def get_system_health(db: AsyncSession = Depends(get_db)):
         "microsoft_oauth": {
             "configured": o365_configured,
             "accounts": o365_accounts,
+        },
+        "smtp": {
+            "accounts": smtp_accounts,
         },
         "inboxes": inboxes,
         "unibox_sync": {

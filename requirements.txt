@@ -24,4 +24,4 @@ python-jose[cryptography]>=3.3
 cryptography>=41.0
 slowapi>=0.1.9
 dnspython>=2.8
-mcp>=1.2
+mcp>=1.2,<2  # v1 API (FastMCP); v2 renamed it to MCPServer

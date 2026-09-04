@@ -1683,6 +1683,17 @@ async def send_test_email(
         )
         gmail_account = ga_result.scalar_one_or_none()
 
+    # Get SMTP account if needed (otherwise send_email's SMTP branch
+    # returns SendFailure — "No SMTP credentials provided" — and the
+    # test email can never be sent from an SMTP inbox)
+    smtp_account = None
+    if getattr(inbox, "provider", "") == "smtp":
+        from app.models import SmtpAccount
+        sa_result = await db.execute(
+            select(SmtpAccount).where(SmtpAccount.inbox_id == inbox.id)
+        )
+        smtp_account = sa_result.scalar_one_or_none()
+
     from app.sender import send_email
 
     result = await asyncio.get_event_loop().run_in_executor(
@@ -1696,6 +1707,7 @@ async def send_test_email(
             is_html=send_is_html,
             provider=getattr(inbox, "provider", "resend") or "resend",
             gmail_account=gmail_account,
+            smtp_account=smtp_account,
         ),
     )
 

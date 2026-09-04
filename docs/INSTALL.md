@@ -16,6 +16,7 @@
 - [Step 2: First Login & User Setup](#step-2-first-login--user-setup)
 - [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
 - [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+- [Step 3C: Connect Amazon SES (via SMTP)](#step-3c-connect-amazon-ses-via-smtp)
 - [Step 4: Create Your First Campaign](#step-4-create-your-first-campaign)
 - [Optional: AI Reply Classification](#optional-ai-reply-classification)
 - [Quickly Beacon (recommended custom tracking hostnames)](#quickly-beacon-recommended-custom-tracking-hostnames)
@@ -554,6 +555,7 @@ For programmatic access (n8n, scripts, custom integrations), generate API keys f
 
 - → [Step 3A: Connect Gmail Inboxes](#step-3a-connect-gmail-inboxes)
 - → [Step 3B: Connect Office 365 / Outlook Inboxes](#step-3b-connect-office-365--outlook-inboxes)
+- → [Step 3C: Connect Amazon SES (via SMTP)](#step-3c-connect-amazon-ses-via-smtp)
 - → [Connect both Gmail and Office 365](#connecting-both-gmail-and-office-365)
 
 ---
@@ -694,6 +696,46 @@ docker compose up -d
 **7. Connect accounts in Quickly.**
 
 Go to **Inboxes → Add Inbox → Connect Office 365 Account** and complete the OAuth flow.
+
+---
+
+## Step 3C: Connect Amazon SES (via SMTP)
+
+> Amazon SES (Simple Email Service) works with Quickly's generic **SMTP provider** — no extra integration code is needed. You use SES's SMTP interface, so Quickly treats it like any other SMTP relay.
+
+### 1. Get SES SMTP credentials
+
+1. In the AWS console, go to **SES → SMTP settings → Create SMTP credentials**
+2. This creates an IAM user and shows you an **SMTP username / password pair** (shown once — save them). These are *not* regular AWS access keys and can't be interchanged with them.
+3. Note your region's SMTP endpoint, e.g. `email-smtp.us-east-1.amazonaws.com` (replace `us-east-1` with your region)
+
+> SMTP credentials are **unique to each AWS region** — sending from a second region needs a second set. Also note some newer/smaller regions have no SMTP endpoint at all (only the API); if yours doesn't, pick a region that does.
+
+### 2. Verify your sending identity
+
+In **SES → Verified identities**, verify the domain or email address you will send from. Quickly's inbox email must match a verified identity, otherwise SES rejects every send.
+
+> **Sandbox warning:** new SES accounts start in the **sandbox**: you can only send *to* verified addresses and throughput is capped. Request **production access** (SES → Account dashboard) before running real campaigns.
+
+### 3. Add the inbox in Quickly
+
+Go to **Inboxes → Add Inbox → SMTP (any provider)** and fill in:
+
+| Field | Value |
+|---|---|
+| Email address | Your verified sender address |
+| SMTP host | `email-smtp.<region>.amazonaws.com` |
+| SMTP port | `587` with **STARTTLS** (or `465` with **SSL**) |
+| SMTP username / password | The SMTP credentials from step 1 |
+| IMAP | Leave empty — SES is send-only (see below) |
+
+Quickly tests the connection automatically after creation.
+
+### Notes and limits
+
+- **Replies:** SES has no mailbox, so there is nothing for IMAP reply-sync to connect to. SES inboxes are **send-only**: replies won't appear in the Unibox unless you route them elsewhere (e.g. set SES to forward replies to a Gmail/IMAP mailbox you also connect).
+- **Bounces:** sends rejected at SMTP time (unverified identity, sandbox violation) surface as `email.bounced` and the lead is marked bounced automatically. Delayed bounces via SNS notifications are not integrated — if you need those, configure SES to forward bounce mail to a monitored mailbox.
+- **Limits:** SES enforces per-region daily quotas and send rates. Mirror them in the inbox's **Max emails per day** and **Wait between emails** so Quickly never outruns your SES limits.
 
 ---
 

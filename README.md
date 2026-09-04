@@ -182,10 +182,11 @@ On first deploy, visit your Quickly URL — a registration form appears to creat
 
 ## Connecting Inboxes
 
-Quickly supports Gmail (via Google OAuth) and Microsoft 365 / Outlook (via Azure OAuth). Gmail and Microsoft inboxes can be mixed freely in the same campaign.
+Quickly supports Gmail (via Google OAuth), Microsoft 365 / Outlook (via Azure OAuth), and any SMTP relay (Amazon SES, Brevo, self-hosted, …) with optional IMAP reply sync. All three inbox types can be mixed freely in the same campaign.
 
 * → [Connect Gmail inboxes (Google Cloud OAuth setup)](docs/INSTALL.md#step-3a-connect-gmail-inboxes)
 * → [Connect Office 365 / Outlook inboxes (Azure portal setup)](docs/INSTALL.md#step-3b-connect-office-365--outlook-inboxes)
+* → [Connect Amazon SES / any SMTP relay](docs/INSTALL.md#step-3c-connect-amazon-ses-via-smtp)
 
 ---
 
@@ -228,7 +229,7 @@ See [`.env.example`](.env.example) for the full annotated reference.
 
 | Document | What's inside |
 |---|---|
-| [docs/INSTALL.md](docs/INSTALL.md) | **Full installation guide** — Railway, VPS, nginx migration, local dev, Gmail & Office 365 OAuth setup |
+| [docs/INSTALL.md](docs/INSTALL.md) | **Full installation guide** — Railway, VPS, nginx migration, local dev, Gmail / Office 365 / SMTP setup |
 | [docs/API.md](docs/API.md) | Complete REST API reference — 90+ endpoints |
 | [docs/MCP.md](docs/MCP.md) | **MCP for AI clients** — endpoint, auth, tools, Cursor / `mcp-remote` config, troubleshooting |
 | [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | All 15 webhook event types, payload schemas, and authentication |
@@ -245,7 +246,7 @@ Yes. Quickly is MIT licensed. You pay nothing to Quickly — your only cost is t
 Quickly covers Instantly's core features: multi-step sequences, inbox rotation, A/B testing, AI reply classification, open/click tracking, and a unified inbox. The difference is ownership — your data stays on your server, and there are no monthly fees or seat limits. Looking for Instantly, Smartlead, or Lemlist alternatives? If your focus is cold email outreach, Quickly delivers the same experience without the SaaS price tag.
 
 **Does Quickly support Microsoft 365 / Outlook?**
-Yes. Quickly connects to Gmail via Google OAuth and to Microsoft 365, Office 365, and personal Outlook.com accounts via Microsoft Graph. Both inbox types can be mixed in the same campaign.
+Yes. Quickly connects to Gmail via Google OAuth, to Microsoft 365, Office 365, and personal Outlook.com accounts via Microsoft Graph, and to any SMTP relay (Amazon SES, Brevo, self-hosted, …) with optional IMAP reply sync. All inbox types can be mixed in the same campaign.
 
 **Can I use Quickly without a custom domain?**
 Yes. You can deploy on Railway and use the generated subdomain, or run Quickly over plain HTTP without `CADDY_HOST` set.

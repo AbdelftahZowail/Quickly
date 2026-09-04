@@ -52,8 +52,10 @@ def init_encryption(key: str | None = None) -> None:
     raw = key or _ENCRYPTION_KEY_ENV
     if not raw:
         log.warning(
-            "QUICKLY_ENCRYPTION_KEY not set – sensitive columns will NOT be encrypted. "
-            "Generate a key with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+            "QUICKLY_ENCRYPTION_KEY not set – sensitive columns (including SMTP/IMAP "
+            "mailbox and relay passwords) will be stored as PLAINTEXT. Set the key "
+            "before going to production. Generate one with: python -c \"from "
+            "cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
         )
         _fernet = None
         return

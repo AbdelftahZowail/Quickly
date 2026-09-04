@@ -129,6 +129,79 @@ async def _run_migrations(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_notification_user_created ON notification (user_id, created_at DESC)",
         "CREATE INDEX IF NOT EXISTS ix_notification_user_read ON notification (user_id, read_at)",
         "CREATE INDEX IF NOT EXISTS ix_notification_event ON notification (event_type)",
+        # 2026-09-04: generic SMTP / IMAP provider (per-inbox credentials + mirrors)
+        """
+        CREATE TABLE IF NOT EXISTS smtp_account (
+            id SERIAL PRIMARY KEY,
+            inbox_id INTEGER NOT NULL UNIQUE REFERENCES inbox(id) ON DELETE CASCADE,
+            smtp_host VARCHAR(255) NOT NULL DEFAULT '',
+            smtp_port INTEGER NOT NULL DEFAULT 587,
+            smtp_username VARCHAR(255) NOT NULL DEFAULT '',
+            smtp_password TEXT NOT NULL DEFAULT '',
+            smtp_use_tls BOOLEAN NOT NULL DEFAULT TRUE,
+            smtp_use_ssl BOOLEAN NOT NULL DEFAULT FALSE,
+            imap_host VARCHAR(255) NOT NULL DEFAULT '',
+            imap_port INTEGER NOT NULL DEFAULT 993,
+            imap_username VARCHAR(255) NOT NULL DEFAULT '',
+            imap_password TEXT NOT NULL DEFAULT '',
+            imap_use_ssl BOOLEAN NOT NULL DEFAULT TRUE,
+            last_tested_at TIMESTAMP WITHOUT TIME ZONE,
+            last_test_ok BOOLEAN NOT NULL DEFAULT FALSE,
+            last_test_error TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS smtp_sync_state (
+            id SERIAL PRIMARY KEY,
+            inbox_id INTEGER NOT NULL UNIQUE REFERENCES inbox(id) ON DELETE CASCADE,
+            uidvalidity BIGINT,
+            last_uid INTEGER NOT NULL DEFAULT 0,
+            last_sync_at TIMESTAMP WITHOUT TIME ZONE,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS smtp_thread (
+            inbox_id INTEGER NOT NULL REFERENCES inbox(id) ON DELETE CASCADE,
+            thread_key VARCHAR(512) NOT NULL,
+            subject TEXT NOT NULL DEFAULT '',
+            last_received_at TIMESTAMP WITHOUT TIME ZONE,
+            is_lead_thread BOOLEAN NOT NULL DEFAULT FALSE,
+            unread_lead_reply BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (inbox_id, thread_key)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS smtp_message (
+            inbox_id INTEGER NOT NULL REFERENCES inbox(id) ON DELETE CASCADE,
+            message_id VARCHAR(512) NOT NULL,
+            thread_key VARCHAR(512) NOT NULL,
+            rfc_message_id VARCHAR(512),
+            in_reply_to VARCHAR(512),
+            received_at TIMESTAMP WITHOUT TIME ZONE,
+            subject TEXT NOT NULL DEFAULT '',
+            from_address VARCHAR(255) NOT NULL DEFAULT '',
+            to_addresses TEXT NOT NULL DEFAULT '',
+            body_plain TEXT NOT NULL DEFAULT '',
+            body_html TEXT NOT NULL DEFAULT '',
+            is_read BOOLEAN NOT NULL DEFAULT FALSE,
+            direction VARCHAR(16) NOT NULL DEFAULT 'received',
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(),
+            PRIMARY KEY (inbox_id, message_id),
+            CONSTRAINT fk_smtp_message_thread FOREIGN KEY (inbox_id, thread_key)
+                REFERENCES smtp_thread(inbox_id, thread_key) ON DELETE CASCADE
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS ix_smtp_thread_inbox_last_date ON smtp_thread (inbox_id, last_received_at)",
+        "CREATE INDEX IF NOT EXISTS ix_smtp_message_inbox_thread_date ON smtp_message (inbox_id, thread_key, received_at)",
+        "CREATE INDEX IF NOT EXISTS ix_smtp_message_inbox_received ON smtp_message (inbox_id, received_at)",
+        "CREATE INDEX IF NOT EXISTS ix_smtp_message_rfc_id ON smtp_message (rfc_message_id)",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)
