@@ -32,6 +32,18 @@ function scheduleReloadIfRestoreComplete(res) {
   }
 }
 
+/**
+ * Redirect to /login on session expiry – but never when already there.
+ * Without the pathname guard, any authenticated poll mounted on the login
+ * page (e.g. NotificationsProvider) would 401 → redirect → full reload →
+ * re-mount → 401 … an infinite reload loop.
+ */
+function _redirectToLoginIfNeeded() {
+  if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+    window.location.href = '/login';
+  }
+}
+
 async function _refreshAccessToken() {
   if (_refreshPromise) return _refreshPromise;
   _refreshPromise = fetch(API_ROOT + '/auth/refresh', {
@@ -78,8 +90,9 @@ async function request(path, options = {}) {
       if (method === 'GET') _memCache.set(path, retryData);
       return retryData;
     } catch {
-      // Refresh failed – redirect to login
-      window.location.href = '/login';
+      // Refresh failed – redirect to login (unless already there – see
+      // _redirectToLoginIfNeeded – otherwise the login page reload-loops).
+      _redirectToLoginIfNeeded();
       throw new Error('Session expired');
     }
   }
@@ -116,7 +129,7 @@ async function downloadRequest(path) {
       return res;
     } catch (e) {
       if (e.status) throw e;
-      window.location.href = '/login';
+      _redirectToLoginIfNeeded();
       throw new Error('Session expired');
     }
   }
@@ -157,7 +170,7 @@ async function downloadPostRequest(path, data) {
       return res;
     } catch (e) {
       if (e.status) throw e;
-      window.location.href = '/login';
+      _redirectToLoginIfNeeded();
       throw new Error('Session expired');
     }
   }
@@ -199,7 +212,7 @@ export const api = {
         }
         return retryRes.json();
       } catch {
-        window.location.href = '/login';
+        _redirectToLoginIfNeeded();
         throw new Error('Session expired');
       }
     }
@@ -237,7 +250,7 @@ export const api = {
         }
         return retryRes.json();
       } catch {
-        window.location.href = '/login';
+        _redirectToLoginIfNeeded();
         throw new Error('Session expired');
       }
     }
