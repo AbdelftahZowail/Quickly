@@ -705,6 +705,49 @@ def test_send_via_smtp_clears_error_on_success(monkeypatch):
     assert acct.last_send_error == ""
 
 
+@pytest.mark.asyncio
+async def test_alert_repeated_send_failure_carries_error(session, monkeypatch):
+    """The threshold alert must not crash on Inbox (which has no last_send_error)
+    and must carry the real error text instead of "unknown error"."""
+    from app import jobs
+    from app.models import Inbox
+    from app.smtp_utils import (
+        SMTP_FAILURE_NOTIFY_THRESHOLD,
+        record_smtp_send_error,
+        reset_smtp_failure_streak,
+    )
+
+    inbox = Inbox(email="alert@example.com", provider="smtp")
+    session.add(inbox)
+    await session.flush()
+
+    captured: dict = {}
+
+    async def _fake_fire(db, event_type, data):
+        captured["event"] = event_type
+        captured["data"] = data
+
+    monkeypatch.setattr(jobs, "fire_webhook_event", _fake_fire)
+
+    class _Acct:
+        def __init__(self, inbox_id):
+            self.inbox_id = inbox_id
+            self.last_send_error = ""
+            self.last_send_at = None
+
+    acct = _Acct(inbox.id)
+    reset_smtp_failure_streak(inbox.id)
+    for _ in range(SMTP_FAILURE_NOTIFY_THRESHOLD):
+        record_smtp_send_error(acct, "SMTP connection error: [Errno 111] Connection refused")
+
+    await jobs._alert_repeated_send_failure(session, inbox, acct.last_send_error)
+
+    assert captured["event"] == "inbox.send_failing"
+    assert captured["data"]["last_send_error"]
+    assert captured["data"]["last_send_error"] != "unknown error"
+    reset_smtp_failure_streak(inbox.id)
+
+
 # ---------------------------------------------------------------------------
 # API endpoints (router called directly, per tests/test_inboxes_api.py style)
 # ---------------------------------------------------------------------------

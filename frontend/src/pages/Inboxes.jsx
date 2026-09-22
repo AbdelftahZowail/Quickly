@@ -1161,7 +1161,7 @@ export default function Inboxes() {
     await doSave();
   };
 
-  const runSmtpDiagnose = async () => {
+  const runSmtpDiagnose = async ({ throwOnError = false } = {}) => {
     if (!editing) return;
     setSmtpDiagnosing(true);
     setSmtpTestMsg(null);
@@ -1172,6 +1172,9 @@ export default function Inboxes() {
       await refreshEditingInbox(editing.id);
     } catch (err) {
       setSmtpTestMsg({ type: 'error', text: err.message });
+      // The Diagnose button reports inline; the suggested-mode retry needs the
+      // 429 to bubble up so it can wait out the cooldown and try once more.
+      if (throwOnError) throw err;
     } finally {
       setSmtpDiagnosing(false);
     }
@@ -1221,7 +1224,8 @@ export default function Inboxes() {
     );
   })();
 
-  /** Apply the mode the diagnostic proved works, save it, and re-test. */  const applySuggestedMode = async (mode) => {
+  /** Apply the mode the diagnostic proved works, save it, and re-test. */
+  const applySuggestedMode = async (mode) => {
     if (!editingSmtp || !editing) return;
     const next = {
       ...editingSmtp,
@@ -1241,19 +1245,17 @@ export default function Inboxes() {
       setEditingSmtp((prev) => ({ ...prev, smtp_password: '', imap_password: '', _meta: saved }));
       // Re-diagnose right away. The first probe set a cooldown a few seconds
       // ago, so a 429 here is expected — retry once after the window instead
-      // of surfacing a raw JSON error.
-      setSmtpTesting(true);
+      // of surfacing a raw JSON error. runSmtpDiagnose reports errors inline by
+      // default, so ask it to rethrow.
       try {
-        await runSmtpDiagnose();
+        await runSmtpDiagnose({ throwOnError: true });
       } catch (err) {
         if (err?.retryAfter || err?.status === 429) {
           await new Promise((r) => setTimeout(r, (err.retryAfter || 21) * 1000));
-          await runSmtpDiagnose();
+          await runSmtpDiagnose({ throwOnError: true });
         } else {
           throw err;
         }
-      } finally {
-        setSmtpTesting(false);
       }
     } catch (err) {
       setSmtpTestMsg({ type: 'error', text: err.message });
@@ -1759,7 +1761,7 @@ export default function Inboxes() {
                               )}
                               <div className="border-t border-gray-200 pt-3">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <Button type="button" size="sm" variant="default" onClick={runSmtpDiagnose} disabled={smtpDiagnosing}>
+                                  <Button type="button" size="sm" variant="default" onClick={() => runSmtpDiagnose()} disabled={smtpDiagnosing}>
                                     {smtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
                                   </Button>
                                   <Button

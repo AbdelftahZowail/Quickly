@@ -101,7 +101,9 @@ def _auth_failure_event_data(inbox: Inbox, result: SendFailure) -> dict:
     }
 
 
-async def _alert_repeated_send_failure(session: AsyncSession, inbox: Inbox) -> None:
+async def _alert_repeated_send_failure(
+    session: AsyncSession, inbox: Inbox, last_send_error: str = ""
+) -> None:
     """Fire a webhook/notification once an inbox crosses the failure threshold.
 
     Transient connection failures used to be swallowed: the email log row was
@@ -131,7 +133,7 @@ async def _alert_repeated_send_failure(session: AsyncSession, inbox: Inbox) -> N
             "inbox_email": inbox.email,
             "provider": inbox.provider or "gmail",
             "consecutive_failures": streak,
-            "last_send_error": inbox.last_send_error or "unknown error",
+            "last_send_error": last_send_error or "unknown error",
             "timestamp": time_provider.utcnow().isoformat() + "Z",
         },
     )
@@ -946,7 +948,9 @@ async def run_send_job():
                 if not result:
                     # Transient failure — roll back the pre-created log; slot stays for retry
                     await session.delete(email_log_entry)
-                    await _alert_repeated_send_failure(session, inbox)
+                    await _alert_repeated_send_failure(
+                        session, inbox, getattr(smtp_account, "last_send_error", "") or ""
+                    )
                     continue
 
                 # ── success: update log and consume the slot ─────────────────
@@ -1730,7 +1734,9 @@ async def send_slot_job(slot_id: int) -> None:
         if not result:
             # Transient failure – roll back the pre-created log; slot stays for retry
             await session.delete(email_log_entry)
-            await _alert_repeated_send_failure(session, inbox)
+            await _alert_repeated_send_failure(
+                session, inbox, getattr(smtp_account, "last_send_error", "") or ""
+            )
             await session.commit()
             log.warning("send_slot_job: transient failure for slot %d, slot retained for retry", slot_id)
             return
