@@ -193,7 +193,7 @@ function buildChecks(d) {
       smtpIssues.push({
         level: 'warning',
         text: `SMTP inbox ${label} has not been verified yet`,
-        fix: 'Run Test connection or Diagnose inbox to confirm it can send.',
+        fix: 'Open the inbox, click Edit, then Diagnose to confirm it can send.',
         action: { label: 'Open Inboxes', to: inboxLink },
       });
     } else if (!acc.last_test_ok) {
