@@ -13,6 +13,8 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import Inbox, SmtpAccount
 from app.smtp_utils import (
+    apply_port_tls_inference,
+    derive_inbox_health,
     sanitize_connection_error,
     test_account_connections,
     validate_smtp_account_payload,
@@ -22,6 +24,23 @@ from app.time import utcnow
 log = logging.getLogger("quickly.smtp_router")
 
 router = APIRouter(prefix="/api/smtp", tags=["smtp"])
+
+# Cooldown so the diagnostic endpoints cannot be hammered (each one opens real
+# sockets to the mail host).  In-memory like the send-job auth cooldown.
+DIAGNOSE_COOLDOWN_SECONDS = 20
+SEND_TEST_COOLDOWN_SECONDS = 20
+_last_diagnose_at: dict[int, float] = {}
+_last_send_test_at: dict[int, float] = {}
+
+
+def _cooldown_remaining(store: dict[int, float], inbox_id: int, window: float) -> float:
+    """Seconds left before *inbox_id* may run the action again (0 = allowed)."""
+    import time as _time
+
+    last = store.get(inbox_id)
+    if not last:
+        return 0.0
+    return max(0.0, window - (_time.monotonic() - last))
 
 
 class SmtpAccountUpsert(BaseModel):
@@ -56,6 +75,10 @@ class SmtpAccountResponse(BaseModel):
     last_tested_at: str | None = None
     last_test_ok: bool = False
     last_test_error: str = ""
+    last_send_error: str = ""
+    last_send_at: str | None = None
+    last_diagnostic_at: str | None = None
+    health: str = "unknown"
 
     class Config:
         from_attributes = True
@@ -79,6 +102,18 @@ def _to_response(acct: SmtpAccount) -> dict:
         "last_tested_at": acct.last_tested_at.isoformat() if acct.last_tested_at else None,
         "last_test_ok": bool(acct.last_test_ok),
         "last_test_error": acct.last_test_error or "",
+        "last_send_error": acct.last_send_error or "",
+        "last_send_at": acct.last_send_at.isoformat() if acct.last_send_at else None,
+        "last_diagnostic_at": (
+            acct.last_diagnostic_at.isoformat() if acct.last_diagnostic_at else None
+        ),
+        "health": derive_inbox_health(
+            paused=False,
+            last_send_error=acct.last_send_error or "",
+            last_send_at=acct.last_send_at,
+            last_test_ok=bool(acct.last_test_ok),
+            last_tested_at=acct.last_tested_at,
+        ),
     }
 
 
@@ -171,8 +206,13 @@ async def upsert_smtp_account(
         acct.smtp_password = payload["smtp_password"]
     elif is_create:
         acct.smtp_password = ""
-    acct.smtp_use_tls = bool(payload["smtp_use_tls"])
-    acct.smtp_use_ssl = bool(payload["smtp_use_ssl"])
+    # Infer STARTTLS/SSL from the port so 465+STARTTLS (the broken default combo)
+    # cannot be saved as-is.
+    use_tls, use_ssl = apply_port_tls_inference(
+        acct.smtp_port, bool(payload["smtp_use_tls"]), bool(payload["smtp_use_ssl"])
+    )
+    acct.smtp_use_tls = use_tls
+    acct.smtp_use_ssl = use_ssl
     acct.imap_host = (payload.get("imap_host") or "").strip()
     acct.imap_port = int(payload.get("imap_port") or 993)
     acct.imap_username = (payload.get("imap_username") or "").strip()
@@ -187,6 +227,177 @@ async def upsert_smtp_account(
     await db.flush()
     log.info("SMTP account saved: inbox_id=%s host=%s", inbox_id, acct.smtp_host)
     return _to_response(acct)
+
+
+@router.post("/inboxes/{inbox_id}/diagnose")
+async def diagnose_smtp_account(
+    inbox_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """Run the full staged SMTP/IMAP diagnostic and persist the report.
+
+    Unlike ``POST .../test`` (EHLO → TLS → LOGIN → NOOP), this drives a real
+    MAIL FROM/RCPT TO/DATA probe and returns a per-stage breakdown with
+    concrete fixes.  Results are stored on the account so the inbox UI can
+    redraw the last report without re-probing.
+    """
+    import json as _json
+
+    from app.smtp_diagnose import diagnose_account
+
+    await _get_smtp_inbox(db, inbox_id)
+    result = await db.execute(select(SmtpAccount).where(SmtpAccount.inbox_id == inbox_id))
+    acct = result.scalar_one_or_none()
+    if not acct:
+        raise HTTPException(404, "SMTP account not configured for this inbox")
+
+    remaining = _cooldown_remaining(_last_diagnose_at, inbox_id, DIAGNOSE_COOLDOWN_SECONDS)
+    if remaining > 0:
+        raise HTTPException(
+            429,
+            {
+                "error": "cooldown",
+                "message": f"Please wait {int(remaining) + 1}s before diagnosing again.",
+                "retry_after": int(remaining) + 1,
+            },
+        )
+
+    # Run the blocking probe off the event loop; it has its own per-stage (~8s)
+    # and overall (~30s) timeouts so the request worker cannot hang.
+    report = await asyncio.wait_for(
+        asyncio.to_thread(diagnose_account, acct), timeout=45.0
+    )
+    _last_diagnose_at[inbox_id] = __import__("time").monotonic()
+
+    acct.last_diagnostic_at = utcnow()
+    acct.last_diagnostic_json = _json.dumps(report)[:20000]
+    # Keep the lightweight test fields in sync so existing UI/health keep working.
+    acct.last_tested_at = acct.last_diagnostic_at
+    acct.last_test_ok = bool(report.get("ok"))
+    if report.get("ok"):
+        acct.last_test_error = ""
+    else:
+        acct.last_test_error = sanitize_connection_error(report.get("verdict") or "")[:2000]
+    if report.get("ok"):
+        # A passing diagnostic means the credential/transport is healthy again.
+        from app.jobs import clear_inbox_auth_failure
+
+        clear_inbox_auth_failure(inbox_id)
+    acct.updated_at = utcnow()
+    await db.flush()
+    log.info("SMTP diagnose: inbox_id=%s ok=%s", inbox_id, report.get("ok"))
+    return report
+
+
+class SendTestRequest(BaseModel):
+    to_email: str = Field(..., max_length=320)
+
+
+@router.post("/inboxes/{inbox_id}/send-test")
+async def send_test_email(
+    inbox_id: int,
+    data: SendTestRequest,
+    db: AsyncSession = Depends(get_db),
+    _user=Depends(get_current_user),
+):
+    """Send a real message through the exact same code path campaigns use.
+
+    Calls ``app.sender._send_via_smtp`` (via ``send_email``) so "auth OK but
+    relay rejects the sender" is caught here, unlike the connection test.
+    """
+    import time as _time
+
+    to_email = (data.to_email or "").strip()
+    if "@" not in to_email:
+        raise HTTPException(400, "A valid to_email is required")
+
+    await _get_smtp_inbox(db, inbox_id)
+    result = await db.execute(select(SmtpAccount).where(SmtpAccount.inbox_id == inbox_id))
+    acct = result.scalar_one_or_none()
+    if not acct:
+        raise HTTPException(404, "SMTP account not configured for this inbox")
+
+    remaining = _cooldown_remaining(_last_send_test_at, inbox_id, SEND_TEST_COOLDOWN_SECONDS)
+    if remaining > 0:
+        raise HTTPException(
+            429,
+            {
+                "error": "cooldown",
+                "message": f"Please wait {int(remaining) + 1}s before sending another test.",
+                "retry_after": int(remaining) + 1,
+            },
+        )
+
+    inbox = await db.get(Inbox, inbox_id)
+    from_email = (inbox.email if inbox else "") or acct.smtp_username
+    _last_send_test_at[inbox_id] = _time.monotonic()
+
+    from app.sender import SendFailure, SendResult, _send_via_smtp
+
+    def _do_send():
+        return _send_via_smtp(
+            to_email=to_email,
+            subject="Quickly test email",
+            body=(
+                "This is a test message sent by Quickly's \"Send test email\" action.\n\n"
+                "If you can read this, the SMTP inbox is delivering mail end to end."
+            ),
+            from_email=from_email,
+            from_name=(getattr(inbox, "display_name", "") or ""),
+            smtp_account=acct,
+        )
+
+    try:
+        result_obj = await asyncio.wait_for(asyncio.to_thread(_do_send), timeout=60.0)
+    except asyncio.TimeoutError:
+        acct.last_send_error = "Test send timed out"
+        acct.last_send_at = utcnow()
+        acct.updated_at = utcnow()
+        await db.flush()
+        return {
+            "ok": False,
+            "error": "timeout",
+            "message": "The test send timed out — the relay did not answer in time.",
+            "last_send_at": acct.last_send_at.isoformat(),
+        }
+
+    acct.updated_at = utcnow()
+    if isinstance(result_obj, SendResult):
+        acct.last_send_error = ""
+        acct.last_send_at = utcnow()
+        await db.flush()
+        log.info("SMTP send-test: inbox_id=%s to=%s ok", inbox_id, to_email)
+        return {
+            "ok": True,
+            "message_id": result_obj.message_id,
+            "relay_response": "250 OK (accepted by the relay)",
+            "last_send_at": acct.last_send_at.isoformat(),
+        }
+
+    if isinstance(result_obj, SendFailure):
+        acct.last_send_error = result_obj.message[:2000]
+        acct.last_send_at = utcnow()
+        await db.flush()
+        log.info("SMTP send-test: inbox_id=%s to=%s failed type=%s", inbox_id, to_email, result_obj.error_type)
+        return {
+            "ok": False,
+            "error": result_obj.error_type,
+            "message": result_obj.message,
+            "last_send_at": acct.last_send_at.isoformat(),
+        }
+
+    # Transient (None)
+    err = acct.last_send_error or "SMTP transient failure (connection error)"
+    acct.last_send_at = utcnow()
+    await db.flush()
+    log.info("SMTP send-test: inbox_id=%s to=%s transient", inbox_id, to_email)
+    return {
+        "ok": False,
+        "error": "transient",
+        "message": err,
+        "last_send_at": acct.last_send_at.isoformat(),
+    }
 
 
 @router.post("/inboxes/{inbox_id}/test")

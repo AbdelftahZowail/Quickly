@@ -756,6 +756,14 @@ class SmtpAccount(Base):
     last_tested_at = Column(DateTime, nullable=True)
     last_test_ok = Column(Boolean, default=False, nullable=False)
     last_test_error = Column(Text, default="")
+    # Last full staged diagnostic (Diagnose button / CLI).  JSON report so the
+    # inbox UI can redraw the per-stage breakdown without re-probing.
+    last_diagnostic_at = Column(DateTime, nullable=True)
+    last_diagnostic_json = Column(Text, default="")
+    # Last real send failure (written for permanent AND transient failures, so
+    # "active but nothing sends" is visible instead of silently retried).
+    last_send_error = Column(Text, default="")
+    last_send_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=_utcnow)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
     inbox = relationship("Inbox", back_populates="smtp_account")

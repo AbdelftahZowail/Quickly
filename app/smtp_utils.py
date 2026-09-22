@@ -118,6 +118,135 @@ def sanitize_connection_error(msg: str) -> str:
     return "Connection failed (details in server logs)"
 
 
+# ---------------------------------------------------------------------------
+# Send-failure observability
+#
+# The send path historically swallowed transient connection errors: the email
+# log row was deleted, the queue slot kept, and nothing changed in the UI.
+# Operators saw a green "Active" badge while nothing was being delivered.
+# ``record_smtp_send_failure`` persists the error on the account, counts
+# consecutive failures in-process, and (after a threshold) fires a webhook so
+# the failure is visible instead of retried forever in silence.
+# ---------------------------------------------------------------------------
+
+# Consecutive-failure counters keyed by inbox id.  Process-global (like the
+# auth-failure cooldown in app.jobs); a restart only resets the un-notified
+# streak, which is acceptable for transient-failure alerting.
+_smtp_consecutive_failures: dict[int, int] = {}
+SMTP_FAILURE_NOTIFY_THRESHOLD = 3
+
+# Error classifications we treat as "transient" for retry/alerting purposes.
+TRANSIENT_ERROR_TYPES = {"transient", "connection", "timeout", "tls"}
+
+
+def _classify_send_error(exc_or_msg: object) -> str:
+    """Classify an SMTP send failure into a stable category string."""
+    msg = str(exc_or_msg or "")
+    low = msg.lower()
+    if "timed out" in low or "timeout" in low:
+        return "timeout"
+    if "refused" in low:
+        return "connection"
+    if "certificate" in low or "ssl" in low or "tls" in low or "starttls" in low:
+        return "tls"
+    if "authentication" in low or "535" in low or "credentials" in low:
+        return "auth"
+    if "getaddrinfo" in low or "name or service not known" in low:
+        return "dns"
+    return "transient"
+
+
+def record_smtp_send_error(account, error: str) -> int:
+    """Persist ``last_send_error`` / ``last_send_at`` and return the streak length.
+
+    Called for *all* send failures — permanent and transient — so the inbox UI
+    and system health can show why an inbox is not delivering.
+    """
+    from app.time import utcnow
+
+    safe = sanitize_connection_error(error) or (error or "").strip()[:500]
+    account.last_send_error = safe[:2000]
+    account.last_send_at = utcnow()
+    streak = _smtp_consecutive_failures.get(account.inbox_id, 0) + 1
+    _smtp_consecutive_failures[account.inbox_id] = streak
+    return streak
+
+
+def record_smtp_send_success(account) -> None:
+    """Clear the consecutive-failure streak after a successful send."""
+    if account is not None:
+        _smtp_consecutive_failures.pop(account.inbox_id, None)
+
+
+def smtp_failure_streak(inbox_id: int) -> int:
+    """Number of consecutive send failures recorded for *inbox_id*."""
+    return _smtp_consecutive_failures.get(inbox_id, 0)
+
+
+def reset_smtp_failure_streak(inbox_id: int) -> None:
+    """Reset the in-process consecutive-failure counter for *inbox_id*."""
+    _smtp_consecutive_failures.pop(inbox_id, None)
+
+
+def derive_inbox_health(*, paused: bool, last_send_error: str, last_send_at, last_test_ok: bool, last_tested_at) -> str:
+    """Derive a real inbox health status: ``ok`` / ``failing`` / ``unknown``.
+
+    This replaces the misleading ``!paused`` "Active" badge.  ``paused`` is a
+    deliberate operator action, so a paused inbox with no recorded error is
+    still reported as ``ok`` (the UI shows the paused badge separately).
+    """
+    if last_send_error:
+        return "failing"
+    if last_test_ok and last_tested_at is not None:
+        return "ok"
+    if last_tested_at is not None:
+        return "failing"
+    return "unknown"
+
+
+def infer_mode_for_port(port: int) -> str | None:
+    """Return the TLS mode implied by *port*: 465 ⇒ ``ssl``, 587 ⇒ ``starttls``.
+
+    Returns ``None`` for ports with no implied mode (25, 2525, custom relays),
+    so the operator's explicit choice is preserved.
+    """
+    if int(port) == 465:
+        return "ssl"
+    if int(port) == 587:
+        return "starttls"
+    return None
+
+
+def apply_port_tls_inference(port: int, use_tls: bool, use_ssl: bool) -> tuple[bool, bool]:
+    """Infer STARTTLS/SSL from the port, but only when the flags look unresolved.
+
+    * If the port has no implied mode, the flags are returned unchanged.
+    * If the flags already match the implied mode, nothing changes.
+    * If neither flag is set, the implied mode is enabled.
+    * If the flags contradict the port (465+STARTTLS, 587+SSL), the implied
+      mode wins — that combination is the classic "inbox is active but nothing
+      sends" footgun.
+
+    Returns ``(use_tls, use_ssl)``.
+    """
+    implied = infer_mode_for_port(port)
+    if implied is None:
+        return use_tls, use_ssl
+    if implied == "ssl":
+        if use_ssl:
+            return use_tls, use_ssl
+        if not use_tls:
+            return False, True
+        # Explicit STARTTLS on 465 is wrong — the port is implicit TLS.
+        return False, True
+    # implied == "starttls"
+    if use_tls:
+        return use_tls, use_ssl
+    if not use_ssl:
+        return True, False
+    return True, False
+
+
 def validate_smtp_account_payload(data: dict, require_password: bool = True) -> str | None:
     """Return an error string when the SMTP/IMAP payload is invalid, else None."""
     smtp_host = (data.get("smtp_host") or "").strip()

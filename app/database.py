@@ -202,6 +202,14 @@ async def _run_migrations(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_smtp_message_inbox_thread_date ON smtp_message (inbox_id, thread_key, received_at)",
         "CREATE INDEX IF NOT EXISTS ix_smtp_message_inbox_received ON smtp_message (inbox_id, received_at)",
         "CREATE INDEX IF NOT EXISTS ix_smtp_message_rfc_id ON smtp_message (rfc_message_id)",
+        # 2026-09-22: SMTP diagnose + send observability
+        #   last_diagnostic_*: staged diagnostic report (Diagnose button / CLI)
+        #   last_send_*:       last real send failure + timestamp (all failures,
+        #                      including the previously-swallowed transient ones)
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_diagnostic_at TIMESTAMP WITHOUT TIME ZONE NULL",
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_diagnostic_json TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_send_error TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE smtp_account ADD COLUMN IF NOT EXISTS last_send_at TIMESTAMP WITHOUT TIME ZONE NULL",
         # 2026-09-22: per-campaign RFC 8058 one-click unsubscribe toggle
         "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS add_one_click_unsubscribe BOOLEAN NOT NULL DEFAULT TRUE",
     ]

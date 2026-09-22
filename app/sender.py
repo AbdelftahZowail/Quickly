@@ -1148,10 +1148,19 @@ def _send_via_smtp(
             response=json.dumps({"message_id": message_id, "thread_key": thread_key}),
         )
         log.info("SMTP: sent to=%s message_id=%s thread_key=%s", to_email, message_id, thread_key)
+        # Clear any persisted failure so the inbox shows "ok" again.
+        try:
+            from app.smtp_utils import record_smtp_send_success
+
+            smtp_account.last_send_error = ""
+            record_smtp_send_success(smtp_account)
+        except Exception:  # pragma: no cover - observability must never break a send
+            log.debug("Failed to clear SMTP send-error state", exc_info=True)
         return SendResult(message_id=message_id, thread_id=thread_key, gmail_message_id=None)
     except smtplib.SMTPRecipientsRefused as e:
         err = str(e)[:300]
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        _record_smtp_failure(smtp_account, f"SMTP recipient refused: {err}")
         return SendFailure(error_type="invalid_recipient", message=f"SMTP recipient refused: {err}")
     except smtplib.SMTPSenderRefused as e:
         err = str(e)[:300]
@@ -1160,6 +1169,7 @@ def _send_via_smtp(
         # NOT a recipient bounce. jobs.py handles "auth_failed" by pausing the inbox
         # instead of marking leads as bounced (which would irreversibly poison the
         # campaign when only the relay configuration is broken).
+        _record_smtp_failure(smtp_account, f"SMTP sender refused: {err}")
         return SendFailure(error_type="auth_failed", message=f"SMTP sender refused: {err}")
     except smtplib.SMTPDataError as e:
         err = str(e)[:300]
@@ -1167,20 +1177,43 @@ def _send_via_smtp(
         # 5xx at DATA time is a permanent rejection (content/policy); 4xx is transient.
         code = getattr(e, "smtp_code", 0) or 0
         if 500 <= code < 600:
+            _record_smtp_failure(smtp_account, f"SMTP rejected the message ({code}): {err}")
             return SendFailure(error_type="bounce", message=f"SMTP rejected the message ({code}): {err}")
+        _record_smtp_failure(smtp_account, f"SMTP DATA error ({code}): {err}")
         return None
     except smtplib.SMTPAuthenticationError as e:
         err = str(e)[:300]
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
+        _record_smtp_failure(smtp_account, f"SMTP authentication failed: {err}")
         return SendFailure(error_type="auth_failed", message=f"SMTP authentication failed: {err}")
     except (smtplib.SMTPException, socket.error, OSError) as e:
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
         log.error("SMTP send error: %s", e)
+        # Transient connection error (refused/timeout/TLS).  Previously this was
+        # swallowed entirely — now it is persisted so the inbox UI can warn.
+        _record_smtp_failure(smtp_account, f"SMTP connection error: {e}")
         return None
     except Exception as e:
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=str(e)[:300])
         log.error("SMTP send error: %s", e)
+        _record_smtp_failure(smtp_account, f"SMTP send error: {e}")
         return None
+
+
+def _record_smtp_failure(smtp_account, error: str) -> int:
+    """Persist a send failure on the SMTP account; return the failure streak.
+
+    Fire-and-forget from the sender's perspective: observability must never
+    turn a send failure into a crash.  The caller (jobs.py) flushes the session
+    so the column is persisted.
+    """
+    try:
+        from app.smtp_utils import record_smtp_send_error
+
+        return record_smtp_send_error(smtp_account, error)
+    except Exception:  # pragma: no cover - defensive
+        log.debug("Failed to record SMTP send error", exc_info=True)
+        return 0
 
 
 def _fetch_sent_message_ids(

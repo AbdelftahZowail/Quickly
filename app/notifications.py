@@ -104,6 +104,16 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
         inbox_email = data.get("inbox_email", "an inbox")
         title = f"Rate limit triggered — {inbox_email}"
         message = f"A rate limit was hit for **{inbox_email}**."
+    elif event_type == "inbox.send_failing":
+        inbox_email = data.get("inbox_email") or "an inbox"
+        streak = data.get("consecutive_failures", 0)
+        error = data.get("error") or data.get("last_send_error") or "unknown error"
+        title = f"Sending is failing — {inbox_email}"
+        message = (
+            f"**{inbox_email}** has failed to send {streak} time(s) in a row "
+            f"and nothing is being delivered. Last error: *{error}*. "
+            f"Use Diagnose inbox on the Inboxes page for a staged report."
+        )
     elif event_type == "token_expired":
         inbox_email = data.get("inbox_email") or "an inbox"
         provider = str(data.get("provider") or "").lower()

@@ -101,6 +101,39 @@ def _auth_failure_event_data(inbox: Inbox, result: SendFailure) -> dict:
     }
 
 
+async def _alert_repeated_send_failure(session: AsyncSession, inbox: Inbox) -> None:
+    """Fire a webhook/notification once an inbox crosses the failure threshold.
+
+    Transient connection failures used to be swallowed: the email log row was
+    deleted, the slot kept, and the inbox kept showing a green "Active" badge
+    while nothing was delivered.  Persisting ``last_send_error`` makes the
+    failure visible; this makes it *alertable*.
+    """
+    from app.smtp_utils import (
+        SMTP_FAILURE_NOTIFY_THRESHOLD,
+        smtp_failure_streak,
+        reset_smtp_failure_streak,
+    )
+
+    streak = smtp_failure_streak(inbox.id)
+    if streak != SMTP_FAILURE_NOTIFY_THRESHOLD:
+        # Only alert exactly at the threshold — one alert per failure run, not
+        # one per send attempt (which would flood the notification centre).
+        return
+    reset_smtp_failure_streak(inbox.id)
+    await fire_webhook_event(
+        session,
+        "inbox.send_failing",
+        {
+            "inbox_id": inbox.id,
+            "inbox_email": inbox.email,
+            "provider": inbox.provider or "gmail",
+            "consecutive_failures": streak,
+            "timestamp": time_provider.utcnow().isoformat() + "Z",
+        },
+    )
+
+
 async def _update_enrollment_after_send(session: AsyncSession, cl: CampaignLead, campaign: Campaign, sequence: Sequence) -> None:
     n_seq = (
         await session.execute(
@@ -910,6 +943,7 @@ async def run_send_job():
                 if not result:
                     # Transient failure — roll back the pre-created log; slot stays for retry
                     await session.delete(email_log_entry)
+                    await _alert_repeated_send_failure(session, inbox)
                     continue
 
                 # ── success: update log and consume the slot ─────────────────
@@ -1693,6 +1727,7 @@ async def send_slot_job(slot_id: int) -> None:
         if not result:
             # Transient failure – roll back the pre-created log; slot stays for retry
             await session.delete(email_log_entry)
+            await _alert_repeated_send_failure(session, inbox)
             await session.commit()
             log.warning("send_slot_job: transient failure for slot %d, slot retained for retry", slot_id)
             return
