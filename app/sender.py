@@ -1074,9 +1074,11 @@ def _send_via_smtp(
 
     _log_smtp_call(to_email, from_email, subject, thread_id=thread_key)
     try:
-        from app.smtp_utils import _smtp_connect
+        from app.smtp_utils import _smtp_connect, smtp_timeout_seconds
 
-        client = _smtp_connect(smtp_account, timeout=30)
+        # Bounded socket timeout: a relay that accepts the connection but never
+        # answers must not hold the worker (and its DB session) open forever.
+        client = _smtp_connect(smtp_account, timeout=smtp_timeout_seconds())
         try:
             client.sendmail(from_email, [to_email], raw_bytes)
         finally:

@@ -48,6 +48,48 @@ from app.campaign_lead_status import campaign_lead_may_receive_sends
 log = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Inbox auth-failure circuit breaker
+# ---------------------------------------------------------------------------
+# A broken credential (SMTP 535, revoked OAuth grant, …) is deterministic:
+# retrying every scan tick only piles up connections, blocking SMTP calls and
+# duplicate failure notifications.  After an auth failure we
+#   (a) pause the inbox in the DB (persists across restarts), and
+#   (b) trip an in-memory cooldown so slots already dispatched for that inbox
+#       in the same scan tick skip immediately instead of each attempting
+#       another login.
+_AUTH_FAILURE_COOLDOWN = timedelta(minutes=15)
+_inbox_auth_cooldown_until: dict[int, datetime] = {}
+
+
+def _inbox_auth_cooldown_active(inbox_id: int, now: datetime) -> bool:
+    """Return True while *inbox_id* is inside its post-auth-failure cooldown."""
+    until = _inbox_auth_cooldown_until.get(inbox_id)
+    if not until:
+        return False
+    if until <= now:
+        _inbox_auth_cooldown_until.pop(inbox_id, None)
+        return False
+    return True
+
+
+def _mark_inbox_auth_failure(inbox_id: int, now: datetime) -> None:
+    """Trip the in-memory cooldown for *inbox_id*."""
+    _inbox_auth_cooldown_until[inbox_id] = now + _AUTH_FAILURE_COOLDOWN
+
+
+def _auth_failure_event_data(inbox: Inbox, result: SendFailure) -> dict:
+    """Build a correctly-labelled auth-failure event payload for notifications."""
+    return {
+        "inbox_id": inbox.id,
+        "inbox_email": inbox.email,
+        "provider": inbox.provider or "gmail",
+        "error_type": result.error_type,
+        "error": result.message,
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+    }
+
+
 async def _update_enrollment_after_send(session: AsyncSession, cl: CampaignLead, campaign: Campaign, sequence: Sequence) -> None:
     n_seq = (
         await session.execute(
@@ -118,6 +160,11 @@ async def run_send_job():
         _fallback_tracking_base = _settings.base_url.rstrip("/")
 
         for inbox in inboxes:
+            if _inbox_auth_cooldown_active(inbox.id, now):
+                log.warning(
+                    "Send job: inbox %s in auth-failure cooldown – skipping", inbox.email
+                )
+                continue
             # compute how many emails already sent today so we enforce a hard
             # daily cap rather than only relying on ``sent_this_inbox`` below.
             # Use the warmup-aware effective limit so ramp-up is respected.
@@ -730,6 +777,12 @@ async def run_send_job():
                 list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
 
                 # ── phase 3: send ────────────────────────────────────────────
+                # Commit before the network call.  The pre-created EmailLog row
+                # and tracking tokens must exist, but keeping the transaction
+                # open across a blocking SMTP/HTTP send leaves connections
+                # "idle in transaction" and exhausts the pool when many sends
+                # run concurrently.
+                await session.commit()
                 if simulate_send:
                     fake_thread_id = prev_thread_id or f"test-thread-{email_log_entry.id}"
                     result = SendResult(
@@ -738,7 +791,12 @@ async def run_send_job():
                         gmail_message_id=f"test-gmail-{email_log_entry.id}",
                     )
                 else:
-                    result = send_email(
+                    # ``send_email`` is synchronous (smtplib / urllib / Gmail
+                    # client) — run it in a worker thread so a slow or hanging
+                    # relay cannot stall the event loop (and every HTTP request
+                    # served by it).
+                    result = await asyncio.to_thread(
+                        send_email,
                         to_email=lead.email,
                         subject=subject,
                         body=send_body,
@@ -802,11 +860,17 @@ async def run_send_job():
                             "timestamp": time_provider.utcnow().isoformat() + "Z",
                         })
                     elif result.error_type in ("auth_failed", "permission_denied"):
-                        await fire_webhook_event(session, "token_expired", {
-                            "inbox_id": inbox.id,
-                            "inbox_email": inbox.email,
-                            "error": result.message,
-                        })
+                        _mark_inbox_auth_failure(inbox.id, now)
+                        if not inbox.paused:
+                            log.warning(
+                                "Send job: pausing inbox %s after %s — sending stops until "
+                                "credentials are fixed and the inbox is resumed",
+                                inbox.email, result.error_type,
+                            )
+                            inbox.paused = True
+                        await fire_webhook_event(
+                            session, "token_expired", _auth_failure_event_data(inbox, result)
+                        )
                         # Stop processing this inbox — auth is broken
                         break
                     continue
@@ -1022,6 +1086,12 @@ async def send_slot_job(slot_id: int) -> None:
         # ── Pre-flight checks ────────────────────────────────────────────
         if inbox.paused:
             log.info("send_slot_job: inbox %s paused, skipping slot %d", inbox.email, slot_id)
+            return
+        if _inbox_auth_cooldown_active(inbox.id, now):
+            log.warning(
+                "send_slot_job: inbox %s in auth-failure cooldown, skipping slot %d",
+                inbox.email, slot_id,
+            )
             return
         if getattr(campaign, "paused", False):
             log.info("send_slot_job: campaign %d paused, skipping slot %d", campaign.id, slot_id)
@@ -1487,6 +1557,11 @@ async def send_slot_job(slot_id: int) -> None:
         list_unsub_url = unsub_url if getattr(campaign, "add_unsubscribe_header", True) else None
 
         # ── Send ──────────────────────────────────────────────────────────
+        # Commit before the network call.  The pre-created EmailLog row and
+        # tracking tokens must exist, but keeping the transaction open across
+        # a blocking SMTP/HTTP send leaves connections "idle in transaction"
+        # and exhausts the pool when many slots are due at once.
+        await session.commit()
         if simulate_send:
             fake_thread_id = prev_thread_id or f"test-thread-{email_log_entry.id}"
             result = SendResult(
@@ -1495,7 +1570,11 @@ async def send_slot_job(slot_id: int) -> None:
                 gmail_message_id=f"test-gmail-{email_log_entry.id}",
             )
         else:
-            result = send_email(
+            # ``send_email`` is synchronous (smtplib / urllib / Gmail client) —
+            # run it in a worker thread so a slow or hanging relay cannot stall
+            # the event loop (and every HTTP request served by it).
+            result = await asyncio.to_thread(
+                send_email,
                 to_email=lead.email,
                 subject=subject,
                 body=send_body,
@@ -1548,9 +1627,17 @@ async def send_slot_job(slot_id: int) -> None:
                     "timestamp": time_provider.utcnow().isoformat() + "Z",
                 })
             elif result.error_type in ("auth_failed", "permission_denied"):
-                await fire_webhook_event(session, "token_expired", {
-                    "inbox_id": inbox.id, "inbox_email": inbox.email, "error": result.message,
-                })
+                _mark_inbox_auth_failure(inbox.id, now)
+                if not inbox.paused:
+                    log.warning(
+                        "send_slot_job: pausing inbox %s after %s — sending stops until "
+                        "credentials are fixed and the inbox is resumed",
+                        inbox.email, result.error_type,
+                    )
+                    inbox.paused = True
+                await fire_webhook_event(
+                    session, "token_expired", _auth_failure_event_data(inbox, result)
+                )
             await session.commit()
             return
 
@@ -1698,6 +1785,12 @@ async def _dispatch_slot(slot_id: int, delay: float) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
         await send_slot_job(slot_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Never let a failed task take the scheduler down (or die silently):
+        # the slot stays queued and the next scan retries it.
+        log.exception("send_slot_job: unhandled error for slot_id=%s", slot_id)
     finally:
         _pending_slot_ids.discard(slot_id)
 

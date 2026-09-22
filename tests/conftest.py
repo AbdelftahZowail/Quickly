@@ -43,6 +43,23 @@ def quickly_test_logs_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("QUICKLY_TEST_LOGS_DIR", str(d))
 
 
+@pytest.fixture(autouse=True)
+def _reset_jobs_auth_cooldown():
+    """The send-job auth-failure circuit breaker is process-global.
+
+    Inbox ids restart at 1 in every fresh test schema, so a cooldown tripped by
+    one test would otherwise skip sends for an unrelated inbox in the next.
+    """
+    try:
+        from app.jobs import _inbox_auth_cooldown_until
+    except Exception:  # pragma: no cover - import failure would break everything else
+        yield
+        return
+    _inbox_auth_cooldown_until.clear()
+    yield
+    _inbox_auth_cooldown_until.clear()
+
+
 @contextlib.asynccontextmanager
 async def _noop_mcp_lifespan():
     yield

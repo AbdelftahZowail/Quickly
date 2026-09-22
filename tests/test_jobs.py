@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, func
 
 from app.jobs import run_send_job
-from app.sender import SendResult
+from app.sender import SendFailure, SendResult
 from app.models import Inbox, EmailLog, GmailAccount
 from app.unibox import GmailAPIError
 from tests.conftest import (
@@ -40,11 +40,25 @@ class _SessionCtx:
         return None
 
 
+async def _attach_gmail_account(session, inbox):
+    """run_send_job skips inboxes that have no provider credentials."""
+    session.add(GmailAccount(
+        inbox_id=inbox.id,
+        google_email=inbox.email,
+        access_token="token",
+        refresh_token="refresh",
+    ))
+    await session.flush()
+
+
 @pytest.mark.asyncio
 async def test_daily_limit_prevents_extra_sends_and_fires_webhook(session, monkeypatch):
     inbox = await make_inbox(session, max_emails_per_day=1)
+    await _attach_gmail_account(session, inbox)
     campaign = await make_campaign(session)
     seq = await make_sequence(session, campaign.id)
+    # the second slot joins sequence position 1, so it needs its own sequence row
+    await make_sequence(session, campaign.id, position=1)
     lead = await make_lead(session)
     cl = await make_campaign_lead(session, campaign.id, lead.id)
     await make_campaign_inbox(session, campaign.id, inbox.id)
@@ -60,8 +74,9 @@ async def test_daily_limit_prevents_extra_sends_and_fires_webhook(session, monke
     async def fake_webhook(db, event, data):
         events.append((event, data))
 
-    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
     monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+    monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
 
     await run_send_job()
 
@@ -96,7 +111,6 @@ async def test_daily_limit_does_not_fire_without_due_queue_rows(session, monkeyp
 
     monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
     monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
-    monkeypatch.setattr("app.jobs.get_google_oauth_credentials", lambda db: ("", ""))
 
     await run_send_job()
 
@@ -106,6 +120,7 @@ async def test_daily_limit_does_not_fire_without_due_queue_rows(session, monkeyp
 @pytest.mark.asyncio
 async def test_rate_limit_triggers_webhook_and_skips_send(session, monkeypatch):
     inbox = await make_inbox(session, wait_minutes_between=60)
+    await _attach_gmail_account(session, inbox)
     campaign = await make_campaign(session)
     seq = await make_sequence(session, campaign.id)
     lead = await make_lead(session)
@@ -122,8 +137,9 @@ async def test_rate_limit_triggers_webhook_and_skips_send(session, monkeypatch):
     async def fake_webhook(db, event, data):
         events.append((event, data))
 
-    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
     monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+    monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
 
     await run_send_job()
 
@@ -134,8 +150,9 @@ async def test_rate_limit_triggers_webhook_and_skips_send(session, monkeypatch):
     assert any(ev[0] == "rate_limit" for ev in events)
     assert any(ev[0] == "rate_limit" and ev[1].get("inbox_id") == inbox.id for ev in events)
 
-    from app.models import QueueSlot
-    res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    # The rate-limited slot is not sent; recalculation may reschedule it to a
+    # later time, so assert on delivery rather than the slot row.
+    res2 = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
     assert res2.scalar() == 1
 
 
@@ -144,6 +161,7 @@ async def test_rate_limit_allows_small_slack(session, monkeypatch):
     """A send less than one second inside the wait period should still go
     through thanks to the small wiggle-room we grant."""
     inbox = await make_inbox(session, wait_minutes_between=5)
+    await _attach_gmail_account(session, inbox)
     campaign = await make_campaign(session)
     seq = await make_sequence(session, campaign.id)
     lead = await make_lead(session)
@@ -161,8 +179,9 @@ async def test_rate_limit_allows_small_slack(session, monkeypatch):
     async def fake_webhook(db, event, data):
         events.append((event, data))
 
-    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
     monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+    monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
 
     await run_send_job()
 
@@ -185,9 +204,11 @@ async def test_format_override_allows_long_values(session, monkeypatch):
     work and preserve the full string.
     """
     inbox = await make_inbox(session)
-    campaign = await make_campaign(session, track_opens=True)
+    await _attach_gmail_account(session, inbox)
+    campaign = await make_campaign(session)
     # force the "text_forced_tracking_disabled" override which is long
     campaign.send_all_as_text = True
+    campaign.track_opens = True
     await session.flush()
 
     seq = await make_sequence(session, campaign.id)
@@ -200,6 +221,7 @@ async def test_format_override_allows_long_values(session, monkeypatch):
     await session.flush()
 
     monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendResult(message_id="<x>"))
+    monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
 
     await run_send_job()
 
@@ -208,7 +230,9 @@ async def test_format_override_allows_long_values(session, monkeypatch):
     assert res.scalar() == "text_forced_tracking_disabled"
 
 @pytest.mark.asyncio
-async def test_gmail_token_refresh_failure_fires_webhook(session, monkeypatch):
+async def test_gmail_auth_failure_pauses_inbox_and_fires_webhook(session, monkeypatch):
+    """A permanent auth failure must pause the inbox (no infinite retries) and
+    fire a correctly-labelled token_expired event."""
     inbox = await make_inbox(session, provider="gmail")
     campaign = await make_campaign(session)
     seq = await make_sequence(session, campaign.id)
@@ -231,29 +255,35 @@ async def test_gmail_token_refresh_failure_fires_webhook(session, monkeypatch):
     async def fake_webhook(db, event, data):
         events.append((event, data))
 
-    monkeypatch.setattr("app.jobs.maybe_fire_email_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
+    # Token refresh now happens inside send_email; a failed refresh surfaces as
+    # a permanent SendFailure, which is what the job must react to.
+    monkeypatch.setattr("app.jobs.send_email", lambda **kwargs: SendFailure(
+        error_type="auth_failed", message="Gmail auth/permission error (401)"))
 
-    # simulate refresh failure
-    monkeypatch.setattr("app.jobs.refresh_access_token", lambda *args, **kwargs: False)
     import app.jobs as jobs_mod
-    class _Ctx:
-        def __init__(self, s):
-            self.s = s
-        async def __aenter__(self):
-            return self.s
-        async def __aexit__(self, exc_type, exc, tb):
-            pass
-    monkeypatch.setattr(jobs_mod, "AsyncSessionLocal", lambda: _Ctx(session))
+    monkeypatch.setattr(jobs_mod, "AsyncSessionLocal", lambda: _SessionCtx(session))
+    jobs_mod._inbox_auth_cooldown_until.clear()
 
     await run_send_job()
 
-    # no email should be sent when token refresh fails
+    # no email should be sent and the pre-created log must be removed
     res = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
     assert res.scalar() == 0
 
-    assert any(ev[0] == "token_expired" for ev in events), "webhook not called for token_expired"
+    # the inbox is paused so subsequent scans do not retry the broken credential
+    await session.refresh(inbox)
+    assert inbox.paused is True
+
+    ev = next((e for e in events if e[0] == "token_expired"), None)
+    assert ev is not None, "webhook not called for token_expired"
+    assert ev[1]["provider"] == "gmail"
+    assert ev[1]["error_type"] == "auth_failed"
+    assert ev[1]["inbox_email"] == inbox.email
+
     from app.models import QueueSlot
     res2 = await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    # the slot is retained so sending resumes once credentials are fixed
     assert res2.scalar() == 1
 
 

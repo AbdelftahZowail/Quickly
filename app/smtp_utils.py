@@ -167,6 +167,25 @@ def validate_smtp_account_payload(data: dict, require_password: bool = True) -> 
     return None
 
 
+def smtp_timeout_seconds(default: float = 30.0) -> float:
+    """Socket timeout (seconds) for SMTP/IMAP operations.
+
+    Overridable via ``SMTP_TIMEOUT_SECONDS`` so deployments behind slow relays
+    can tune how long a stalled connection may block before it is abandoned.
+    """
+    import os as _os
+
+    raw = (_os.getenv("SMTP_TIMEOUT_SECONDS") or "").strip()
+    if raw:
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            log.warning("Ignoring invalid SMTP_TIMEOUT_SECONDS=%r", raw)
+    return default
+
+
 def _smtp_connect(account, timeout: float = 15.0):
     """Return a connected+logged-in smtplib client for *account* (caller must quit)."""
     host = (account.smtp_host or "").strip()
@@ -211,11 +230,12 @@ def _imap_connect(account, timeout: float = 15.0):
     """Return a logged-in, INBOX-selected imaplib client (caller must logout)."""
     host = (account.imap_host or "").strip()
     port = int(account.imap_port or 993)
+    # Pass the timeout to the constructor so the TCP connect + TLS handshake
+    # are bounded too (a black-holed host must not hang the sync worker).
     if account.imap_use_ssl:
-        client = imaplib.IMAP4_SSL(host, port, ssl_context=_verified_ssl_context())
+        client = imaplib.IMAP4_SSL(host, port, ssl_context=_verified_ssl_context(), timeout=timeout)
     else:
-        client = imaplib.IMAP4(host, port)
-    client.socket().settimeout(timeout)
+        client = imaplib.IMAP4(host, port, timeout=timeout)
     client.login(account.imap_username or "", account.imap_password or "")
     typ, _ = client.select("INBOX", readonly=True)
     if typ != "OK":
