@@ -37,6 +37,7 @@ function buildChecks(d) {
   const {
     google_oauth,
     microsoft_oauth,
+    smtp: smtpData = null,
     inboxes: inboxList = [],
     unibox_sync,
     ai_features: rawAi = [],
@@ -168,6 +169,55 @@ function buildChecks(d) {
       ? `${o365Accounts.length} account${o365Accounts.length !== 1 ? 's' : ''} connected`
       : 'No accounts connected',
   });
+
+  /* ── SMTP / IMAP inboxes ──────────────────────────────────────── */
+  const smtpAccounts = smtpData?.accounts || [];
+  let smtpStatus = smtpAccounts.length === 0 ? 'unknown' : 'ok';
+  const smtpIssues = [];
+
+  smtpAccounts.forEach(acc => {
+    const inboxLink = `/inboxes?inbox=${acc.inbox_id}`;
+    const label = acc.inbox_display_name || acc.inbox_email;
+    if (acc.health === 'failing' || acc.last_send_error) {
+      smtpStatus = 'error';
+      smtpIssues.push({
+        level: 'error',
+        text: acc.last_send_error
+          ? `Sending is failing for ${label}: ${acc.last_send_error}`
+          : `SMTP inbox ${label} is failing`,
+        fix: 'Open the inbox and use Diagnose inbox for a staged report and the exact fix.',
+        action: { label: 'Fix it', to: inboxLink },
+      });
+    } else if (acc.health === 'unknown') {
+      if (smtpStatus === 'ok') smtpStatus = 'warning';
+      smtpIssues.push({
+        level: 'warning',
+        text: `SMTP inbox ${label} has not been verified yet`,
+        fix: 'Run Test connection or Diagnose inbox to confirm it can send.',
+        action: { label: 'Open Inboxes', to: inboxLink },
+      });
+    } else if (!acc.last_test_ok) {
+      if (smtpStatus === 'ok') smtpStatus = 'warning';
+      smtpIssues.push({
+        level: 'warning',
+        text: `Last connection test failed for ${label}${acc.last_test_error ? `: ${acc.last_test_error}` : ''}`,
+        fix: 'Open the inbox and use Diagnose inbox to see which stage failed.',
+        action: { label: 'Fix it', to: inboxLink },
+      });
+    }
+  });
+
+  if (smtpAccounts.length > 0) {
+    checks.push({
+      id: 'smtp_inboxes',
+      label: 'SMTP Inboxes',
+      icon: 'inbox',
+      status: smtpStatus,
+      issues: smtpIssues,
+      meta: { accounts: smtpAccounts },
+      detail: `${smtpAccounts.length} SMTP inbox${smtpAccounts.length !== 1 ? 'es' : ''} — ${smtpAccounts.filter(a => (a.health || 'ok') === 'ok' && !a.last_send_error).length} healthy`,
+    });
+  }
 
   /* ── Inbox Status ─────────────────────────────────────────────── */
   let inboxStatLvl = 'ok';

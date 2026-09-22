@@ -261,6 +261,40 @@ function CheckMeta({ check }) {
     );
   }
 
+  if (check.id === 'smtp_inboxes' && check.meta.accounts?.length > 0) {
+    return (
+      <div className="mt-1 space-y-2 border-t border-gray-100 pt-2">
+        <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">SMTP inboxes</p>
+        {check.meta.accounts.map(acc => {
+          const failing = !!acc.last_send_error || acc.health === 'failing';
+          const unknown = !failing && acc.health === 'unknown';
+          return (
+            <div key={acc.id} className="flex flex-col gap-0.5">
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="text-gray-700 truncate">{acc.inbox_display_name || acc.inbox_email}</span>
+                {failing
+                  ? <span className="text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0">Failing</span>
+                  : unknown
+                    ? <span className="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0">Not verified</span>
+                    : <span className="text-xs bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full font-medium flex-shrink-0">Healthy</span>
+                }
+              </div>
+              <p className="text-xs text-gray-400 ml-1">
+                {acc.smtp_host}:{acc.smtp_port}{acc.smtp_use_ssl ? ' (SSL)' : acc.smtp_use_tls ? ' (STARTTLS)' : ''}
+                {acc.imap_configured ? ' · IMAP' : ''}
+              </p>
+              {acc.last_send_error && (
+                <p className="text-xs text-red-400 truncate ml-1">
+                  {acc.last_send_at ? new Date(acc.last_send_at).toLocaleString() + ': ' : ''}{acc.last_send_error}
+                </p>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
   if (check.id === 'inbox_status' && check.meta.inboxList?.length > 0) {
     return (
       <div className="mt-1 space-y-1.5 border-t border-gray-100 pt-2">

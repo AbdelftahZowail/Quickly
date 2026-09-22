@@ -153,6 +153,36 @@ async def _maybe_complete_ramp_up(inbox: Inbox, db: AsyncSession) -> None:
         await db.flush()
 
 
+async def _attach_smtp_health(db: AsyncSession, inboxes: list[Inbox]) -> None:
+    """Attach real health + last send error to SMTP inboxes (no-op otherwise).
+
+    OAuth inboxes keep ``health=None`` — their health lives in System Health.
+    """
+    smtp_ids = [i.id for i in inboxes if (i.provider or "") == "smtp"]
+    if not smtp_ids:
+        return
+    from app.models import SmtpAccount
+    from app.smtp_utils import derive_inbox_health
+
+    rows = await db.execute(
+        select(SmtpAccount).where(SmtpAccount.inbox_id.in_(smtp_ids))
+    )
+    by_inbox = {sa.inbox_id: sa for sa in rows.scalars().all()}
+    for inbox in inboxes:
+        sa = by_inbox.get(inbox.id)
+        if sa is None:
+            continue
+        inbox.health = derive_inbox_health(
+            paused=bool(inbox.paused),
+            last_send_error=sa.last_send_error or "",
+            last_send_at=sa.last_send_at,
+            last_test_ok=bool(sa.last_test_ok),
+            last_tested_at=sa.last_tested_at,
+        )
+        inbox.last_send_error = sa.last_send_error or ""
+        inbox.last_send_at = sa.last_send_at
+
+
 @router.get("", response_model=list[InboxResponse])
 async def list_inboxes(db: AsyncSession = Depends(get_db)):
     # fetch all inboxes first
@@ -188,6 +218,7 @@ async def list_inboxes(db: AsyncSession = Depends(get_db)):
         i.pending_leads = pending_counts.get(i.id, 0)
         i.effective_max_per_day = _compute_effective_limit(i)
         await _maybe_complete_ramp_up(i, db)
+    await _attach_smtp_health(db, list(inboxes))
     return inboxes
 
 
@@ -241,6 +272,7 @@ async def get_inbox(inbox_id: int, db: AsyncSession = Depends(get_db)):
     inbox.sent_today = count_res.scalar() or 0
     inbox.effective_max_per_day = _compute_effective_limit(inbox)
     await _maybe_complete_ramp_up(inbox, db)
+    await _attach_smtp_health(db, [inbox])
     return inbox
 
 

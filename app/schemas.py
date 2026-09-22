@@ -163,6 +163,11 @@ class InboxResponse(BaseModel):
     sent_today: int = 0
     # how many future queue slots are pending on this inbox right now
     pending_leads: int = 0
+    # Real health for SMTP inboxes (ok/failing/unknown); None for OAuth providers,
+    # whose health is surfaced via System Health instead.
+    health: Optional[str] = None
+    last_send_error: str = ""
+    last_send_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

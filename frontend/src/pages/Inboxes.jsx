@@ -44,6 +44,127 @@ function CollapsibleInfo({ children }) {
   );
 }
 
+/** Human label + colour for one diagnostic stage. */
+const STAGE_LABELS = {
+  dns: 'DNS',
+  tcp: 'TCP connect',
+  tls: 'TLS',
+  ehlo: 'EHLO',
+  auth: 'AUTH',
+  mail_from: 'MAIL FROM',
+  rcpt_to: 'RCPT TO',
+  data: 'DATA',
+  imap: 'IMAP',
+};
+
+function diagnosticReportToText(report) {
+  if (!report) return '';
+  const lines = [
+    'Quickly SMTP diagnostic report',
+    `Target: ${report.host}:${report.port}  mode=${report.mode}`,
+    `Result: ${report.ok ? 'PASS' : 'FAIL'}  (${report.duration_ms ?? 0} ms)`,
+    '',
+  ];
+  (report.stages || []).forEach((stage) => {
+    lines.push(`[${stage.ok ? 'PASS' : 'FAIL'}] ${STAGE_LABELS[stage.name] || stage.name}: ${stage.detail || ''}`);
+    (stage.raw || []).forEach((raw) => lines.push(`       ${raw}`));
+  });
+  lines.push('');
+  lines.push(`Verdict: ${report.verdict || ''}`);
+  if (report.suggested_mode) {
+    lines.push(`Suggested mode: ${report.suggested_mode === 'ssl' ? 'SSL' : 'STARTTLS'}`);
+  }
+  (report.hints || []).forEach((hint) => lines.push(`  - ${hint}`));
+  return lines.join('\n');
+}
+
+/** Staged diagnostic report: ✅/❌ per stage, verdict, fix hints, copy button. */
+function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
+  const [expanded, setExpanded] = useState({});
+  const [copied, setCopied] = useState(false);
+  if (!report) return null;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(diagnosticReportToText(report));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard may be unavailable (http origin) — ignore */
+    }
+  };
+
+  return (
+    <div className="mt-1 border border-gray-200 rounded-md bg-white">
+      <div className="flex items-center justify-between gap-2 px-2.5 py-2 border-b border-gray-100">
+        <span className={`text-xs font-semibold ${report.ok ? 'text-green-700' : 'text-red-600'}`}>
+          {report.ok ? '✅ Diagnosis passed' : '❌ Diagnosis found a problem'}
+        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] text-gray-400">{report.duration_ms ?? 0} ms</span>
+          <button
+            type="button"
+            onClick={copy}
+            className="text-[11px] font-medium text-blue-600 hover:text-blue-800"
+          >
+            {copied ? 'Copied ✓' : 'Copy report'}
+          </button>
+        </div>
+      </div>
+      <div className="px-2.5 py-2 space-y-1">
+        {(report.stages || []).map((stage) => (
+          <div key={stage.name} className="text-xs">
+            <button
+              type="button"
+              onClick={() => setExpanded((e) => ({ ...e, [stage.name]: !e[stage.name] }))}
+              className="flex items-start gap-1.5 text-left w-full hover:bg-gray-50 rounded px-1 -mx-1 py-0.5"
+            >
+              <span className="shrink-0">{stage.ok ? '✅' : '❌'}</span>
+              <span className="font-medium text-gray-700 shrink-0">{STAGE_LABELS[stage.name] || stage.name}</span>
+              <span className="text-gray-500 truncate">{stage.detail}</span>
+              {stage.raw?.length > 0 && (
+                <span className="ml-auto text-gray-300 shrink-0">{expanded[stage.name] ? '▾' : '▸'}</span>
+              )}
+            </button>
+            {expanded[stage.name] && stage.raw?.length > 0 && (
+              <pre className="mt-1 mb-1 ml-5 px-1.5 py-1 bg-gray-50 rounded text-[10px] leading-snug text-gray-600 overflow-x-auto whitespace-pre-wrap break-all">
+                {stage.raw.join('\n')}
+              </pre>
+            )}
+          </div>
+        ))}
+      </div>
+      {report.verdict && (
+        <p className="px-2.5 pb-2 text-xs text-gray-700">
+          <span className="font-medium">Verdict: </span>{report.verdict}
+        </p>
+      )}
+      {report.hints?.length > 0 && (
+        <div className="px-2.5 pb-2 space-y-1">
+          {report.hints.map((hint, i) => (
+            <p key={i} className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1">
+              💡 {hint}
+            </p>
+          ))}
+        </div>
+      )}
+      {report.suggested_mode && (
+        <div className="px-2.5 pb-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={busy}
+            onClick={report.suggested_mode === 'ssl' ? onTrySsl : onTryStarttls}
+          >
+            {report.suggested_mode === 'ssl' ? 'Try SSL instead (465)' : 'Try STARTTLS instead (587)'}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RedirectUriBlock({ uri, size = 'xs' }) {
   if (!uri) return null;
   const textCls = size === 'sm' ? 'text-sm' : 'text-xs';
@@ -548,6 +669,12 @@ export default function Inboxes() {
   const [editingSmtp, setEditingSmtp] = useState(null);
   const [smtpTesting, setSmtpTesting] = useState(false);
   const [smtpTestMsg, setSmtpTestMsg] = useState(null);
+  // Staged diagnostic report for the inbox being edited (Diagnose button).
+  const [smtpDiagnose, setSmtpDiagnose] = useState(null);
+  const [smtpDiagnosing, setSmtpDiagnosing] = useState(false);
+  const [smtpSendTestTo, setSmtpSendTestTo] = useState('');
+  const [smtpSendTestBusy, setSmtpSendTestBusy] = useState(false);
+  const [smtpSendTestMsg, setSmtpSendTestMsg] = useState(null);
   const [oauthConfigured, setOauthConfigured] = useState(false);
   const [redirectUri, setRedirectUri] = useState('');
   const [o365Configured, setO365Configured] = useState(false);
@@ -850,6 +977,8 @@ export default function Inboxes() {
     setEditMsg(null);
     setEditingSmtp(null);
     setSmtpTestMsg(null);
+    setSmtpDiagnose(null);
+    setSmtpSendTestMsg(null);
     if (inbox.provider === 'smtp') {
       api.get(`/smtp/inboxes/${inbox.id}`)
         .then((d) => setEditingSmtp({
@@ -888,6 +1017,8 @@ export default function Inboxes() {
     setEditDirty(false);
     setEditingSmtp(null);
     setSmtpTestMsg(null);
+    setSmtpDiagnose(null);
+    setSmtpSendTestMsg(null);
   };
   const tryCloseEdit = () => {
     if (editDirty) {
@@ -1002,6 +1133,72 @@ export default function Inboxes() {
       setSmtpTestMsg({ type: 'error', text: err.message });
     } finally {
       setSmtpTesting(false);
+    }
+  };
+
+  const runSmtpDiagnose = async () => {
+    if (!editing) return;
+    setSmtpDiagnosing(true);
+    setSmtpTestMsg(null);
+    setSmtpDiagnose(null);
+    try {
+      const report = await api.post(`/smtp/inboxes/${editing.id}/diagnose`, {});
+      setSmtpDiagnose(report);
+      await refreshEditingInbox(editing.id);
+    } catch (err) {
+      setSmtpTestMsg({ type: 'error', text: err.message });
+    } finally {
+      setSmtpDiagnosing(false);
+    }
+  };
+
+  const sendSmtpTestEmail = async () => {
+    if (!editing) return;
+    const to = (smtpSendTestTo || '').trim();
+    if (!to || !to.includes('@')) {
+      setSmtpSendTestMsg({ type: 'error', text: 'Enter a recipient email address.' });
+      return;
+    }
+    setSmtpSendTestBusy(true);
+    setSmtpSendTestMsg(null);
+    try {
+      const res = await api.post(`/smtp/inboxes/${editing.id}/send-test`, { to_email: to });
+      if (res.ok) {
+        setSmtpSendTestMsg({ type: 'success', text: `Test email accepted by the relay (${res.message_id || 'sent'})` });
+      } else {
+        setSmtpSendTestMsg({ type: 'error', text: `Test send failed: ${res.message || res.error || 'unknown error'}` });
+      }
+      await refreshEditingInbox(editing.id);
+    } catch (err) {
+      setSmtpSendTestMsg({ type: 'error', text: err.message });
+    } finally {
+      setSmtpSendTestBusy(false);
+    }
+  };
+
+  /** Apply the mode the diagnostic proved works, save it, and re-test. */
+  const applySuggestedMode = async (mode) => {
+    if (!editingSmtp || !editing) return;
+    const next = {
+      ...editingSmtp,
+      smtp_use_ssl: mode === 'ssl',
+      smtp_use_tls: mode === 'starttls',
+    };
+    setEditingSmtp(next);
+    setSmtpDiagnose(null);
+    setSmtpTestMsg(null);
+    try {
+      const { _meta, ...payload } = next;
+      const saved = await api.put(`/smtp/inboxes/${editing.id}`, {
+        ...payload,
+        smtp_port: +payload.smtp_port,
+        imap_port: +payload.imap_port,
+      });
+      setEditingSmtp((prev) => ({ ...prev, smtp_password: '', imap_password: '', _meta: saved }));
+      setSmtpTestMsg({ type: 'success', text: `Switched to ${mode === 'ssl' ? 'SSL (465)' : 'STARTTLS (587)'} — running diagnosis…` });
+      await runSmtpDiagnose();
+    } catch (err) {
+      setSmtpTestMsg({ type: 'error', text: err.message });
     }
   };
 
@@ -1299,7 +1496,11 @@ export default function Inboxes() {
                       </span>
                       {inbox.paused
                         ? <span className="text-xs bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full font-medium">Paused</span>
-                        : <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">Active</span>
+                        : inbox.health === 'failing'
+                          ? <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium" title={inbox.last_send_error || ''}>Failing</span>
+                          : inbox.provider === 'smtp' && inbox.health === 'unknown'
+                            ? <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-medium">Unknown</span>
+                            : <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-medium">Active</span>
                       }
                       {expiredInboxIds.has(inbox.id) && (
                         <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-full font-medium">
@@ -1429,9 +1630,46 @@ export default function Inboxes() {
                                   Last test: {editingSmtp._meta.last_test_ok ? 'passed' : `failed — ${editingSmtp._meta.last_test_error || 'unknown error'}`}
                                 </p>
                               )}
-                              <div className="flex gap-2">
+                              {editingSmtp._meta?.last_send_error && (
+                                <p className="text-xs text-red-600">
+                                  Last send error {editingSmtp._meta.last_send_at ? `(${new Date(editingSmtp._meta.last_send_at).toLocaleString()})` : ''}: {editingSmtp._meta.last_send_error}
+                                </p>
+                              )}
+                              <div className="flex flex-wrap gap-2">
                                 <Button type="button" size="sm" variant="outline" onClick={saveEditingSmtp}>Save SMTP</Button>
                                 <Button type="button" size="sm" variant="outline" onClick={testEditingSmtp} disabled={smtpTesting}>{smtpTesting ? 'Testing…' : 'Test connection'}</Button>
+                                <Button type="button" size="sm" variant="default" onClick={runSmtpDiagnose} disabled={smtpDiagnosing || smtpTesting}>
+                                  {smtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
+                                </Button>
+                              </div>
+                              {smtpDiagnose && (
+                                <SmtpDiagnosticReport
+                                  report={smtpDiagnose}
+                                  busy={smtpDiagnosing}
+                                  onTrySsl={() => applySuggestedMode('ssl')}
+                                  onTryStarttls={() => applySuggestedMode('starttls')}
+                                />
+                              )}
+                              <div className="border-t border-gray-200 pt-3 space-y-2">
+                                <label className="block text-xs font-medium text-gray-700">Send test email</label>
+                                <p className="text-[11px] text-gray-400">Sends a real message through the same path campaigns use.</p>
+                                <div className="flex gap-2">
+                                  <input
+                                    type="email"
+                                    value={smtpSendTestTo}
+                                    onChange={(e) => setSmtpSendTestTo(e.target.value)}
+                                    placeholder="you@example.com"
+                                    className="flex-1 min-w-0 border-gray-300 rounded-md text-sm"
+                                  />
+                                  <Button type="button" size="sm" variant="outline" onClick={sendSmtpTestEmail} disabled={smtpSendTestBusy}>
+                                    {smtpSendTestBusy ? 'Sending…' : 'Send'}
+                                  </Button>
+                                </div>
+                                {smtpSendTestMsg && (
+                                  <p className={`text-xs ${smtpSendTestMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>
+                                    {smtpSendTestMsg.text}
+                                  </p>
+                                )}
                               </div>
                             </>
                           )}
@@ -1586,12 +1824,104 @@ export default function Inboxes() {
                     )}
                     {/* Status + Provider row */}
                     <div className="flex items-center justify-between">
-                      {selectedInbox.paused
-                        ? <span className="text-xs bg-orange-100 text-orange-700 px-2.5 py-1 rounded-full font-medium">Paused</span>
-                        : <span className="text-xs bg-green-100 text-green-700 px-2.5 py-1 rounded-full font-medium">Active</span>
-                      }
+                      <div className="flex items-center gap-1.5">
+                        {selectedInbox.paused
+                          ? <span className="text-xs bg-orange-100 text-orange-700 px-2.5 py-1 rounded-full font-medium">Paused</span>
+                          : selectedInbox.health === 'failing'
+                            ? <span className="text-xs bg-red-100 text-red-700 px-2.5 py-1 rounded-full font-medium">Failing</span>
+                            : selectedInbox.health === 'ok'
+                              ? <span className="text-xs bg-green-100 text-green-700 px-2.5 py-1 rounded-full font-medium">Healthy</span>
+                              : selectedInbox.provider === 'smtp'
+                                ? <span className="text-xs bg-gray-100 text-gray-600 px-2.5 py-1 rounded-full font-medium">Unknown</span>
+                                : <span className="text-xs bg-green-100 text-green-700 px-2.5 py-1 rounded-full font-medium">Active</span>
+                        }
+                      </div>
                       <span className="text-xs bg-sky-100 text-sky-700 px-2.5 py-1 rounded-full font-medium capitalize">{selectedInbox.provider || 'gmail'}</span>
                     </div>
+
+                    {/* SMTP send health — the reason behind the badge above */}
+                    {selectedInbox.provider === 'smtp' && (selectedInbox.last_send_error || selectedInbox.health === 'failing' || selectedInbox.health === 'unknown') && (
+                      <div className={`p-3 rounded-lg border flex items-start gap-2 ${
+                        selectedInbox.last_send_error
+                          ? 'bg-red-50 border-red-200'
+                          : 'bg-amber-50 border-amber-200'
+                      }`}>
+                        <svg className={`w-4 h-4 mt-0.5 shrink-0 ${selectedInbox.last_send_error ? 'text-red-500' : 'text-amber-500'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <div className="min-w-0">
+                          <p className={`text-sm font-medium ${selectedInbox.last_send_error ? 'text-red-800' : 'text-amber-800'}`}>
+                            {selectedInbox.last_send_error ? 'Sending is failing' : 'Not verified yet'}
+                          </p>
+                          <p className={`text-xs mt-0.5 break-words ${selectedInbox.last_send_error ? 'text-red-600' : 'text-amber-700'}`}>
+                            {selectedInbox.last_send_error
+                              ? `${selectedInbox.last_send_at ? `Last attempt ${new Date(selectedInbox.last_send_at).toLocaleString()}: ` : ''}${selectedInbox.last_send_error}`
+                              : 'Run Diagnose inbox from the edit panel to verify this relay.'}
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {selectedInbox.provider === 'smtp' && (
+                      <div className="space-y-2">
+                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">SMTP diagnostics</p>
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="default"
+                            onClick={async () => {
+                              setSmtpDiagnosing(true);
+                              setSmtpDiagnose(null);
+                              try {
+                                const report = await api.post(`/smtp/inboxes/${selectedInbox.id}/diagnose`, {});
+                                setSmtpDiagnose(report);
+                                await refreshEditingInbox(selectedInbox.id);
+                              } catch (err) {
+                                notify({ type: 'error', message: err.message });
+                              } finally {
+                                setSmtpDiagnosing(false);
+                              }
+                            }}
+                            disabled={smtpDiagnosing}
+                          >
+                            {smtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            onClick={async () => {
+                              const to = window.prompt('Send a test email to which address?', selectedInbox.email || '');
+                              if (!to) return;
+                              setSmtpSendTestBusy(true);
+                              try {
+                                const res = await api.post(`/smtp/inboxes/${selectedInbox.id}/send-test`, { to_email: to });
+                                notify(res.ok
+                                  ? { type: 'success', message: 'Test email accepted by the relay' }
+                                  : { type: 'error', message: `Test send failed: ${res.message || res.error}` });
+                                await refreshEditingInbox(selectedInbox.id);
+                              } catch (err) {
+                                notify({ type: 'error', message: err.message });
+                              } finally {
+                                setSmtpSendTestBusy(false);
+                              }
+                            }}
+                            disabled={smtpSendTestBusy}
+                          >
+                            {smtpSendTestBusy ? 'Sending…' : 'Send test email'}
+                          </Button>
+                        </div>
+                        {smtpDiagnose && (
+                          <SmtpDiagnosticReport
+                            report={smtpDiagnose}
+                            busy={smtpDiagnosing}
+                            onTrySsl={() => applySuggestedMode('ssl')}
+                            onTryStarttls={() => applySuggestedMode('starttls')}
+                          />
+                        )}
+                      </div>
+                    )}
 
                     {/* Sent today */}
                     <div>
