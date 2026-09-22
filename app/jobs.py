@@ -78,6 +78,17 @@ def _mark_inbox_auth_failure(inbox_id: int, now: datetime) -> None:
     _inbox_auth_cooldown_until[inbox_id] = now + _AUTH_FAILURE_COOLDOWN
 
 
+def clear_inbox_auth_failure(inbox_id: int) -> None:
+    """Clear the in-memory auth-failure cooldown for *inbox_id*.
+
+    Call this whenever the operator has plausibly fixed the credential —
+    resuming a paused inbox or passing an SMTP connection test — so queued
+    slots are attempted again immediately instead of being skipped for the
+    rest of the 15-minute cooldown.
+    """
+    _inbox_auth_cooldown_until.pop(inbox_id, None)
+
+
 def _auth_failure_event_data(inbox: Inbox, result: SendFailure) -> dict:
     """Build a correctly-labelled auth-failure event payload for notifications."""
     return {
@@ -797,32 +808,50 @@ async def run_send_job():
                     # client) — run it in a worker thread so a slow or hanging
                     # relay cannot stall the event loop (and every HTTP request
                     # served by it).
-                    result = await asyncio.to_thread(
-                        send_email,
-                        to_email=lead.email,
-                        subject=subject,
-                        body=send_body,
-                        from_email=from_addr,
-                        from_name=from_name,
-                        reply_to_msg_id=reply_to_msg_id,
-                        references=references_chain,
-                        is_html=is_html,
-                        provider=inbox.provider or "gmail",
-                        gmail_access_token=gmail_token,
-                        gmail_account=ga,
-                        thread_id=prev_thread_id,
-                        list_unsubscribe_url=list_unsub_url,
-                        list_unsubscribe_one_click=list_unsub_one_click,
-                        google_client_id=g_client_id,
-                        google_client_secret=g_client_secret,
-                        office365_account=o365_account,
-                        office365_client_id=o365_client_id,
-                        office365_client_secret=o365_client_secret,
-                        office365_tenant_id=o365_tenant_id,
-                        conversation_id=prev_thread_id if inbox.provider == "office365" else None,
-                        reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
-                        smtp_account=smtp_account,
-                    )
+                    try:
+                        result = await asyncio.to_thread(
+                            send_email,
+                            to_email=lead.email,
+                            subject=subject,
+                            body=send_body,
+                            from_email=from_addr,
+                            from_name=from_name,
+                            reply_to_msg_id=reply_to_msg_id,
+                            references=references_chain,
+                            is_html=is_html,
+                            provider=inbox.provider or "gmail",
+                            gmail_access_token=gmail_token,
+                            gmail_account=ga,
+                            thread_id=prev_thread_id,
+                            list_unsubscribe_url=list_unsub_url,
+                            list_unsubscribe_one_click=list_unsub_one_click,
+                            google_client_id=g_client_id,
+                            google_client_secret=g_client_secret,
+                            office365_account=o365_account,
+                            office365_client_id=o365_client_id,
+                            office365_client_secret=o365_client_secret,
+                            office365_tenant_id=o365_tenant_id,
+                            conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                            reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                            smtp_account=smtp_account,
+                        )
+                    except Exception:
+                        # ``send_email`` handles the expected failures itself,
+                        # so reaching here means an unexpected error.  The
+                        # pre-created EmailLog row was already committed above;
+                        # leaving it behind would count against the inbox's
+                        # daily quota, inflate campaign ``emails_sent`` and make
+                        # queue recalculation think this step had been sent.
+                        # Remove it, then let the caller's handler log the error
+                        # (the slot stays queued for a retry).
+                        log.exception(
+                            "Send job: send_email raised for lead_id=%s inbox=%s; "
+                            "rolling back pre-created email log",
+                            lead.id, inbox.email,
+                        )
+                        await session.delete(email_log_entry)
+                        await session.commit()
+                        raise
 
                 # ── Handle permanent failure (bounce / auth) ─────────────────
                 if isinstance(result, SendFailure):
@@ -1578,32 +1607,46 @@ async def send_slot_job(slot_id: int) -> None:
             # ``send_email`` is synchronous (smtplib / urllib / Gmail client) —
             # run it in a worker thread so a slow or hanging relay cannot stall
             # the event loop (and every HTTP request served by it).
-            result = await asyncio.to_thread(
-                send_email,
-                to_email=lead.email,
-                subject=subject,
-                body=send_body,
-                from_email=from_addr,
-                from_name=from_name,
-                reply_to_msg_id=reply_to_msg_id,
-                references=references_chain,
-                is_html=is_html,
-                provider=inbox.provider or "gmail",
-                gmail_access_token=gmail_token,
-                gmail_account=ga,
-                thread_id=prev_thread_id,
-                list_unsubscribe_url=list_unsub_url,
-                list_unsubscribe_one_click=list_unsub_one_click,
-                google_client_id=g_client_id,
-                google_client_secret=g_client_secret,
-                office365_account=o365_account,
-                office365_client_id=o365_client_id,
-                office365_client_secret=o365_client_secret,
-                office365_tenant_id=o365_tenant_id,
-                conversation_id=prev_thread_id if inbox.provider == "office365" else None,
-                reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
-                smtp_account=smtp_account,
-            )
+            try:
+                result = await asyncio.to_thread(
+                    send_email,
+                    to_email=lead.email,
+                    subject=subject,
+                    body=send_body,
+                    from_email=from_addr,
+                    from_name=from_name,
+                    reply_to_msg_id=reply_to_msg_id,
+                    references=references_chain,
+                    is_html=is_html,
+                    provider=inbox.provider or "gmail",
+                    gmail_access_token=gmail_token,
+                    gmail_account=ga,
+                    thread_id=prev_thread_id,
+                    list_unsubscribe_url=list_unsub_url,
+                    list_unsubscribe_one_click=list_unsub_one_click,
+                    google_client_id=g_client_id,
+                    google_client_secret=g_client_secret,
+                    office365_account=o365_account,
+                    office365_client_id=o365_client_id,
+                    office365_client_secret=o365_client_secret,
+                    office365_tenant_id=o365_tenant_id,
+                    conversation_id=prev_thread_id if inbox.provider == "office365" else None,
+                    reply_graph_message_id=reply_graph_message_id if inbox.provider == "office365" else None,
+                    smtp_account=smtp_account,
+                )
+            except Exception:
+                # Unexpected error from send_email: the pre-created EmailLog row
+                # was committed before the network call.  Drop it so it does not
+                # consume daily quota / count as a sent campaign step, then let
+                # _dispatch_slot's handler log it (the slot stays queued).
+                log.exception(
+                    "send_slot_job: send_email raised for slot %d (lead_id=%s); "
+                    "rolling back pre-created email log",
+                    slot_id, lead.id,
+                )
+                await session.delete(email_log_entry)
+                await session.commit()
+                raise
 
         # ── Permanent failure ─────────────────────────────────────────────
         if isinstance(result, SendFailure):

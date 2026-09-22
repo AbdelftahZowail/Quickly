@@ -288,6 +288,39 @@ async def test_gmail_auth_failure_pauses_inbox_and_fires_webhook(session, monkey
 
 
 @pytest.mark.asyncio
+async def test_send_email_raising_removes_precreated_email_log(session, monkeypatch):
+    """An unexpected exception from send_email must not leave an orphan EmailLog.
+
+    ``run_send_job`` commits the pre-created row before the network call, so
+    without cleanup a crash would consume the inbox's daily quota and inflate
+    campaign ``emails_sent``.
+    """
+    inbox = await make_inbox(session)
+    await _attach_gmail_account(session, inbox)
+    campaign = await make_campaign(session)
+    await make_sequence(session, campaign.id)
+    lead = await make_lead(session)
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+
+    now = datetime.utcnow()
+    await make_queue_slot(session, cl.id, inbox.id, scheduled_date=now - timedelta(minutes=1))
+    await session.flush()
+
+    def exploding_send(**kwargs):
+        raise RuntimeError("transport exploded")
+
+    monkeypatch.setattr("app.jobs.send_email", exploding_send)
+    monkeypatch.setattr("app.jobs.AsyncSessionLocal", lambda: _SessionCtx(session))
+
+    with pytest.raises(RuntimeError, match="transport exploded"):
+        await run_send_job()
+
+    res = await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    assert res.scalar() == 0, "pre-created EmailLog row must be rolled back"
+
+
+@pytest.mark.asyncio
 async def test_unibox_sync_failure_triggers_webhook(session, monkeypatch):
     # an expired gmail token during a sync should fire the same webhook event
     inbox = await make_inbox(session, provider="gmail")

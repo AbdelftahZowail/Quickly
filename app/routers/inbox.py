@@ -536,6 +536,13 @@ async def unpause_inbox(
     inbox.paused = False
     await db.flush()
 
+    # A manual resume is an explicit operator statement that the credential is
+    # fixed; drop the in-memory send cooldown so slots are not skipped for the
+    # remainder of the 15-minute window.
+    from app.jobs import clear_inbox_auth_failure
+
+    clear_inbox_auth_failure(inbox_id)
+
     # Un-pause leads that belong to campaigns using this inbox
     campaign_id_rows = await db.execute(
         select(CampaignInbox.campaign_id).where(CampaignInbox.inbox_id == inbox_id)

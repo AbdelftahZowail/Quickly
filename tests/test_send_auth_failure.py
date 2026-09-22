@@ -178,6 +178,126 @@ async def test_sender_display_name_renders_lead_variables(session, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_email_raising_removes_precreated_email_log(session, monkeypatch):
+    """An unexpected exception from send_email must not leave an orphan EmailLog.
+
+    The row is committed *before* the network call (so tracking tokens exist),
+    so without cleanup a crash would consume the inbox's daily quota, inflate
+    campaign ``emails_sent`` and make queue recalculation think the step had
+    already been sent.
+    """
+    inbox = await _make_smtp_inbox(session, email="boom@example.com")
+    slot = await _make_due_slot(session, inbox)
+
+    def exploding_send(**kwargs):
+        raise RuntimeError("transport exploded")
+
+    async def fake_webhook(db, event, data):
+        return None
+
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.send_email", exploding_send)
+    monkeypatch.setattr(jobs_mod, "AsyncSessionLocal", lambda: _SessionCtx(session))
+    jobs_mod._inbox_auth_cooldown_until.clear()
+
+    before = (
+        await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    ).scalar()
+    assert before == 0
+
+    # The exception must propagate so _dispatch_slot can log it and the slot is
+    # retried by the next scan.
+    with pytest.raises(RuntimeError, match="transport exploded"):
+        await jobs_mod.send_slot_job(slot.id)
+
+    remaining = (
+        await session.execute(select(func.count(EmailLog.id)).where(EmailLog.inbox_id == inbox.id))
+    ).scalar()
+    assert remaining == 0, "pre-created EmailLog row must be rolled back"
+
+    # The slot itself is retained so the send can be retried.
+    slots = (
+        await session.execute(select(func.count(QueueSlot.id)).where(QueueSlot.inbox_id == inbox.id))
+    ).scalar()
+    assert slots == 1
+
+
+@pytest.mark.asyncio
+async def test_unpause_inbox_clears_auth_cooldown(session):
+    """A manual unpause must drop the 15-minute in-memory send cooldown."""
+    from fastapi import BackgroundTasks
+
+    from app.routers import inbox as inbox_router
+
+    inbox = await _make_smtp_inbox(session, email="resume-me@example.com")
+    inbox.paused = True
+    await session.flush()
+
+    jobs_mod._mark_inbox_auth_failure(inbox.id, jobs_mod.time_provider.now())
+    assert jobs_mod._inbox_auth_cooldown_active(inbox.id, jobs_mod.time_provider.now()) is True
+
+    await inbox_router.unpause_inbox(inbox.id, BackgroundTasks(), db=session)
+
+    assert jobs_mod._inbox_auth_cooldown_active(inbox.id, jobs_mod.time_provider.now()) is False
+
+
+@pytest.mark.asyncio
+async def test_successful_smtp_test_clears_auth_cooldown(session, monkeypatch):
+    """A passing SMTP connection test must drop the in-memory send cooldown."""
+    from app.routers import smtp as smtp_router
+
+    inbox = await _make_smtp_inbox(session, email="test-ok@example.com")
+    acct = (
+        await session.execute(select(SmtpAccount).where(SmtpAccount.inbox_id == inbox.id))
+    ).scalar_one()
+
+    class _R:
+        def __init__(self, ok, error="", detail=""):
+            self.ok = ok
+            self.error = error
+            self.detail = detail
+
+    monkeypatch.setattr(
+        smtp_router,
+        "test_account_connections",
+        lambda account: (_R(True, "", "SMTP ok"), _R(True, "", "skipped")),
+    )
+    jobs_mod._mark_inbox_auth_failure(inbox.id, jobs_mod.time_provider.now())
+    assert jobs_mod._inbox_auth_cooldown_active(inbox.id, jobs_mod.time_provider.now()) is True
+
+    result = await smtp_router.test_smtp_account(inbox.id, db=session, _user=object())
+
+    assert result["ok"] is True
+    assert acct.last_test_ok is True
+    assert jobs_mod._inbox_auth_cooldown_active(inbox.id, jobs_mod.time_provider.now()) is False
+
+
+@pytest.mark.asyncio
+async def test_failed_smtp_test_keeps_auth_cooldown(session, monkeypatch):
+    """A failing connection test must NOT clear the cooldown."""
+    from app.routers import smtp as smtp_router
+
+    inbox = await _make_smtp_inbox(session, email="test-bad@example.com")
+
+    class _R:
+        def __init__(self, ok, error="", detail=""):
+            self.ok = ok
+            self.error = error
+            self.detail = detail
+
+    monkeypatch.setattr(
+        smtp_router,
+        "test_account_connections",
+        lambda account: (_R(False, "auth failed"), _R(True, "", "skipped")),
+    )
+    jobs_mod._mark_inbox_auth_failure(inbox.id, jobs_mod.time_provider.now())
+
+    await smtp_router.test_smtp_account(inbox.id, db=session, _user=object())
+
+    assert jobs_mod._inbox_auth_cooldown_active(inbox.id, jobs_mod.time_provider.now()) is True
+
+
+@pytest.mark.asyncio
 async def test_one_click_unsubscribe_flag_comes_from_campaign(session, monkeypatch):
     """campaign.add_one_click_unsubscribe=False keeps List-Unsubscribe but drops -Post."""
     inbox = await _make_smtp_inbox(session, email="brand2@example.com")

@@ -204,6 +204,12 @@ async def test_smtp_account(
 
     smtp_res, imap_res = await asyncio.to_thread(test_account_connections, acct)
     ok = bool(smtp_res.ok and imap_res.ok)
+    if ok:
+        # A successful connection test means the credentials work again; clear
+        # any send cooldown so queued slots resume immediately.
+        from app.jobs import clear_inbox_auth_failure
+
+        clear_inbox_auth_failure(inbox_id)
     err_parts = [p for p in (smtp_res.error, imap_res.error) if p]
     acct.last_tested_at = utcnow()
     acct.last_test_ok = ok
