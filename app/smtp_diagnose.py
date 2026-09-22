@@ -947,6 +947,13 @@ async def _cli_inbox(args) -> int:
     from app.models import Inbox, SmtpAccount
 
     async with AsyncSessionLocal() as session:
+        # The server bootstraps the DB-stored Fernet key at startup
+        # (settings_manager._ensure_secrets → init_encryption); a bare CLI
+        # process must do the same, otherwise EncryptedText columns come back
+        # as ciphertext and AUTH gets garbage (535).
+        from app.settings_manager import _ensure_secrets
+
+        await _ensure_secrets(session)
         result = await session.execute(
             select(SmtpAccount, Inbox)
             .join(Inbox, SmtpAccount.inbox_id == Inbox.id)

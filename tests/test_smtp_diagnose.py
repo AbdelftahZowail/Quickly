@@ -537,6 +537,64 @@ def test_render_text_report_contains_verdict(fake_relay):
     assert "3s per stage, 15s overall" in text
 
 
+@pytest.mark.asyncio
+async def test_cli_inbox_bootstraps_db_encryption_key(session, monkeypatch):
+    """``--inbox-id`` must load the DB-stored Fernet key before reading credentials.
+
+    The server bootstraps it at startup (``settings_manager._ensure_secrets``);
+    without the same call in the CLI, ``EncryptedText`` columns come back as
+    ciphertext and the probe authenticates with a Fernet token (535).
+    """
+    import argparse
+
+    from app import security
+    from app.models import Inbox, SmtpAccount
+    from app.settings_manager import save_setting_to_db
+
+    # Server-side state: encryption on, key persisted in settings.
+    # Pin the env var too: _ensure_secrets prefers QUICKLY_ENCRYPTION_KEY over
+    # the DB value, and the repo .env may already carry a different key.
+    monkeypatch.setenv("QUICKLY_ENCRYPTION_KEY", "cli-test-key")
+    orig_fernet = security._fernet
+    try:
+        security.init_encryption("cli-test-key")
+        await save_setting_to_db(session, "quickly_encryption_key", "cli-test-key")
+
+        inbox = Inbox(email="cli@example.com", provider="smtp")
+        session.add(inbox)
+        await session.flush()
+        session.add(
+            SmtpAccount(
+                inbox_id=inbox.id, smtp_host="127.0.0.1", smtp_port=587,
+                smtp_username="cli@example.com", smtp_password="super-secret-pw",
+                smtp_use_tls=True, smtp_use_ssl=False,
+            )
+        )
+        await session.commit()
+
+        # Simulate a fresh CLI process: no encryption initialised yet.
+        security._fernet = None
+
+        seen: dict = {}
+
+        def _stub(account, to_email=""):
+            seen["password"] = account.smtp_password
+            return {"ok": True, "verdict": "stub", "hints": [], "stages": []}
+
+        monkeypatch.setattr(diag, "diagnose_account", _stub)
+
+        rc = await diag._cli_inbox(
+            argparse.Namespace(inbox_id=inbox.id, to="", json=False)
+        )
+
+        assert rc == 0
+        # Bootstrapped from the DB → decrypted, not Fernet ciphertext.
+        assert seen["password"] == "super-secret-pw"
+        assert not seen["password"].startswith("gAAAAA")
+    finally:
+        security._fernet = orig_fernet
+
+
 # ---------------------------------------------------------------------------
 # Send-failure observability helpers
 # ---------------------------------------------------------------------------
