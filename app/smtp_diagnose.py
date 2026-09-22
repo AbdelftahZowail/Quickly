@@ -348,7 +348,11 @@ def _stage_tls_implicit(
 def _stage_tls_starttls(
     conn: _SmtpConn, host: str, mode: str, port: int, stage: StageResult
 ) -> tuple[_SmtpConn | None, list[str]]:
-    """Negotiate STARTTLS after EHLO, using the capabilities already gathered."""
+    """Negotiate STARTTLS after EHLO, using the capabilities already gathered.
+
+    Returns a new ``_SmtpConn`` over the encrypted socket whose transcript goes
+    to a fresh conversation stage (the caller supplies it via ``conn.stage``).
+    """
     caps = " ".join(conn.stage.raw).upper() if conn.stage.raw else ""
     if "STARTTLS" not in caps:
         # Some servers only advertise STARTTLS after the *first* EHLO; the caller
@@ -360,6 +364,7 @@ def _stage_tls_starttls(
             "instead, or a port that supports STARTTLS."
         ]
     resp = conn.cmd("STARTTLS")
+    stage.raw = list(conn.stage.raw[-2:])
     if _code(resp) != 220:
         stage.ok = False
         stage.detail = f"STARTTLS refused: {conn.last}"
@@ -374,7 +379,9 @@ def _stage_tls_starttls(
     stage.ok = True
     stage.detail = _tls_summary(tls)
     conn.close()
-    return _SmtpConn(tls, stage), []
+    # The new connection writes to a *fresh* conversation stage; the TLS stage
+    # keeps only its own handshake detail + summary line.
+    return _SmtpConn(tls, StageResult(name="conversation", ok=True)), []
 
 
 def _stage_ehlo(conn: _SmtpConn, stage: StageResult) -> list[str]:
@@ -461,9 +468,11 @@ def _stage_send_probe(
 
     rc = stages["rcpt_to"]
     if not to_email:
-        rc.ok = False
+        # No recipient supplied: MAIL FROM still proves auth/relay-policy, but
+        # RCPT/DATA are skipped and must not fail the report.
+        rc.ok = True
         rc.detail = "Skipped — no recipient supplied for the probe."
-        stages["data"].ok = False
+        stages["data"].ok = True
         stages["data"].detail = "Skipped — no recipient supplied for the probe."
         return hints
     resp = conn.cmd(f"RCPT TO:<{to_email}>")
@@ -828,7 +837,17 @@ def diagnose(
     report["ok"] = primary.ok
     report["suggested_mode"] = suggested_mode
     report["alternate"] = alternate_report
-    report["duration_ms"] = int((time.monotonic() - t0) * 1000)
+    elapsed = time.monotonic() - t0
+    report["duration_ms"] = int(elapsed * 1000)
+    # Timeout handling is explicit in the JSON so callers never have to guess:
+    # each stage gets ~8s, the whole probe (primary + one alternate attempt)
+    # shares a ~30s wall-clock budget, and we say whether that budget ran out.
+    report["timeouts"] = {
+        "stage_seconds": round(float(timeout), 1),
+        "total_seconds": round(float(total_timeout), 1),
+        "elapsed_seconds": round(elapsed, 2),
+        "total_exhausted": bool(deadline.exhausted),
+    }
     if notes:
         report["hints"] = notes + report["hints"]
     log.info(
@@ -842,17 +861,20 @@ def diagnose_account(account, to_email: str = "") -> dict[str, Any]:
     """Run :func:`diagnose` against an ORM ``SmtpAccount``/inbox pair.
 
     Accepts anything exposing the ``smtp_*`` / ``imap_*`` attributes, so both
-    the ORM model and a lightweight stub work in tests.
+    the ORM model and a lightweight stub work in tests.  When no recipient is
+    given the SMTP username is used, so the default probe still drives a real
+    MAIL FROM/RCPT TO/DATA transaction (the whole point of "Diagnose").
     """
+    username = getattr(account, "smtp_username", "") or ""
     report = diagnose(
         host=account.smtp_host,
         port=account.smtp_port,
         use_tls=bool(account.smtp_use_tls),
         use_ssl=bool(account.smtp_use_ssl),
-        username=getattr(account, "smtp_username", "") or "",
+        username=username,
         password=getattr(account, "smtp_password", "") or "",
-        from_email=getattr(account, "smtp_username", "") or "",
-        to_email=to_email,
+        from_email=username,
+        to_email=(to_email or username),
         imap_host=getattr(account, "imap_host", "") or "",
         imap_port=getattr(account, "imap_port", 993) or 993,
         imap_username=getattr(account, "imap_username", "") or "",
@@ -876,6 +898,13 @@ def render_text_report(report: dict[str, Any]) -> str:
         for raw in stage.get("raw", []) or []:
             lines.append(f"       {raw}")
     lines.append("")
+    t = report.get("timeouts")
+    if t:
+        lines.append(
+            f"Timeouts: {t['stage_seconds']:g}s per stage, {t['total_seconds']:g}s overall"
+            f" (elapsed {t['elapsed_seconds']}s"
+            f"{', overall budget exhausted' if t.get('total_exhausted') else ''})"
+        )
     lines.append(f"Verdict: {report.get('verdict') or ''}")
     if report.get("suggested_mode"):
         lines.append(

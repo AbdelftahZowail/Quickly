@@ -70,6 +70,13 @@ function diagnosticReportToText(report) {
     (stage.raw || []).forEach((raw) => lines.push(`       ${raw}`));
   });
   lines.push('');
+  if (report.timeouts) {
+    lines.push(
+      `Timeouts: ${report.timeouts.stage_seconds}s per stage, ${report.timeouts.total_seconds}s overall`
+      + ` (elapsed ${report.timeouts.elapsed_seconds}s`
+      + `${report.timeouts.total_exhausted ? ', overall budget exhausted' : ''})`,
+    );
+  }
   lines.push(`Verdict: ${report.verdict || ''}`);
   if (report.suggested_mode) {
     lines.push(`Suggested mode: ${report.suggested_mode === 'ssl' ? 'SSL' : 'STARTTLS'}`);
@@ -101,7 +108,14 @@ function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
           {report.ok ? '✅ Diagnosis passed' : '❌ Diagnosis found a problem'}
         </span>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] text-gray-400">{report.duration_ms ?? 0} ms</span>
+          <span
+            className="text-[10px] text-gray-400"
+            title={report.timeouts
+              ? `${report.timeouts.stage_seconds}s per stage · ${report.timeouts.total_seconds}s overall budget`
+              : undefined}
+          >
+            {report.duration_ms ?? 0} ms{report.timeouts ? ` · ${report.timeouts.stage_seconds}s/stage, ${report.timeouts.total_seconds}s max` : ''}
+          </span>
           <button
             type="button"
             onClick={copy}

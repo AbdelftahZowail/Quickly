@@ -342,6 +342,20 @@ def test_healthy_relay_all_stages_pass(fake_relay):
     # IMAP not configured => skipped, still ok.
     assert stage_map["imap"]["ok"] is True
     assert "skipped" in stage_map["imap"]["detail"].lower()
+    # The TLS stage keeps its own handshake lines, not the whole conversation.
+    tls_raw = "\n".join(stage_map["tls"]["raw"])
+    assert "MAIL FROM" not in tls_raw
+    assert "AUTH PLAIN" not in tls_raw
+    # Timeout handling is explicit in the JSON: per-stage + overall budgets
+    # (the test helper passes 3s/15s to keep the suite fast).
+    timeouts = report["timeouts"]
+    assert timeouts["stage_seconds"] == 3.0
+    assert timeouts["total_seconds"] == 15.0
+    assert timeouts["elapsed_seconds"] >= 0
+    assert timeouts["total_exhausted"] is False
+    # Defaults documented on the module are the production budgets (~8s/~30s).
+    assert diag.DEFAULT_STAGE_TIMEOUT == 8.0
+    assert diag.DEFAULT_TOTAL_TIMEOUT == 30.0
 
 
 def test_raw_transcript_redacts_credentials(fake_relay):
@@ -483,10 +497,12 @@ def test_auth_ok_sender_rejected_is_not_a_quickly_bug():
 def test_no_recipient_skips_mail_stages(fake_relay):
     report = _diagnose(fake_relay, to_email="")
     stage_map = {s["name"]: s for s in report["stages"]}
-    # MAIL FROM has a forged address from username, so it still runs; RCPT/DATA skip.
-    assert stage_map["rcpt_to"]["ok"] is False
+    # MAIL FROM runs (relay-policy check); RCPT/DATA are skipped but non-fatal.
+    assert stage_map["mail_from"]["ok"] is True
+    assert stage_map["rcpt_to"]["ok"] is True
     assert "skipped" in stage_map["rcpt_to"]["detail"].lower()
-    assert not report["ok"]
+    assert "skipped" in stage_map["data"]["detail"].lower()
+    assert report["ok"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +531,10 @@ def test_render_text_report_contains_verdict(fake_relay):
     assert "Quickly SMTP diagnostic report" in text
     assert "[PASS] dns" in text
     assert "Verdict:" in text
+    # Timeout budgets are surfaced in the copyable text report too.
+    assert "Timeouts:" in text
+    # The helper probes with 3s per stage / 15s overall.
+    assert "3s per stage, 15s overall" in text
 
 
 # ---------------------------------------------------------------------------
