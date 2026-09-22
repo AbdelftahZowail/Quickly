@@ -229,6 +229,53 @@ async def upsert_smtp_account(
     return _to_response(acct)
 
 
+@router.post("/diagnose")
+async def diagnose_unsaved(
+    data: SmtpAccountUpsert,
+    _user=Depends(get_current_user),
+):
+    """Diagnose SMTP/IMAP credentials that are not saved yet (Add Inbox panel).
+
+    Nothing is persisted and no test mail is sent: this only runs the staged
+    probe against the values the operator typed, so a wrong port/TLS mode or a
+    relay policy problem is caught before the inbox is created.  The probe has
+    its own per-stage (~8s) and overall (~30s) timeouts; the outer wait_for
+    keeps the request worker safe even if the thread stalls.
+    """
+    from app.smtp_diagnose import diagnose
+
+    # Same inference the save path applies, so the probe sees the effective mode
+    # (e.g. 465 forces SSL even if the operator ticked STARTTLS).
+    use_tls, use_ssl = apply_port_tls_inference(
+        int(data.smtp_port or 587), bool(data.smtp_use_tls), bool(data.smtp_use_ssl)
+    )
+
+    report = await asyncio.wait_for(
+        asyncio.to_thread(
+            diagnose,
+            host=data.smtp_host or "",
+            port=int(data.smtp_port or 587),
+            use_tls=use_tls,
+            use_ssl=use_ssl,
+            username=data.smtp_username or "",
+            password=data.smtp_password or "",
+            from_email=data.smtp_username or "",
+            to_email=data.smtp_username or "",
+            imap_host=data.imap_host or "",
+            imap_port=int(data.imap_port or 993),
+            imap_username=data.imap_username or "",
+            imap_password=data.imap_password or "",
+            imap_use_ssl=bool(data.imap_use_ssl),
+        ),
+        timeout=45.0,
+    )
+    log.info(
+        "SMTP diagnose (unsaved): host=%s port=%s ok=%s",
+        data.smtp_host, data.smtp_port, report.get("ok"),
+    )
+    return report
+
+
 @router.post("/inboxes/{inbox_id}/diagnose")
 async def diagnose_smtp_account(
     inbox_id: int,

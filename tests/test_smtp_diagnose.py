@@ -748,6 +748,66 @@ async def test_diagnose_endpoint_persists_and_returns_report(session, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_diagnose_unsaved_probes_typed_credentials(monkeypatch):
+    """The Add-inbox Diagnose runs the probe against unsaved values only.
+
+    No inbox row exists yet; nothing must be persisted and no test mail sent.
+    """
+    from app.routers import smtp as smtp_router
+
+    server = _FakeSmtpServer("ok").start()
+    captured: dict = {}
+    real_diagnose = diag.diagnose
+
+    def _stub_diagnose(**kwargs):
+        captured.update(kwargs)
+        return real_diagnose(**kwargs)
+
+    monkeypatch.setattr("app.smtp_diagnose.diagnose", _stub_diagnose)
+    try:
+        report = await smtp_router.diagnose_unsaved(
+            smtp_router.SmtpAccountUpsert(
+                smtp_host="127.0.0.1", smtp_port=server.port,
+                smtp_username="typed@example.com", smtp_password="typed-secret",
+                smtp_use_tls=True, smtp_use_ssl=False,
+            )
+        )
+    finally:
+        server.stop()
+
+    assert report["ok"] is True
+    # Probed the typed values, not a stored account.
+    assert captured["host"] == "127.0.0.1"
+    assert captured["port"] == server.port
+    assert captured["username"] == "typed@example.com"
+    assert captured["password"] == "typed-secret"
+    assert captured["use_tls"] is True
+    # Never returns the password.
+    assert "typed-secret" not in str(report)
+
+
+@pytest.mark.asyncio
+async def test_diagnose_unsaved_applies_port_inference(monkeypatch):
+    """A 465 + STARTTLS combination is probed as SSL, exactly like on save."""
+    from app.routers import smtp as smtp_router
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "app.smtp_diagnose.diagnose",
+        lambda **k: captured.update(k) or {"ok": True, "stages": []},
+    )
+    await smtp_router.diagnose_unsaved(
+        smtp_router.SmtpAccountUpsert(
+            smtp_host="mail.example.com", smtp_port=465,
+            smtp_username="u@example.com", smtp_password="p",
+            smtp_use_tls=True, smtp_use_ssl=False,  # contradictory on purpose
+        )
+    )
+    assert captured["use_ssl"] is True
+    assert captured["use_tls"] is False
+
+
+@pytest.mark.asyncio
 async def test_diagnose_endpoint_cooldown(session, monkeypatch):
     from app.models import Inbox, SmtpAccount
     from app.routers import smtp as smtp_router

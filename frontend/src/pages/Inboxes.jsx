@@ -102,10 +102,10 @@ function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
   };
 
   return (
-    <div className="mt-1 border border-gray-200 rounded-md bg-white">
-      <div className="flex items-center justify-between gap-2 px-2.5 py-2 border-b border-gray-100">
+    <div className="mt-1 border border-gray-200 rounded-md bg-white overflow-hidden">
+      <div className="flex items-center justify-between gap-2 px-3 py-2 bg-gray-50 border-b border-gray-200">
         <span className={`text-xs font-semibold ${report.ok ? 'text-green-700' : 'text-red-600'}`}>
-          {report.ok ? '✅ Diagnosis passed' : '❌ Diagnosis found a problem'}
+          {report.ok ? 'Diagnosis passed' : 'Diagnosis found a problem'}
         </span>
         <div className="flex items-center gap-2">
           <span
@@ -125,7 +125,7 @@ function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
           </button>
         </div>
       </div>
-      <div className="px-2.5 py-2 space-y-1">
+      <div className="px-3 py-2 space-y-1">
         {(report.stages || []).map((stage) => (
           <div key={stage.name} className="text-xs">
             <button
@@ -149,12 +149,12 @@ function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
         ))}
       </div>
       {report.verdict && (
-        <p className="px-2.5 pb-2 text-xs text-gray-700">
+        <p className="px-3 pb-2 text-xs text-gray-700">
           <span className="font-medium">Verdict: </span>{report.verdict}
         </p>
       )}
       {report.hints?.length > 0 && (
-        <div className="px-2.5 pb-2 space-y-1">
+        <div className="px-3 pb-2 space-y-1">
           {report.hints.map((hint, i) => (
             <p key={i} className="text-xs text-amber-700 bg-amber-50 border border-amber-100 rounded px-2 py-1">
               💡 {hint}
@@ -163,7 +163,7 @@ function SmtpDiagnosticReport({ report, onTrySsl, onTryStarttls, busy }) {
         </div>
       )}
       {report.suggested_mode && (
-        <div className="px-2.5 pb-2">
+        <div className="px-3 pb-3">
           <Button
             type="button"
             size="sm"
@@ -689,6 +689,12 @@ export default function Inboxes() {
   const [smtpSendTestTo, setSmtpSendTestTo] = useState('');
   const [smtpSendTestBusy, setSmtpSendTestBusy] = useState(false);
   const [smtpSendTestMsg, setSmtpSendTestMsg] = useState(null);
+  // Same three, but for the Add Inbox panel (nothing saved yet → unfiled mode).
+  const [addSmtpDiagnose, setAddSmtpDiagnose] = useState(null);
+  const [addSmtpDiagnosing, setAddSmtpDiagnosing] = useState(false);
+  const [addSmtpSendTestTo, setAddSmtpSendTestTo] = useState('');
+  const [addSmtpSendTestBusy, setAddSmtpSendTestBusy] = useState(false);
+  const [addSmtpSendTestMsg, setAddSmtpSendTestMsg] = useState(null);
   const [oauthConfigured, setOauthConfigured] = useState(false);
   const [redirectUri, setRedirectUri] = useState('');
   const [o365Configured, setO365Configured] = useState(false);
@@ -882,8 +888,9 @@ export default function Inboxes() {
     return form.email.trim() !== '';
   };
 
-  const submitSmtp = async (inboxPayload) => {
-    // 1. create the inbox row, 2. save credentials, 3. test the connection
+  const submitSmtp = async (inboxPayload, sendTestTo) => {
+    // 1. create the inbox row, 2. save credentials, 3. test the connection,
+    // 4. (optional) send a real test email to *sendTestTo*.
     const created = await api.post('/inboxes', inboxPayload);
     try {
       await api.put(`/smtp/inboxes/${created.id}`, { ...smtpForm, smtp_port: +smtpForm.smtp_port, imap_port: +smtpForm.imap_port });
@@ -906,10 +913,29 @@ export default function Inboxes() {
     } catch (e) {
       setMessage({ type: 'error', text: `Inbox added but connection test failed: ${e.message}` });
     }
+
+    // Real send test from the create panel — the inbox exists now, so this
+    // exercises the exact campaign send path.
+    if (sendTestTo) {
+      try {
+        const sendRes = await api.post(`/smtp/inboxes/${created.id}/send-test`, { to_email: sendTestTo });
+        setAddSmtpSendTestMsg(
+          sendRes.ok
+            ? { type: 'success', text: `Test email accepted by the relay (${sendRes.message_id || 'sent'})` }
+            : { type: 'error', text: `Test send failed: ${sendRes.message || sendRes.error || 'unknown error'}` },
+        );
+      } catch (e) {
+        setAddSmtpSendTestMsg({ type: 'error', text: `Test send failed: ${e.message}` });
+      } finally {
+        setAddSmtpSendTestBusy(false);
+      }
+    }
+
     setForm(initialForm);
     setSmtpForm(initialSmtpForm);
     setAddTrackingMode('app');
     setAddDomainVerified(false);
+    setAddSmtpDiagnose(null);
     load();
     setShowAdd(false);
   };
@@ -1166,9 +1192,9 @@ export default function Inboxes() {
     }
   };
 
-  const sendSmtpTestEmail = async () => {
+  const sendSmtpTestEmail = async (toOverride) => {
     if (!editing) return;
-    const to = (smtpSendTestTo || '').trim();
+    const to = ((toOverride ?? smtpSendTestTo) || '').trim();
     if (!to || !to.includes('@')) {
       setSmtpSendTestMsg({ type: 'error', text: 'Enter a recipient email address.' });
       return;
@@ -1214,6 +1240,56 @@ export default function Inboxes() {
     } catch (err) {
       setSmtpTestMsg({ type: 'error', text: err.message });
     }
+  };
+
+  // ── Add-panel diagnostics ──────────────────────────────────────────────
+  // The inbox does not exist yet, so these run the probe against the typed
+  // credentials only (nothing is persisted, and a test send is not possible).
+  const addSmtpCredsReady = () => {
+    const f = smtpForm;
+    return !!(form.email.trim() && f.smtp_host.trim() && f.smtp_username.trim() && f.smtp_password);
+  };
+
+  const runAddSmtpDiagnose = async () => {
+    if (!addSmtpCredsReady()) {
+      setMessage({ type: 'error', text: 'Enter the From address, SMTP host, username and password before diagnosing.' });
+      return;
+    }
+    setAddSmtpDiagnosing(true);
+    setAddSmtpDiagnose(null);
+    setSmtpTestMsg(null);
+    try {
+      const report = await api.post('/smtp/diagnose', {
+        host: smtpForm.smtp_host,
+        port: +smtpForm.smtp_port,
+        use_tls: !!smtpForm.smtp_use_tls,
+        use_ssl: !!smtpForm.smtp_use_ssl,
+        username: smtpForm.smtp_username,
+        password: smtpForm.smtp_password,
+        from_email: form.email,
+        to_email: form.email,
+        imap_host: smtpForm.imap_host.trim() || null,
+        imap_port: +smtpForm.imap_port,
+        imap_username: smtpForm.imap_username.trim() || null,
+        imap_password: smtpForm.imap_password,
+        imap_use_ssl: !!smtpForm.imap_use_ssl,
+      });
+      setAddSmtpDiagnose(report);
+    } catch (err) {
+      setMessage({ type: 'error', text: err.message });
+    } finally {
+      setAddSmtpDiagnosing(false);
+    }
+  };
+
+  const applySuggestedModeAdd = (mode) => {
+    setSmtpForm((prev) => ({
+      ...prev,
+      smtp_use_ssl: mode === 'ssl',
+      smtp_use_tls: mode === 'starttls',
+    }));
+    setAddSmtpDiagnose(null);
+    setMessage(null);
   };
 
   const refreshEditingInbox = async (inboxId) => {
@@ -1300,7 +1376,7 @@ export default function Inboxes() {
     const onKey = (e) => {
       if (e.key !== 'Escape') return;
       if (showEditWarning) { setShowEditWarning(false); }
-      else if (showAdd) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); }
+      else if (showAdd) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); }
       else if (editing) tryCloseEdit();
       else if (selectedInbox) setSelectedInbox(null);
     };
@@ -1447,7 +1523,7 @@ export default function Inboxes() {
       {/* header with add button */}
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-2xl font-bold">Inboxes</h1>
-        <Button variant="default" onClick={() => { setForm(initialForm); setSmtpForm(initialSmtpForm); setAddTrackingMode('app'); setMessage(null); setShowAdd(true); }}>
+        <Button variant="default" onClick={() => { setForm(initialForm); setSmtpForm(initialSmtpForm); setAddTrackingMode('app'); setMessage(null); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); setAddSmtpSendTestTo(''); setShowAdd(true); }}>
           Add Inbox
         </Button>
       </div>
@@ -1877,64 +1953,9 @@ export default function Inboxes() {
                     )}
 
                     {selectedInbox.provider === 'smtp' && (
-                      <div className="space-y-2">
-                        <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">SMTP diagnostics</p>
-                        <div className="flex flex-wrap gap-2">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="default"
-                            onClick={async () => {
-                              setSmtpDiagnosing(true);
-                              setSmtpDiagnose(null);
-                              try {
-                                const report = await api.post(`/smtp/inboxes/${selectedInbox.id}/diagnose`, {});
-                                setSmtpDiagnose(report);
-                                await refreshEditingInbox(selectedInbox.id);
-                              } catch (err) {
-                                notify({ type: 'error', message: err.message });
-                              } finally {
-                                setSmtpDiagnosing(false);
-                              }
-                            }}
-                            disabled={smtpDiagnosing}
-                          >
-                            {smtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            onClick={async () => {
-                              const to = window.prompt('Send a test email to which address?', selectedInbox.email || '');
-                              if (!to) return;
-                              setSmtpSendTestBusy(true);
-                              try {
-                                const res = await api.post(`/smtp/inboxes/${selectedInbox.id}/send-test`, { to_email: to });
-                                notify(res.ok
-                                  ? { type: 'success', message: 'Test email accepted by the relay' }
-                                  : { type: 'error', message: `Test send failed: ${res.message || res.error}` });
-                                await refreshEditingInbox(selectedInbox.id);
-                              } catch (err) {
-                                notify({ type: 'error', message: err.message });
-                              } finally {
-                                setSmtpSendTestBusy(false);
-                              }
-                            }}
-                            disabled={smtpSendTestBusy}
-                          >
-                            {smtpSendTestBusy ? 'Sending…' : 'Send test email'}
-                          </Button>
-                        </div>
-                        {smtpDiagnose && (
-                          <SmtpDiagnosticReport
-                            report={smtpDiagnose}
-                            busy={smtpDiagnosing}
-                            onTrySsl={() => applySuggestedMode('ssl')}
-                            onTryStarttls={() => applySuggestedMode('starttls')}
-                          />
-                        )}
-                      </div>
+                      <Button variant="outline" size="sm" className="w-full" onClick={() => openEdit(selectedInbox)}>
+                        Edit SMTP &amp; run diagnostics
+                      </Button>
                     )}
 
                     {/* Sent today */}
@@ -2075,7 +2096,7 @@ export default function Inboxes() {
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
           onMouseDown={e => { addBackdropDown.current = e.target === e.currentTarget; }}
-          onClick={() => { if (addBackdropDown.current) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); } }}
+          onClick={() => { if (addBackdropDown.current) { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); } }}
         >
           <div data-darkreader-ignore className="p-6 rounded-xl shadow-lg w-full min-w-0 max-w-md max-h-[90vh] overflow-y-auto overflow-x-hidden mx-auto" style={{ backgroundColor: 'white' }} onClick={e => e.stopPropagation()}>
             <h2 className="text-xl font-semibold mb-2">Add Inbox</h2>
@@ -2182,6 +2203,59 @@ export default function Inboxes() {
                     </>
                   )}
                   <p className="text-xs text-gray-400">Connection is tested automatically after the inbox is created.</p>
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="button" size="sm" variant="default" onClick={runAddSmtpDiagnose} disabled={addSmtpDiagnosing}>
+                      {addSmtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
+                    </Button>
+                  </div>
+                  {addSmtpDiagnose && (
+                    <SmtpDiagnosticReport
+                      report={addSmtpDiagnose}
+                      busy={addSmtpDiagnosing}
+                      onTrySsl={() => applySuggestedModeAdd('ssl')}
+                      onTryStarttls={() => applySuggestedModeAdd('starttls')}
+                    />
+                  )}
+                  <div className="border-t border-gray-200 pt-3 space-y-2">
+                    <label className="block text-xs font-medium text-gray-700">Send test email</label>
+                    <p className="text-[11px] text-gray-400">
+                      Sends a real message through the same path campaigns use. Works once the inbox is added.
+                    </p>
+                    <div className="flex gap-2">
+                      <input
+                        type="email"
+                        value={addSmtpSendTestTo}
+                        onChange={(e) => setAddSmtpSendTestTo(e.target.value)}
+                        placeholder={form.email || 'you@example.com'}
+                        className="flex-1 min-w-0 border-gray-300 rounded-md text-sm"
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        disabled={addSmtpSendTestBusy}
+                        onClick={() => {
+                          const to = (addSmtpSendTestTo || form.email || '').trim();
+                          if (!to || !to.includes('@')) {
+                            setAddSmtpSendTestMsg({ type: 'error', text: 'Enter a recipient email address.' });
+                            return;
+                          }
+                          setAddSmtpSendTestTo(to);
+                          setAddSmtpSendTestBusy(true);
+                          setAddSmtpSendTestMsg(null);
+                          submitSmtp({ ...form, tracking_domain: addTrackingMode === 'dns' ? form.tracking_domain.trim() || null : null }, to)
+                            .catch((e) => setAddSmtpSendTestMsg({ type: 'error', text: e.message }));
+                        }}
+                      >
+                        {addSmtpSendTestBusy ? 'Sending…' : 'Send'}
+                      </Button>
+                    </div>
+                    {addSmtpSendTestMsg && (
+                      <p className={`text-xs ${addSmtpSendTestMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>
+                        {addSmtpSendTestMsg.text}
+                      </p>
+                    )}
+                  </div>
                 </div>
               )}
               <div className="border rounded p-3 space-y-4 bg-gray-50 min-w-0 max-w-full overflow-hidden">
@@ -2272,7 +2346,7 @@ export default function Inboxes() {
                 <Button type="submit" disabled={!canSubmit()} variant="default">
                   {form.provider === 'gmail' ? 'Connect with Google' : form.provider === 'office365' ? 'Connect with Microsoft' : 'Add inbox'}
                 </Button>
-                <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); }}>
+                <Button type="button" variant="outline" onClick={() => { setShowAdd(false); setMessage(null); setAddTrackingMode('app'); setAddSmtpDiagnose(null); setAddSmtpSendTestMsg(null); }}>
                   Cancel
                 </Button>
               </div>
