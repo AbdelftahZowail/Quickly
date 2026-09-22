@@ -106,6 +106,54 @@ def test_send_email_requires_provider():
     assert isinstance(result, SendFailure)
 
 
+def test_send_via_gmail_uses_http_transport_with_timeout(monkeypatch):
+    """Gmail sends must not use a transport without a socket timeout.
+
+    ``_send_via_gmail`` builds the service with an explicit
+    ``AuthorizedHttp``/``httplib2.Http`` transport so a black-holed connection
+    cannot occupy its worker thread indefinitely.
+    """
+    import httplib2
+
+    captured: dict = {}
+
+    def capturing_build(service_name, version, http=None, credentials=None, cache_discovery=None):
+        captured["http"] = http
+        captured["credentials"] = credentials
+        captured["service_name"] = service_name
+        send_resp = {"threadId": "t123", "id": "m456"}
+        get_resp = {"payload": {"headers": [{"name": "Message-Id", "value": "<REAL>"}]}}
+        return SimpleNamespace(users=lambda: DummyUsers(send_resp=send_resp, get_resp=get_resp))
+
+    monkeypatch.setattr("app.sender.build", capturing_build)
+    monkeypatch.setenv("SMTP_TIMEOUT_SECONDS", "7")
+
+    gmail_account = SimpleNamespace(
+        access_token="foo", refresh_token="bar", token_expiry=None,
+        google_email="user@example.com",
+    )
+
+    result = _send_via_gmail(
+        to_email="to@x.com",
+        subject="hi",
+        body="body",
+        from_email="from@x.com",
+        from_name="From",
+        reply_to_msg_id=None,
+        references=None,
+        is_html=False,
+        gmail_account=gmail_account,
+    )
+
+    assert isinstance(result, SendResult)
+    http = captured["http"]
+    assert http is not None, "an explicit authorized transport must be passed to build()"
+    # google_auth_httplib2.AuthorizedHttp stores the wrapped http in ``.http``
+    inner = getattr(http, "http", None)
+    assert isinstance(inner, httplib2.Http)
+    assert float(inner.timeout) == 7.0
+
+
 def test_send_via_gmail_logs_errors(monkeypatch):
     class BadUsers(DummyUsers):
         def __init__(self):

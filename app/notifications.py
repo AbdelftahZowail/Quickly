@@ -9,6 +9,7 @@ Rate limiting is per-user, per-hour (configurable).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import urllib.parse
@@ -111,13 +112,15 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
             title = f"Mailbox sync failed — {inbox_email}"
             message = (
                 f"**{inbox_email}** could not be synced over IMAP. "
-                f"Check the IMAP host/port; reply sync will retry automatically."
+                f"Check the IMAP host/port; reply sync keeps retrying and "
+                f"recovers automatically once the mailbox is reachable."
             )
         elif error_type.startswith("imap"):
             title = f"IMAP authentication failed — {inbox_email}"
             message = (
                 f"**{inbox_email}**'s IMAP login was rejected. "
-                f"Reply sync is paused until the mailbox credentials are fixed."
+                f"Reply sync keeps retrying on its normal schedule and will "
+                f"recover once the mailbox credentials are fixed."
             )
         elif provider == "smtp" or error_type.startswith("smtp"):
             title = f"SMTP authentication failed — {inbox_email}"
@@ -273,16 +276,22 @@ async def _send_notification_for_user(
     subject: str,
     body: str,
 ) -> bool:
-    """Send a single notification email via the user's OAuth provider."""
+    """Send a single notification email via the user's OAuth provider.
+
+    Every network call here is blocking (``urllib``); it is offloaded with
+    ``asyncio.to_thread`` so a slow Google/Microsoft endpoint cannot stall the
+    event loop.  The helpers mutate the ``User`` model — that is fine, the
+    subsequent ``await db.flush()`` still runs on the async connection.
+    """
     to = config.notification_email or user.email
 
     # Refresh token if near expiry
     if user.notif_token_expiry and user.notif_token_expiry <= time_provider.utcnow() + timedelta(minutes=5):
         if user.oauth_provider == "google":
-            if not _refresh_google_notif_token(user):
+            if not await asyncio.to_thread(_refresh_google_notif_token, user):
                 return False
         elif user.oauth_provider == "microsoft":
-            if not _refresh_microsoft_notif_token(user):
+            if not await asyncio.to_thread(_refresh_microsoft_notif_token, user):
                 return False
         await db.flush()
 
@@ -291,9 +300,9 @@ async def _send_notification_for_user(
         return False
 
     if user.oauth_provider == "google":
-        return _send_via_gmail(user, to, subject, body)
+        return await asyncio.to_thread(_send_via_gmail, user, to, subject, body)
     elif user.oauth_provider == "microsoft":
-        return _send_via_microsoft(user, to, subject, body)
+        return await asyncio.to_thread(_send_via_microsoft, user, to, subject, body)
     else:
         log.warning("User %s has unsupported OAuth provider '%s'", user.id, user.oauth_provider)
         return False

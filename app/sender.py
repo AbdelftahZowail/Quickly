@@ -21,6 +21,19 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+# Explicit HTTP transport so Gmail API calls cannot hang forever.  The library
+# default (httplib2 without a timeout) lets a black-holed connection occupy its
+# worker thread indefinitely, which now matters because sends run in a
+# ``asyncio.to_thread`` worker.  ``google_auth_httplib2`` and ``httplib2`` both
+# ship with ``google-api-python-client``; the import is guarded so a minimal
+# environment degrades to the previous behaviour instead of failing to boot.
+try:  # pragma: no cover - exercised implicitly by every Gmail send
+    import httplib2
+    from google_auth_httplib2 import AuthorizedHttp
+except Exception:  # pragma: no cover - optional dependency
+    httplib2 = None  # type: ignore[assignment]
+    AuthorizedHttp = None  # type: ignore[assignment]
+
 from app.settings_manager import settings
 from app import time as time_provider
 from app.models import GmailAccount, Office365Account, SmtpAccount
@@ -440,9 +453,28 @@ def _send_via_gmail(
     creds = Credentials(**creds_kwargs)  # type: ignore[arg-type]
 
     # construct the gmail service; ``cache_discovery=False`` avoids writing
-    # files to disk in environments without a home directory.
+    # files to disk in environments without a home directory.  An explicit
+    # ``AuthorizedHttp`` transport carries a socket timeout so a stalled Gmail
+    # endpoint cannot hang the worker thread forever.
     try:
-        service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        http = None
+        if httplib2 is not None and AuthorizedHttp is not None:
+            from app.smtp_utils import smtp_timeout_seconds
+
+            http = AuthorizedHttp(
+                creds, http=httplib2.Http(timeout=smtp_timeout_seconds())
+            )
+        if http is not None:
+            try:
+                service = build(
+                    "gmail", "v1", http=http, cache_discovery=False
+                )
+            except TypeError:
+                # Some integrations/tests patch ``build`` with a simplified
+                # callable that only accepts the original keyword set.
+                service = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        else:
+            service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     except Exception as e:
         log.error("Failed to build Gmail service: %s", e)
         return None

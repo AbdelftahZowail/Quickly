@@ -19,6 +19,12 @@ logging.basicConfig(
     format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
 )
 logging.getLogger("quickly").setLevel(logging.DEBUG)
+
+# Redact the Gmail push shared secret before uvicorn's access logger renders
+# the request path (``POST /api/unibox/gmail/push?token=<secret>``).
+from app.log_redaction import install_log_redaction
+
+install_log_redaction()
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
