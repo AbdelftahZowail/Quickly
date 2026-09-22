@@ -284,6 +284,8 @@ class CampaignCreate(BaseModel):
     track_clicks: bool = False
     # Unsubscribe header
     add_unsubscribe_header: bool = True
+    # Include the RFC 8058 one-click header (List-Unsubscribe-Post)
+    add_one_click_unsubscribe: bool = True
     # Plain-text options
     send_first_as_text: bool = False
     send_all_as_text: bool = False
@@ -308,6 +310,7 @@ class CampaignUpdate(BaseModel):
     track_opens: Optional[bool] = None
     track_clicks: Optional[bool] = None
     add_unsubscribe_header: Optional[bool] = None
+    add_one_click_unsubscribe: Optional[bool] = None
     send_first_as_text: Optional[bool] = None
     send_all_as_text: Optional[bool] = None
     timezone: Optional[str] = None
@@ -366,6 +369,7 @@ class CampaignResponse(BaseModel):
     track_opens: bool = False
     track_clicks: bool = False
     add_unsubscribe_header: bool = True
+    add_one_click_unsubscribe: bool = True
     send_first_as_text: bool = False
     send_all_as_text: bool = False
     timezone: Optional[str] = None

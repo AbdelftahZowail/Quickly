@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 
 import app.jobs as jobs_mod
 from app.models import EmailLog, QueueSlot, SmtpAccount
-from app.sender import SendFailure
+from app.sender import SendFailure, SendResult
 from tests.conftest import (
     make_campaign,
     make_campaign_inbox,
@@ -54,13 +54,14 @@ async def _make_smtp_inbox(session, email: str = "relay@example.com"):
     return inbox
 
 
-async def _make_due_slot(session, inbox):
-    campaign = await make_campaign(
-        session,
-        sending_days=[0, 1, 2, 3, 4, 5, 6],
-        sending_hours_start="00:00",
-        sending_hours_end="23:59",
-    )
+async def _make_due_slot(session, inbox, campaign=None):
+    if campaign is None:
+        campaign = await make_campaign(
+            session,
+            sending_days=[0, 1, 2, 3, 4, 5, 6],
+            sending_hours_start="00:00",
+            sending_hours_end="23:59",
+        )
     await make_sequence(session, campaign.id)
     lead = await make_lead(session)
     cl = await make_campaign_lead(session, campaign.id, lead.id)
@@ -143,3 +144,68 @@ async def test_auth_failure_circuit_breaker_skips_remaining_slots(session, monke
     await jobs_mod.send_slot_job(slot2.id)
 
     assert len(calls) == 1, "second slot must be skipped while the inbox is in auth cooldown"
+
+
+@pytest.mark.asyncio
+async def test_sender_display_name_renders_lead_variables(session, monkeypatch):
+    """The From: name must support the same {{variables}} as subject/body."""
+    inbox = await _make_smtp_inbox(session, email="brand@example.com")
+    inbox.display_name = "{{name}} at Acme"
+    await session.flush()
+    slot = await _make_due_slot(session, inbox)
+
+    captured: dict = {}
+
+    def fake_send(**kwargs):
+        captured.update(kwargs)
+        return SendResult(message_id="<x>", thread_id="t")
+
+    async def fake_webhook(db, event, data):
+        return None
+
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.send_email", fake_send)
+    monkeypatch.setattr(jobs_mod, "AsyncSessionLocal", lambda: _SessionCtx(session))
+    jobs_mod._inbox_auth_cooldown_until.clear()
+
+    await jobs_mod.send_slot_job(slot.id)
+
+    # make_lead() default name is "Test Lead"
+    assert captured["from_name"] == "Test Lead at Acme"
+    # one-click unsubscribe is on by default
+    assert captured["list_unsubscribe_one_click"] is True
+    assert captured["list_unsubscribe_url"]
+
+
+@pytest.mark.asyncio
+async def test_one_click_unsubscribe_flag_comes_from_campaign(session, monkeypatch):
+    """campaign.add_one_click_unsubscribe=False keeps List-Unsubscribe but drops -Post."""
+    inbox = await _make_smtp_inbox(session, email="brand2@example.com")
+    campaign = await make_campaign(
+        session,
+        sending_days=[0, 1, 2, 3, 4, 5, 6],
+        sending_hours_start="00:00",
+        sending_hours_end="23:59",
+    )
+    campaign.add_one_click_unsubscribe = False
+    await session.flush()
+    slot = await _make_due_slot(session, inbox, campaign=campaign)
+
+    captured: dict = {}
+
+    def fake_send(**kwargs):
+        captured.update(kwargs)
+        return SendResult(message_id="<x>", thread_id="t")
+
+    async def fake_webhook(db, event, data):
+        return None
+
+    monkeypatch.setattr("app.jobs.fire_webhook_event", fake_webhook)
+    monkeypatch.setattr("app.jobs.send_email", fake_send)
+    monkeypatch.setattr(jobs_mod, "AsyncSessionLocal", lambda: _SessionCtx(session))
+    jobs_mod._inbox_auth_cooldown_until.clear()
+
+    await jobs_mod.send_slot_job(slot.id)
+
+    assert captured["list_unsubscribe_one_click"] is False
+    assert captured["list_unsubscribe_url"]

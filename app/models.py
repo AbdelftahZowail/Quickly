@@ -175,6 +175,9 @@ class Campaign(Base):
     track_clicks = Column(Boolean, default=False, nullable=False)
     # Unsubscribe
     add_unsubscribe_header = Column(Boolean, default=True, nullable=False)
+    # RFC 8058 one-click header (List-Unsubscribe-Post). Required by Gmail/Yahoo
+    # bulk-sender rules; disable if Gmail's Promotions classifier is an issue.
+    add_one_click_unsubscribe = Column(Boolean, default=True, nullable=False)
     # Plain-text sending options
     send_first_as_text = Column(Boolean, default=False, nullable=False)  # Force seq 0 to plain text
     send_all_as_text = Column(Boolean, default=False, nullable=False)    # Force every sequence to plain text

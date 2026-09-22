@@ -303,6 +303,7 @@ List all campaigns with aggregated stats.
   "track_opens": false,
   "track_clicks": false,
   "add_unsubscribe_header": true,
+  "add_one_click_unsubscribe": true,
   "send_first_as_text": false,
   "send_all_as_text": false,
   "stats": {
@@ -345,6 +346,7 @@ Create a new campaign.
 | `track_opens` | bool | No | `false` | Enable open tracking pixel |
 | `track_clicks` | bool | No | `false` | Enable click tracking |
 | `add_unsubscribe_header` | bool | No | `true` | Add List-Unsubscribe header |
+| `add_one_click_unsubscribe` | bool | No | `true` | Also send the RFC 8058 `List-Unsubscribe-Post` one-click header. Required by Gmail/Yahoo for bulk senders; disable if Gmail routes your mail to Promotions (keep the plain header on). Only applies when `add_unsubscribe_header` is true. |
 | `send_first_as_text` | bool | No | `false` | Send first sequence as plain text |
 | `send_all_as_text` | bool | No | `false` | Send all sequences as plain text |
 | `match_lead_provider` | bool | No | `false` | Prefer Gmail inboxes for Google leads, Office 365 inboxes for Microsoft leads |
@@ -1673,6 +1675,8 @@ Email bodies support Jinja2-style template substitution:
 | `{{company}}` | `custom_data.company` |
 | `{{*}}` | Any key from lead's `custom_data` |
 | `{{unsubscribe_link}}` | Auto-generated one-click unsubscribe URL |
+
+Template variables are also rendered in the **inbox display name** (the `From:` name) for campaign sends — e.g. an inbox display name of `{{name}} at Acme` produces `Jane Doe at Acme`.
 
 Example: `Hi {{name}}, I noticed {{company}} is growing fast...`
 

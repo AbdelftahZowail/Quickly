@@ -291,6 +291,7 @@ def _build_email_message(
     is_html: bool = False,
     message_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
 ) -> EmailMessage:
     """Build an EmailMessage using Python's stdlib email module (policy.SMTP)."""
     msg = EmailMessage(policy=email.policy.SMTP)
@@ -332,7 +333,12 @@ def _build_email_message(
 
     if list_unsubscribe_url:
         msg["List-Unsubscribe"] = f"<{list_unsubscribe_url}>"
-        msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+        # RFC 8058 one-click unsubscribe.  Gmail/Yahoo require it for bulk
+        # senders, but some senders prefer to omit it because Gmail's tab
+        # classifier can treat one-click mail as Promotions.  Opt-out is
+        # per campaign (``add_one_click_unsubscribe``).
+        if list_unsubscribe_one_click:
+            msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
 
     return msg
 
@@ -348,6 +354,7 @@ def build_raw_mime(
     is_html: bool = False,
     message_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
 ) -> str:
     """
     Build a raw RFC 2822 MIME string and return it base64url-encoded for
@@ -371,6 +378,7 @@ def build_raw_mime(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
@@ -388,6 +396,7 @@ def _send_via_gmail(
     gmail_account: GmailAccount | None = None,
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
     google_client_id: str = "",
     google_client_secret: str = "",
     retry_on_auth_fail: bool = True,
@@ -451,6 +460,7 @@ def _send_via_gmail(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
 
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
@@ -568,6 +578,7 @@ def _send_via_gmail(
                         gmail_account=gmail_account,
                         thread_id=thread_id,
                         list_unsubscribe_url=list_unsubscribe_url,
+                        list_unsubscribe_one_click=list_unsubscribe_one_click,
                         google_client_id=google_client_id,
                         google_client_secret=google_client_secret,
                         retry_on_auth_fail=False,
@@ -615,6 +626,7 @@ def send_email(
     gmail_account: Optional[GmailAccount] = None,
     thread_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
     google_client_id: str = "",
     google_client_secret: str = "",
     office365_account: Optional[Office365Account] = None,
@@ -673,6 +685,7 @@ def send_email(
             is_html=is_html,
             smtp_account=smtp_account,
             list_unsubscribe_url=list_unsubscribe_url,
+            list_unsubscribe_one_click=list_unsubscribe_one_click,
         )
 
     if provider == "office365":
@@ -691,6 +704,7 @@ def send_email(
             office365_account=office365_account,
             conversation_id=conversation_id,
             list_unsubscribe_url=list_unsubscribe_url,
+            list_unsubscribe_one_click=list_unsubscribe_one_click,
             office365_client_id=office365_client_id,
             office365_client_secret=office365_client_secret,
             office365_tenant_id=office365_tenant_id,
@@ -715,6 +729,7 @@ def send_email(
         gmail_account=gmail_account,
         thread_id=thread_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
         google_client_id=google_client_id,
         google_client_secret=google_client_secret,
     )
@@ -767,6 +782,7 @@ def _send_via_office365(
     office365_account: Office365Account | None = None,
     conversation_id: Optional[str] = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
     office365_client_id: str = "",
     office365_client_secret: str = "",
     office365_tenant_id: str = "",
@@ -816,6 +832,7 @@ def _send_via_office365(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
     raw_mime: bytes = mime_msg.as_bytes()
 
@@ -956,6 +973,7 @@ def _send_via_office365(
                         office365_account=office365_account,
                         conversation_id=conversation_id,
                         list_unsubscribe_url=list_unsubscribe_url,
+                        list_unsubscribe_one_click=list_unsubscribe_one_click,
                         office365_client_id=office365_client_id,
                         office365_client_secret=office365_client_secret,
                         office365_tenant_id=office365_tenant_id,
@@ -1031,6 +1049,7 @@ def _send_via_smtp(
     is_html: bool = False,
     smtp_account: SmtpAccount | None = None,
     list_unsubscribe_url: Optional[str] = None,
+    list_unsubscribe_one_click: bool = True,
 ) -> Optional[SendResult | SendFailure]:
     """Send one email via a generic SMTP relay (stdlib ``smtplib``).
 
@@ -1060,6 +1079,7 @@ def _send_via_smtp(
         is_html=is_html,
         message_id=message_id,
         list_unsubscribe_url=list_unsubscribe_url,
+        list_unsubscribe_one_click=list_unsubscribe_one_click,
     )
     raw_bytes: bytes = mime_msg.as_bytes()
     # Thread key: the root message of the chain (first References entry) or

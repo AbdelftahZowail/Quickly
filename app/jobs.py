@@ -690,7 +690,8 @@ async def run_send_job():
                     )
                     body = preheader + body
                 from_addr = inbox.email
-                from_name = inbox.display_name or ""
+                # Render lead variables in the sender name too (e.g. "Jane at Acme")
+                from_name = render_body(inbox.display_name or "", lead_data)
 
                 # ── phase 1: pre-create EmailLog to get an ID for tracking ──
                 email_log_entry = EmailLog(
@@ -759,7 +760,7 @@ async def run_send_job():
 
                 # ── Append quoted previous email (follow-up sequences only) ──
                 if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
-                    _from_name = inbox.display_name or inbox.email
+                    _from_name = render_body(inbox.display_name or inbox.email, lead_data)
                     _from_email = inbox.email
                     if is_html:
                         _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
@@ -775,6 +776,7 @@ async def run_send_job():
 
                 # Unsubscribe header
                 list_unsub_url = unsub_url if getattr(campaign, 'add_unsubscribe_header', True) else None
+                list_unsub_one_click = bool(getattr(campaign, "add_one_click_unsubscribe", True))
 
                 # ── phase 3: send ────────────────────────────────────────────
                 # Commit before the network call.  The pre-created EmailLog row
@@ -810,6 +812,7 @@ async def run_send_job():
                         gmail_account=ga,
                         thread_id=prev_thread_id,
                         list_unsubscribe_url=list_unsub_url,
+                        list_unsubscribe_one_click=list_unsub_one_click,
                         google_client_id=g_client_id,
                         google_client_secret=g_client_secret,
                         office365_account=o365_account,
@@ -1482,7 +1485,8 @@ async def send_slot_job(slot_id: int) -> None:
             body = preheader + body
 
         from_addr = inbox.email
-        from_name = inbox.display_name or ""
+        # Render lead variables in the sender name too (e.g. "Jane at Acme")
+        from_name = render_body(inbox.display_name or "", lead_data)
 
         # ── Pre-create EmailLog to get an ID for tracking ─────────────────
         email_log_entry = EmailLog(
@@ -1544,7 +1548,7 @@ async def send_slot_job(slot_id: int) -> None:
 
         # ── Append quoted previous email ──────────────────────────────────
         if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
-            _from_name = inbox.display_name or inbox.email
+            _from_name = render_body(inbox.display_name or inbox.email, lead_data)
             _from_email = inbox.email
             if is_html:
                 _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
@@ -1555,6 +1559,7 @@ async def send_slot_job(slot_id: int) -> None:
                     send_body = send_body + build_quote_plain(_prev_plain, _from_name, _from_email, prev_sent_at)
 
         list_unsub_url = unsub_url if getattr(campaign, "add_unsubscribe_header", True) else None
+        list_unsub_one_click = bool(getattr(campaign, "add_one_click_unsubscribe", True))
 
         # ── Send ──────────────────────────────────────────────────────────
         # Commit before the network call.  The pre-created EmailLog row and
@@ -1588,6 +1593,7 @@ async def send_slot_job(slot_id: int) -> None:
                 gmail_account=ga,
                 thread_id=prev_thread_id,
                 list_unsubscribe_url=list_unsub_url,
+                list_unsubscribe_one_click=list_unsub_one_click,
                 google_client_id=g_client_id,
                 google_client_secret=g_client_secret,
                 office365_account=o365_account,

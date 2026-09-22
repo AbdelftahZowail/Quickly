@@ -19,6 +19,7 @@ export default function AddCampaign() {
     track_clicks: false,
     // Unsubscribe
     add_unsubscribe_header: true,
+    add_one_click_unsubscribe: true,
     // sending format
     send_first_as_text: false,
     send_all_as_text: false,
@@ -231,6 +232,19 @@ export default function AddCampaign() {
             <label className="flex items-center gap-2">
               <input type="checkbox" name="add_unsubscribe_header" checked={form.add_unsubscribe_header} onChange={handleChange} />
               <span className="text-sm">Add List-Unsubscribe header (recommended)</span>
+            </label>
+            <label className={`flex items-center gap-2 ${form.add_unsubscribe_header ? '' : 'opacity-50'}`}>
+              <input
+                type="checkbox"
+                name="add_one_click_unsubscribe"
+                checked={form.add_one_click_unsubscribe}
+                onChange={handleChange}
+                disabled={!form.add_unsubscribe_header}
+              />
+              <span className="text-sm">
+                Include one-click unsubscribe (List-Unsubscribe-Post) — required by Gmail/Yahoo for bulk senders;
+                some senders disable it if Gmail routes mail to Promotions
+              </span>
             </label>
           </div>
         </div>

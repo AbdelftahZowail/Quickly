@@ -202,6 +202,8 @@ async def _run_migrations(conn) -> None:
         "CREATE INDEX IF NOT EXISTS ix_smtp_message_inbox_thread_date ON smtp_message (inbox_id, thread_key, received_at)",
         "CREATE INDEX IF NOT EXISTS ix_smtp_message_inbox_received ON smtp_message (inbox_id, received_at)",
         "CREATE INDEX IF NOT EXISTS ix_smtp_message_rfc_id ON smtp_message (rfc_message_id)",
+        # 2026-09-22: per-campaign RFC 8058 one-click unsubscribe toggle
+        "ALTER TABLE campaign ADD COLUMN IF NOT EXISTS add_one_click_unsubscribe BOOLEAN NOT NULL DEFAULT TRUE",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)
