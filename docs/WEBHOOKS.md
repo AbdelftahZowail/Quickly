@@ -357,7 +357,7 @@ Fires when an inbox credential fails permanently:
 - `provider: "smtp"` with `error_type: "auth_failed"` — the SMTP relay rejected the login (update the SMTP username/password, then resume the inbox).
 - `provider: "smtp"` with `error_type: "imap_auth_failed"` / `"imap_sync_failed"` — the IMAP mailbox login failed / reply sync could not connect.
 
-The inbox is paused automatically for SMTP/OAuth auth failures so the send job does not retry a broken credential forever.
+For SMTP/OAuth **send** failures the inbox is paused automatically and further sends are skipped for a 15-minute cooldown, so the send job does not retry a broken credential forever. IMAP **reply sync** is different: it keeps retrying on its normal schedule and recovers on its own once the credentials are fixed (it is not paused by this event).
 
 ```json
 {

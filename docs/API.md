@@ -1292,9 +1292,17 @@ Send an email via Gmail from the unibox.
 
 Server-Sent Events (SSE) stream for real-time unibox updates (new messages, sync status changes).
 
-### `POST /api/unibox/gmail/push`
+### `POST /api/unibox/gmail/push?token=<push-webhook-token>`
 
 Google Pub/Sub push notification endpoint. Called automatically by Gmail when new messages arrive.
+
+This route is intentionally **public** (Google cannot send your session cookie), so it authenticates the caller with a shared secret instead: the `token` query parameter must match `app_setting.gmail_push_webhook_token`. Configure the Pub/Sub push subscription with the full URL shown in **Settings → Gmail Sync**:
+
+```
+https://yourdomain.com/api/unibox/gmail/push?token=<Push Webhook Token from Settings → Gmail Sync>
+```
+
+A missing or wrong token returns `401 Unauthorized`. Existing push subscriptions must be updated to append the token after upgrading.
 
 ---
 

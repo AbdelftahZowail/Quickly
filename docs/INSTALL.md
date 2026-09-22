@@ -616,11 +616,16 @@ docker compose up -d
 
 Skip this if you're happy with scheduled polling for reply detection.
 
-1. Go to **Pub/Sub → Topics → Create Topic**
-2. Topic ID: `quickly-gmail-push` (or any name you prefer)
-3. Create a **Push subscription** on the topic pointing to: `https://yourdomain.com/api/unibox/gmail/push`
-4. In the topic's **Permissions** tab, grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role
-5. In Quickly, go to **Settings → Gmail Sync** and enter the full topic name (e.g. `projects/your-project/topics/quickly-gmail-push`)
+1. In Quickly, go to **Settings → Gmail Sync** and copy the **Push Webhook Token** (and note the exact push URL the page shows — it already includes the token).
+2. Go to **Pub/Sub → Topics → Create Topic**
+3. Topic ID: `quickly-gmail-push` (or any name you prefer)
+4. Create a **Push subscription** on the topic pointing to: `https://yourdomain.com/api/unibox/gmail/push?token=<Push Webhook Token from Settings → Gmail Sync>`
+5. In the topic's **Permissions** tab, grant `gmail-api-push@system.gserviceaccount.com` the **Pub/Sub Publisher** role
+6. Back in **Settings → Gmail Sync**, enter the full topic name (e.g. `projects/your-project/topics/quickly-gmail-push`)
+
+> **The `?token=` query parameter is mandatory.** The push endpoint authenticates every request against the token shown in **Settings → Gmail Sync**; a request without it (or with a wrong one) is rejected with `401 Unauthorized`. The Settings page displays the complete URL to copy — use that instead of typing the URL by hand.
+>
+> **Upgrading from an older version?** Push tokens were introduced in the release that fixed unauthenticated Gmail push delivery. Any existing Pub/Sub push subscription still points at `/api/unibox/gmail/push` with no token and will start returning `401`, which silently stops real-time reply detection. Edit the subscription's endpoint URL and append `?token=<Push Webhook Token>` after upgrading.
 
 > **This is the most involved step in the whole guide.** IAM roles, push subscriptions, and topic naming are easy to get wrong. If you're hitting errors, search "Google Cloud Pub/Sub push subscription setup" or ask an AI chatbot to walk you through it — describe that you need a push subscription that forwards to a webhook URL, with the Gmail push service account as publisher.
 
@@ -752,10 +757,21 @@ python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
 
 Run the printed statement with `psql`, then test the connection from the inbox UI (or `POST /api/smtp/inboxes/7/test`). `--decrypt 'gAAAAA...'` verifies an existing value; `--key` / `--password` are available for scripted use. If `QUICKLY_ENCRYPTION_KEY` is not set, the app auto-generates a key and stores it under `quickly_encryption_key` in `app_setting` — that is what `--key-from-db` reads.
 
-Docker deployments: run the helper inside the backend container, where the app's dependencies are installed:
+By default the generated statement updates `smtp_password`. Pass `--column imap_password` to update the IMAP secret instead:
 
 ```bash
-docker compose exec backend python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --column imap_password --sql
+# → UPDATE smtp_account SET imap_password = 'gAAAAA...', updated_at = NOW() WHERE inbox_id = 7;
+```
+
+Docker deployments: run the helper inside the application container, where the app's dependencies are installed (production `docker-compose.yml` names this service `app`; the `backend` service only exists in `docker-compose.dev.yml`):
+
+```bash
+# Production
+docker compose exec app python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+
+# Development (docker-compose.dev.yml)
+docker compose -f docker-compose.dev.yml exec backend python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
 ```
 
 ---

@@ -23,6 +23,9 @@ Examples::
     # Print a ready-to-run SQL statement for inbox_id 7
     python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
 
+    # Same, but target the IMAP password column instead of smtp_password
+    python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --column imap_password --sql
+
     # Non-interactive (password is visible in shell history — prefer the prompt)
     python scripts/encrypt_secret.py --key-from-db --password 'my-smtp-password'
 
@@ -121,6 +124,12 @@ def main() -> int:
     parser.add_argument("--decrypt", action="store_true", help="Decrypt the given ciphertext instead.")
     parser.add_argument("--inbox-id", type=int, help="With --sql: the inbox whose SMTP row to update.")
     parser.add_argument(
+        "--column",
+        choices=("smtp_password", "imap_password"),
+        default="smtp_password",
+        help="With --sql: which credentials column to update (default: smtp_password).",
+    )
+    parser.add_argument(
         "--sql",
         action="store_true",
         help="Print an UPDATE smtp_account statement instead of only the ciphertext.",
@@ -168,7 +177,7 @@ def main() -> int:
             raise SystemExit("--sql requires --inbox-id")
         print(
             "UPDATE smtp_account "
-            f"SET smtp_password = '{ciphertext}', updated_at = NOW() "
+            f"SET {args.column} = '{ciphertext}', updated_at = NOW() "
             f"WHERE inbox_id = {args.inbox_id};"
         )
     else:
