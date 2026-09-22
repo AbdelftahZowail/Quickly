@@ -1110,6 +1110,18 @@ export default function Inboxes() {
       setEditMsg({ type: 'error', text: 'Please verify the DNS tracking domain before saving.' });
       return;
     }
+    // SMTP credentials are part of this form now — validate before saving so the
+    // user gets one clear error instead of a half-saved inbox.
+    if (editing.provider === 'smtp' && editingSmtp) {
+      if (!editingSmtp.smtp_host.trim() || !editingSmtp.smtp_username.trim()) {
+        setEditMsg({ type: 'error', text: 'SMTP host and username are required.' });
+        return;
+      }
+      if (!editingSmtp.smtp_password && !editingSmtp._meta?.has_smtp_password) {
+        setEditMsg({ type: 'error', text: 'SMTP password is required.' });
+        return;
+      }
+    }
     setEditDirty(false); // save in progress — don't treat as unsaved
     try {
       const body = {
@@ -1125,6 +1137,15 @@ export default function Inboxes() {
         ramp_up_step_size: editing.ramp_up_step_size ?? 1,
       };
       await api.patch(`/inboxes/${editing.id}`, body);
+      // Persist SMTP/IMAP credentials with the same click (replaces the old
+      // separate "Save SMTP" button). An empty password means "keep stored".
+      if (editing.provider === 'smtp' && editingSmtp) {
+        const { _meta, ...payload } = editingSmtp;
+        const saved = await api.put(`/smtp/inboxes/${editing.id}`, {
+          ...payload, smtp_port: +payload.smtp_port, imap_port: +payload.imap_port,
+        });
+        setEditingSmtp((prev) => ({ ...prev, smtp_password: '', imap_password: '', _meta: saved }));
+      }
       setEditMsg({ type: 'success', text: 'Inbox updated' });
       setTimeout(() => { closeEdit(); load(); }, 1000);
     } catch (err) {
@@ -1134,28 +1155,6 @@ export default function Inboxes() {
   const saveEdit = async (e) => {
     e.preventDefault();
     await doSave();
-  };
-
-  const saveEditingSmtp = async () => {
-    if (!editing || !editingSmtp) return;
-    setSmtpTestMsg(null);
-    try {
-      const { _meta, ...payload } = editingSmtp;
-      if (!payload.smtp_password && !(_meta?.has_smtp_password)) {
-        setSmtpTestMsg({ type: 'error', text: 'SMTP password is required.' });
-        return;
-      }
-      const saved = await api.put(`/smtp/inboxes/${editing.id}`, {
-        ...payload, smtp_port: +payload.smtp_port, imap_port: +payload.imap_port,
-      });
-      setEditingSmtp((prev) => ({ ...prev, smtp_password: '', imap_password: '', _meta: saved }));
-      setSmtpTestMsg({ type: 'success', text: 'SMTP settings saved' });
-      // SMTP credentials are saved independently of the outer inbox form —
-      // don't mark the edit as dirty, or closing the modal would trigger a
-      // false "unsaved changes" prompt.
-    } catch (err) {
-      setSmtpTestMsg({ type: 'error', text: err.message });
-    }
   };
 
   const testEditingSmtp = async () => {
@@ -1743,13 +1742,25 @@ export default function Inboxes() {
                                   Last send error {editingSmtp._meta.last_send_at ? `(${new Date(editingSmtp._meta.last_send_at).toLocaleString()})` : ''}: {editingSmtp._meta.last_send_error}
                                 </p>
                               )}
-                              <div className="flex flex-wrap gap-2">
-                                <Button type="button" size="sm" variant="outline" onClick={saveEditingSmtp}>Save SMTP</Button>
-                                <Button type="button" size="sm" variant="outline" onClick={testEditingSmtp} disabled={smtpTesting}>{smtpTesting ? 'Testing…' : 'Test connection'}</Button>
-                                <Button type="button" size="sm" variant="default" onClick={runSmtpDiagnose} disabled={smtpDiagnosing || smtpTesting}>
-                                  {smtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
-                                </Button>
+                              <div className="border-t border-gray-200 pt-3 space-y-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Button type="button" size="sm" variant="outline" onClick={testEditingSmtp} disabled={smtpTesting || smtpDiagnosing}>
+                                    {smtpTesting ? 'Testing…' : 'Test connection'}
+                                  </Button>
+                                  <Button type="button" size="sm" variant="default" onClick={runSmtpDiagnose} disabled={smtpDiagnosing || smtpTesting}>
+                                    {smtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
+                                  </Button>
+                                </div>
+                                <p className="text-[11px] text-gray-400">
+                                  <span className="font-medium text-gray-500">Test connection</span> only checks that the
+                                  server answers (EHLO → TLS → login).{' '}
+                                  <span className="font-medium text-gray-500">Diagnose</span> walks the whole send path —
+                                  DNS, port, TLS mode, login, <span className="font-medium text-gray-500">and a real
+                                  MAIL FROM / RCPT TO / DATA</span> probe — then tells you which stage failed and how to
+                                  fix it.
+                                </p>
                               </div>
+                              {smtpTestMsg && <div className={`text-sm ${smtpTestMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{smtpTestMsg.text}</div>}
                               {smtpDiagnose && (
                                 <SmtpDiagnosticReport
                                   report={smtpDiagnose}
@@ -2236,7 +2247,8 @@ export default function Inboxes() {
                   <div className="border-t border-gray-200 pt-3 space-y-2">
                     <label className="block text-xs font-medium text-gray-700">Send test email</label>
                     <p className="text-[11px] text-gray-400">
-                      Sends a real message through the same path campaigns use. Works once the inbox is added.
+                      Sends a real message through the same path campaigns use — it <span className="font-medium text-gray-500">creates the inbox first</span>,
+                      then delivers the test. Use it to confirm end-to-end delivery, not just the connection.
                     </p>
                     <div className="flex gap-2">
                       <input
@@ -2255,6 +2267,11 @@ export default function Inboxes() {
                           const to = (addSmtpSendTestTo || form.email || '').trim();
                           if (!to || !to.includes('@')) {
                             setAddSmtpSendTestMsg({ type: 'error', text: 'Enter a recipient email address.' });
+                            return;
+                          }
+                          const missing = addSmtpMissingFields();
+                          if (missing.length > 0) {
+                            setAddSmtpSendTestMsg({ type: 'error', text: `Fill in ${missing.join(', ')} first.` });
                             return;
                           }
                           setAddSmtpSendTestTo(to);
