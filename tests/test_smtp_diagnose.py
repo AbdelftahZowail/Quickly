@@ -325,6 +325,28 @@ def test_cloudflare_proxied_hostname_flags_and_stops(monkeypatch):
     assert "Cloudflare" in dns["detail"]
     assert not report["ok"]
     assert any("Cloudflare-proxied" in h for h in report["hints"])
+    # The verdict names the real cause — NOT "does not resolve" (it did).
+    assert "Cloudflare edge" in report["verdict"]
+    assert "proxied" in report["verdict"]
+    # Stages that never ran are labelled, not left blank.
+    for stage in report["stages"][1:]:
+        assert stage["detail"], stage["name"]
+
+
+def test_unresolvable_hostname_verdict(monkeypatch):
+    """A genuine NXDOMAIN fails the DNS stage with the 'does not resolve' verdict."""
+    def _gai(*a, **k):
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    monkeypatch.setattr(socket, "getaddrinfo", _gai)
+    report = _diagnose(12345, host="no-such-host.invalid")
+    dns = next(s for s in report["stages"] if s["name"] == "dns")
+    assert dns["ok"] is False
+    assert not report["ok"]
+    assert report["verdict"] == "The SMTP hostname does not resolve."
+    assert any("does not resolve" in h for h in report["hints"])
+    for stage in report["stages"][1:]:
+        assert stage["detail"], stage["name"]
 
 
 # ---------------------------------------------------------------------------

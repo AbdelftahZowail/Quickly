@@ -617,8 +617,15 @@ def _probe_once(
     # ── DNS ────────────────────────────────────────────────────────────────
     dns_hints = _stage_dns(host, port, stages["dns"])
     all_hints.extend(dns_hints)
-    if not stages["dns"].ok and "resolve" in stages["dns"].detail.lower():
-        report.verdict = "The SMTP hostname does not resolve."
+    if not stages["dns"].ok:
+        if "cloudflare edge" in stages["dns"].detail.lower():
+            report.verdict = (
+                f"{host} resolves only to Cloudflare edge IPs — the DNS record is proxied "
+                "(orange cloud). Cloudflare proxies HTTP/HTTPS only, so SMTP/IMAP traffic "
+                "can never reach the mail server through it."
+            )
+        else:
+            report.verdict = "The SMTP hostname does not resolve."
         report.hints = all_hints
         return report
 
@@ -752,6 +759,20 @@ def _probe_once(
     return report
 
 
+def _fill_unrun_stages(report: DiagnosticReport) -> None:
+    """Label stages that never executed so failed rows aren't blank in the UI.
+
+    The probe stops at the first failed stage; everything after it keeps the
+    dataclass default (``detail=""``), which renders as an unexplained ❌.
+    """
+    failed = next((s for s in report.stages if not s.ok), None)
+    if failed is None:
+        return
+    for s in report.stages:
+        if s is not failed and not s.ok and not s.detail:
+            s.detail = f"Skipped — {failed.name} failed first."
+
+
 def diagnose(
     *,
     host: str,
@@ -806,6 +827,7 @@ def diagnose(
         from_email=from_email, to_email=to_email, timeout=timeout,
         deadline=deadline, imap=imap,
     )
+    _fill_unrun_stages(primary)
 
     suggested_mode: str | None = None
     alternate_report: dict[str, Any] | None = None
@@ -821,6 +843,7 @@ def diagnose(
                 from_email=from_email, to_email=to_email, timeout=timeout,
                 deadline=deadline, imap=imap,
             )
+            _fill_unrun_stages(alt)
             if alt.ok:
                 suggested_mode = other
                 alternate_report = alt.to_dict()
