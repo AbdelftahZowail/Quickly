@@ -254,6 +254,9 @@ _SAMPLE_PAYLOADS: dict[str, dict] = {
     "token_expired": {
         "inbox_id": 1,
         "inbox_email": "outreach@gmail.com",
+        "provider": "smtp",
+        "error_type": "auth_failed",
+        "error": "SMTP authentication failed: 535 Authentication failed",
     },
 }
 

@@ -59,7 +59,7 @@ const EVENT_LABELS = {
   'feature.error': 'Feature Error',
   'daily_limit': 'Daily Limit Hit',
   'rate_limit': 'Rate Limit',
-  'token_expired': 'Token Expired',
+  'token_expired': 'Token / Auth Failure',
 };
 
 const EVENT_CATEGORIES = {

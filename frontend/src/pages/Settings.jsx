@@ -622,7 +622,7 @@ export default function Settings() {
     'lead.not_interested': 'Lead Not Interested (AI)',
     'daily_limit': 'Daily Limit Hit',
     'rate_limit': 'Rate Limit',
-    'token_expired': 'Token Expired',
+    'token_expired': 'Token / Auth Failure',
   };
 
   const isAllEvents = (events) => eventTypes.length > 0 && events.length === eventTypes.length;

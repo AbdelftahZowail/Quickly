@@ -607,7 +607,12 @@ async def _ensure_access_token(db: AsyncSession, account: GmailAccount) -> str:
                 await maybe_fire_email_event(
                     db,
                     "token_expired",
-                    {"inbox_id": account.inbox_id, "at": now_utc.isoformat()},
+                    {
+                        "inbox_id": account.inbox_id,
+                        "provider": "gmail",
+                        "error_type": "oauth_refresh_failed",
+                        "at": now_utc.isoformat(),
+                    },
                 )
             except Exception:
                 log.exception("failed firing token_expired webhook")
@@ -643,7 +648,12 @@ async def _gmail_call_with_refresh(
                 await maybe_fire_email_event(
                     db,
                     "token_expired",
-                    {"inbox_id": account.inbox_id, "at": time_provider.utcnow().isoformat()},
+                    {
+                        "inbox_id": account.inbox_id,
+                        "provider": "gmail",
+                        "error_type": "oauth_refresh_failed",
+                        "at": time_provider.utcnow().isoformat(),
+                    },
                 )
             except Exception:
                 log.exception("failed firing token_expired webhook after Gmail auth failure")
@@ -1522,9 +1532,9 @@ def _fetch_smtp_new_messages(
     Returns ``(uidvalidity, [(uid, rfc822_bytes), ...])``. Raises on
     connection/auth errors so the caller can surface them.
     """
-    from app.smtp_utils import _imap_connect
+    from app.smtp_utils import _imap_connect, smtp_timeout_seconds
 
-    client = _imap_connect(account, timeout=30)
+    client = _imap_connect(account, timeout=smtp_timeout_seconds(default=15.0))
     try:
         typ, data = client.status("INBOX", "(UIDVALIDITY UIDNEXT)")
         current_validity: int | None = uidvalidity
@@ -1859,11 +1869,25 @@ async def _sync_inbox_smtp(db: AsyncSession, inbox, reason: str = "") -> set[tup
         )
     except Exception as exc:
         log.warning("SMTP IMAP sync failed for inbox_id=%s: %s", inbox.id, exc)
+        # Distinguish a bad credential from a transient network/IMAP error so
+        # the notification does not claim "OAuth token expired" for both.
+        exc_low = str(exc).lower()
+        looks_like_auth = any(
+            hint in exc_low
+            for hint in ("auth", "login", "credential", "535", "invalid user")
+        )
         try:
             await maybe_fire_email_event(
                 db,
                 "token_expired",
-                {"inbox_id": inbox.id, "at": time_provider.utcnow().isoformat()},
+                {
+                    "inbox_id": inbox.id,
+                    "inbox_email": inbox.email,
+                    "provider": "smtp",
+                    "error_type": "imap_auth_failed" if looks_like_auth else "imap_sync_failed",
+                    "error": str(exc)[:300],
+                    "at": time_provider.utcnow().isoformat(),
+                },
             )
         except Exception:
             log.exception("failed firing token_expired webhook for SMTP inbox_id=%s", inbox.id)
@@ -3455,7 +3479,12 @@ async def _ensure_o365_access_token(db: AsyncSession, account: Office365Account)
                 await maybe_fire_email_event(
                     db,
                     "token_expired",
-                    {"inbox_id": account.inbox_id, "at": now_utc.isoformat()},
+                    {
+                        "inbox_id": account.inbox_id,
+                        "provider": "office365",
+                        "error_type": "oauth_refresh_failed",
+                        "at": now_utc.isoformat(),
+                    },
                 )
             except Exception:
                 log.exception("failed firing token_expired webhook")
@@ -3491,7 +3520,12 @@ async def _o365_call_with_refresh(
                 await maybe_fire_email_event(
                     db,
                     "token_expired",
-                    {"inbox_id": account.inbox_id, "at": time_provider.utcnow().isoformat()},
+                    {
+                        "inbox_id": account.inbox_id,
+                        "provider": "office365",
+                        "error_type": "oauth_refresh_failed",
+                        "at": time_provider.utcnow().isoformat(),
+                    },
                 )
             except Exception:
                 log.exception("failed firing token_expired webhook after O365 auth failure")

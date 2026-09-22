@@ -123,7 +123,12 @@ async def _force_refresh_token(db: AsyncSession, account: Office365Account) -> b
         await maybe_fire_email_event(
             db,
             "token_expired",
-            {"inbox_id": account.inbox_id, "at": datetime.utcnow().isoformat()},
+            {
+                "inbox_id": account.inbox_id,
+                "provider": "office365",
+                "error_type": "oauth_refresh_failed",
+                "at": datetime.utcnow().isoformat(),
+            },
         )
     except Exception:
         log.exception("failed firing token_expired webhook after Graph auth failure")

@@ -21,7 +21,7 @@ from typing import Any
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import EmailNotificationConfig, Notification, User
+from app.models import EmailNotificationConfig, Inbox, Notification, User
 from app import time as time_provider
 from app.settings_manager import settings
 
@@ -104,12 +104,33 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
         title = f"Rate limit triggered — {inbox_email}"
         message = f"A rate limit was hit for **{inbox_email}**."
     elif event_type == "token_expired":
-        inbox_email = data.get("inbox_email", "an inbox")
-        title = f"OAuth token expired — {inbox_email}"
-        message = (
-            f"**{inbox_email}**'s OAuth token could not be refreshed. "
-            f"Please reconnect the inbox."
-        )
+        inbox_email = data.get("inbox_email") or "an inbox"
+        provider = str(data.get("provider") or "").lower()
+        error_type = str(data.get("error_type") or "").lower()
+        if error_type == "imap_sync_failed":
+            title = f"Mailbox sync failed — {inbox_email}"
+            message = (
+                f"**{inbox_email}** could not be synced over IMAP. "
+                f"Check the IMAP host/port; reply sync will retry automatically."
+            )
+        elif error_type.startswith("imap"):
+            title = f"IMAP authentication failed — {inbox_email}"
+            message = (
+                f"**{inbox_email}**'s IMAP login was rejected. "
+                f"Reply sync is paused until the mailbox credentials are fixed."
+            )
+        elif provider == "smtp" or error_type.startswith("smtp"):
+            title = f"SMTP authentication failed — {inbox_email}"
+            message = (
+                f"**{inbox_email}**'s SMTP relay rejected the login. "
+                f"Update the SMTP username/password for this inbox, then resume it."
+            )
+        else:
+            title = f"OAuth token expired — {inbox_email}"
+            message = (
+                f"**{inbox_email}**'s OAuth token could not be refreshed. "
+                f"Please reconnect the inbox."
+            )
     else:
         title = f"Quickly notification — {event_type}"
         message = f"Event: {event_type} at {ts}"
@@ -343,6 +364,17 @@ async def dispatch_notification(
 
         if not users:
             return
+
+        # Resolve the inbox email when a caller only passed inbox_id.  Without
+        # this, notifications fall back to the generic "an inbox" placeholder
+        # (e.g. token_expired fired from unibox sync paths).
+        if not data.get("inbox_email") and data.get("inbox_id"):
+            inbox_row = await db.execute(
+                select(Inbox.email).where(Inbox.id == data["inbox_id"])
+            )
+            inbox_email = inbox_row.scalar_one_or_none()
+            if inbox_email:
+                data = {**data, "inbox_email": inbox_email}
 
         user_ids = [u.id for u in users]
         configs_result = await db.execute(

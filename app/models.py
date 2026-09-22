@@ -947,5 +947,5 @@ WEBHOOK_EVENT_TYPES = [
     "lead.auto_reply",     # AI classified a lead's reply as an automated reply
     "daily_limit",         # An inbox hit its daily sending limit
     "rate_limit",          # A rate limit violation was detected
-    "token_expired",       # A Gmail OAuth token could not be refreshed
+    "token_expired",       # OAuth refresh or SMTP/IMAP login failed (see data.provider/error_type)
 ]
