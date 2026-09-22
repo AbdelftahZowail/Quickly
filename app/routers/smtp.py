@@ -332,13 +332,15 @@ async def diagnose_smtp_account(
                 "retry_after": int(remaining) + 1,
             },
         )
+    # Record the attempt *before* probing: two concurrent requests would both
+    # pass the check above otherwise, and a timeout would never set the stamp.
+    _last_diagnose_at[inbox_id] = __import__("time").monotonic()
 
     # Run the blocking probe off the event loop; it has its own per-stage (~8s)
     # and overall (~30s) timeouts so the request worker cannot hang.
     report = await asyncio.wait_for(
         asyncio.to_thread(diagnose_account, acct), timeout=45.0
     )
-    _last_diagnose_at[inbox_id] = __import__("time").monotonic()
 
     acct.last_diagnostic_at = utcnow()
     acct.last_diagnostic_json = _json.dumps(report)[:20000]

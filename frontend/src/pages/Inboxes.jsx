@@ -1201,8 +1201,27 @@ export default function Inboxes() {
     }
   };
 
-  /** Apply the mode the diagnostic proved works, save it, and re-test. */
-  const applySuggestedMode = async (mode) => {
+  // The edit-panel Diagnose probes the SAVED account, so tell the user when
+  // what they see on screen is not what will be tested.
+  const smtpFormDirty = (() => {
+    const m = editingSmtp?._meta;
+    if (!m) return false;
+    const s = editingSmtp;
+    return (
+      (s.smtp_host || '') !== (m.smtp_host || '')
+      || +s.smtp_port !== +m.smtp_port
+      || (s.smtp_username || '') !== (m.smtp_username || '')
+      || !!s.smtp_use_tls !== !!m.smtp_use_tls
+      || !!s.smtp_use_ssl !== !!m.smtp_use_ssl
+      || (s.imap_host || '') !== (m.imap_host || '')
+      || +s.imap_port !== +m.imap_port
+      || (s.imap_username || '') !== (m.imap_username || '')
+      || !!s.imap_use_ssl !== !!m.imap_use_ssl
+      || !!(s.smtp_password || s.imap_password)
+    );
+  })();
+
+  /** Apply the mode the diagnostic proved works, save it, and re-test. */  const applySuggestedMode = async (mode) => {
     if (!editingSmtp || !editing) return;
     const next = {
       ...editingSmtp,
@@ -1773,6 +1792,11 @@ export default function Inboxes() {
                                       </p>
                                     )}
                                   </div>
+                                )}
+                                {smtpFormDirty && (
+                                  <p className="mt-1 text-[11px] text-amber-700">
+                                    Unsaved changes — Diagnose tests the saved settings. Click Save first to test these.
+                                  </p>
                                 )}
                               </div>
                               {smtpTestMsg && <div className={`text-sm ${smtpTestMsg.type === 'error' ? 'text-red-600' : 'text-green-600'}`}>{smtpTestMsg.text}</div>}
