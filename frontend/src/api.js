@@ -60,6 +60,28 @@ async function _refreshAccessToken() {
   return _refreshPromise;
 }
 
+async function _errorFromResponse(res) {
+  const text = await res.text();
+  let detail = text || res.statusText;
+  let retryAfter = null;
+  try {
+    const body = JSON.parse(text);
+    if (typeof body?.detail === 'string') {
+      detail = body.detail;
+    } else if (body?.detail && typeof body.detail === 'object') {
+      // FastAPI cooldown shape: {error, message, retry_after}
+      detail = body.detail.message || detail;
+      retryAfter = body.detail.retry_after ?? null;
+    }
+  } catch {
+    /* not JSON — keep the raw text */
+  }
+  const err = new Error(detail);
+  err.status = res.status;
+  if (retryAfter != null) err.retryAfter = retryAfter;
+  return err;
+}
+
 async function request(path, options = {}) {
   const method = (options.method || 'GET').toUpperCase();
   const headers = { ..._authHeaders(), ...options.headers };
@@ -80,10 +102,7 @@ async function request(path, options = {}) {
         : { ...options, headers: retryHeaders };
       const retryRes = await fetch(API_ROOT + path, retryOptions);
       if (!retryRes.ok) {
-        const text = await retryRes.text();
-        const err = new Error(text || retryRes.statusText);
-        err.status = retryRes.status;
-        throw err;
+        throw await _errorFromResponse(retryRes);
       }
       const retryData = await retryRes.json();
       scheduleReloadIfRestoreComplete(retryRes);
@@ -97,10 +116,7 @@ async function request(path, options = {}) {
     }
   }
   if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(text || res.statusText);
-    err.status = res.status;
-    throw err;
+    throw await _errorFromResponse(res);
   }
   const data = await res.json();
   scheduleReloadIfRestoreComplete(res);
@@ -121,10 +137,7 @@ async function downloadRequest(path) {
         cache: 'no-store',
       });
       if (!res.ok) {
-        const text = await res.text();
-        const err = new Error(text || res.statusText);
-        err.status = res.status;
-        throw err;
+        throw await _errorFromResponse(res);
       }
       return res;
     } catch (e) {
@@ -134,10 +147,7 @@ async function downloadRequest(path) {
     }
   }
   if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(text || res.statusText);
-    err.status = res.status;
-    throw err;
+    throw await _errorFromResponse(res);
   }
   return res;
 }
@@ -162,10 +172,7 @@ async function downloadPostRequest(path, data) {
         cache: 'no-store',
       });
       if (!res.ok) {
-        const text = await res.text();
-        const err = new Error(text || res.statusText);
-        err.status = res.status;
-        throw err;
+        throw await _errorFromResponse(res);
       }
       return res;
     } catch (e) {
@@ -175,10 +182,7 @@ async function downloadPostRequest(path, data) {
     }
   }
   if (!res.ok) {
-    const text = await res.text();
-    const err = new Error(text || res.statusText);
-    err.status = res.status;
-    throw err;
+    throw await _errorFromResponse(res);
   }
   return res;
 }
@@ -205,10 +209,7 @@ export const api = {
           method: 'POST', body: form, headers: { Authorization: `Bearer ${newToken}` },
         });
         if (!retryRes.ok) {
-          const text = await retryRes.text();
-          const err = new Error(text || retryRes.statusText);
-          err.status = retryRes.status;
-          throw err;
+          throw await _errorFromResponse(retryRes);
         }
         return retryRes.json();
       } catch {
@@ -217,10 +218,7 @@ export const api = {
       }
     }
     if (!res.ok) {
-      const text = await res.text();
-      const err = new Error(text || res.statusText);
-      err.status = res.status;
-      throw err;
+      throw await _errorFromResponse(res);
     }
     return res.json();
   },
@@ -243,10 +241,7 @@ export const api = {
           headers: { Authorization: `Bearer ${newToken}` },
         });
         if (!retryRes.ok) {
-          const text = await retryRes.text();
-          const err = new Error(text || retryRes.statusText);
-          err.status = retryRes.status;
-          throw err;
+          throw await _errorFromResponse(retryRes);
         }
         return retryRes.json();
       } catch {
@@ -255,10 +250,7 @@ export const api = {
       }
     }
     if (!res.ok) {
-      const text = await res.text();
-      const err = new Error(text || res.statusText);
-      err.status = res.status;
-      throw err;
+      throw await _errorFromResponse(res);
     }
     return res.json();
   },

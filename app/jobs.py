@@ -116,9 +116,11 @@ async def _alert_repeated_send_failure(session: AsyncSession, inbox: Inbox) -> N
     )
 
     streak = smtp_failure_streak(inbox.id)
-    if streak != SMTP_FAILURE_NOTIFY_THRESHOLD:
-        # Only alert exactly at the threshold — one alert per failure run, not
-        # one per send attempt (which would flood the notification centre).
+    if streak < SMTP_FAILURE_NOTIFY_THRESHOLD:
+        # Alert once per failure run (when the streak first reaches the
+        # threshold), not on every subsequent attempt — but *do* fire when the
+        # streak is already past the threshold, otherwise a run that includes
+        # permanent failures as well as transient ones never alerts at all.
         return
     reset_smtp_failure_streak(inbox.id)
     await fire_webhook_event(
@@ -129,6 +131,7 @@ async def _alert_repeated_send_failure(session: AsyncSession, inbox: Inbox) -> N
             "inbox_email": inbox.email,
             "provider": inbox.provider or "gmail",
             "consecutive_failures": streak,
+            "last_send_error": inbox.last_send_error or "unknown error",
             "timestamp": time_provider.utcnow().isoformat() + "Z",
         },
     )

@@ -107,6 +107,13 @@ def sanitize_connection_error(msg: str) -> str:
     low = m.lower()
     if "authentication" in low or "credentials" in low or low.startswith("535"):
         return "Authentication failed — check username/password"
+    # Relay policy (MAIL FROM / RCPT TO rejected) must be checked *before* the
+    # generic "refused" rule, or "sender refused: 550" becomes the misleading
+    # "Connection refused" and the real diagnosis is lost.
+    if "sender refused" in low or "sender rejected" in low:
+        return "Relay rejected the sender address (check MAIL FROM / relay policy)"
+    if "recipient refused" in low or "recipient rejected" in low:
+        return "Relay rejected the recipient address"
     if "timed out" in low or "timeout" in low:
         return "Connection timed out"
     if "refused" in low:
@@ -134,27 +141,6 @@ def sanitize_connection_error(msg: str) -> str:
 # streak, which is acceptable for transient-failure alerting.
 _smtp_consecutive_failures: dict[int, int] = {}
 SMTP_FAILURE_NOTIFY_THRESHOLD = 3
-
-# Error classifications we treat as "transient" for retry/alerting purposes.
-TRANSIENT_ERROR_TYPES = {"transient", "connection", "timeout", "tls"}
-
-
-def _classify_send_error(exc_or_msg: object) -> str:
-    """Classify an SMTP send failure into a stable category string."""
-    msg = str(exc_or_msg or "")
-    low = msg.lower()
-    if "timed out" in low or "timeout" in low:
-        return "timeout"
-    if "refused" in low:
-        return "connection"
-    if "certificate" in low or "ssl" in low or "tls" in low or "starttls" in low:
-        return "tls"
-    if "authentication" in low or "535" in low or "credentials" in low:
-        return "auth"
-    if "getaddrinfo" in low or "name or service not known" in low:
-        return "dns"
-    return "transient"
-
 
 def record_smtp_send_error(account, error: str) -> int:
     """Persist ``last_send_error`` / ``last_send_at`` and return the streak length.

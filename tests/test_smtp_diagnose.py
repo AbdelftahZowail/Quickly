@@ -741,7 +741,7 @@ async def test_diagnose_endpoint_persists_and_returns_report(session, monkeypatc
     assert acct.last_diagnostic_json
     assert acct.last_test_ok is True
     # Never expose the password in the serialised account.
-    assert "p" != acct.smtp_password or True  # value not returned below
+    assert acct.smtp_password  # stored (encrypted at rest)
     body = smtp_router._to_response(acct)
     assert "smtp_password" not in body
     assert body["last_diagnostic_at"] is not None
@@ -754,6 +754,11 @@ async def test_diagnose_unsaved_probes_typed_credentials(monkeypatch):
     No inbox row exists yet; nothing must be persisted and no test mail sent.
     """
     from app.routers import smtp as smtp_router
+    from app.settings_manager import settings as app_settings
+
+    # The probe target is a loopback fake relay; bypass the SSRF guard the way
+    # the rest of the test suite does.
+    monkeypatch.setattr(app_settings, "test_mode", True)
 
     server = _FakeSmtpServer("ok").start()
     captured: dict = {}
@@ -805,6 +810,86 @@ async def test_diagnose_unsaved_applies_port_inference(monkeypatch):
     )
     assert captured["use_ssl"] is True
     assert captured["use_tls"] is False
+
+
+@pytest.mark.asyncio
+async def test_diagnose_unsaved_rejects_private_host(monkeypatch):
+    """The stateless endpoint must not become an internal port-scanner."""
+    from fastapi import HTTPException
+
+    from app.routers import smtp as smtp_router
+    from app.settings_manager import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "test_mode", False)
+    monkeypatch.delenv("SMTP_ALLOW_PRIVATE_HOSTS", raising=False)
+    with pytest.raises(HTTPException) as exc:
+        await smtp_router.diagnose_unsaved(
+            smtp_router.SmtpAccountUpsert(
+                smtp_host="169.254.169.254", smtp_port=587,
+                smtp_username="u@example.com", smtp_password="p",
+            )
+        )
+    assert exc.value.status_code == 400
+    assert "private" in str(exc.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_diagnose_unsaved_cooldown(monkeypatch):
+    from fastapi import HTTPException
+
+    from app.routers import smtp as smtp_router
+
+    monkeypatch.setattr(
+        "app.smtp_diagnose.diagnose",
+        lambda **k: {"ok": True, "stages": []},
+    )
+    smtp_router._last_diagnose_at.clear()
+    payload = smtp_router.SmtpAccountUpsert(
+        smtp_host="mail.example.com", smtp_port=587,
+        smtp_username="u@example.com", smtp_password="p",
+    )
+    await smtp_router.diagnose_unsaved(payload)
+    with pytest.raises(HTTPException) as exc:
+        await smtp_router.diagnose_unsaved(payload)
+    assert exc.value.status_code == 429
+    smtp_router._last_diagnose_at.clear()
+
+
+def test_auth_login_transcript_omits_base64_credentials(monkeypatch):
+    """AUTH LOGIN sends bare base64 — it must not survive into the report."""
+    import base64 as _b64
+
+    from app.smtp_diagnose import StageResult, _SmtpConn, _stage_auth
+
+    class _FakeSock:
+        def __init__(self):
+            self.sent = []
+            self._replies = [
+                b"334 VXNlcm5hbWU6\r\n",
+                b"334 UGFzc3dvcmQ6\r\n",
+                b"235 2.7.0 Authentication successful\r\n",
+            ]
+
+        def sendall(self, data):
+            self.sent.append(data)
+
+        def makefile(self, *a, **k):
+            import io
+
+            return io.BytesIO(b"".join(self._replies))
+
+        def close(self):
+            pass
+
+    # Server advertises only LOGIN.
+    conn = _SmtpConn(_FakeSock(), StageResult(name="convo", ok=True))
+    conn.stage.raw = ["C: EHLO x", "S: 250-AUTH LOGIN"]
+    stage = StageResult(name="auth", ok=False)
+    _stage_auth(conn, "user@example.com", "hunter2", stage)
+    blob = "\n".join(stage.raw)
+    assert "hunter2" not in blob
+    assert _b64.b64encode(b"hunter2").decode() not in blob
+    assert _b64.b64encode(b"user@example.com").decode() not in blob
 
 
 @pytest.mark.asyncio

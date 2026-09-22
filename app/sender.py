@@ -1160,7 +1160,9 @@ def _send_via_smtp(
     except smtplib.SMTPRecipientsRefused as e:
         err = str(e)[:300]
         _log_smtp_call(to_email, from_email, subject, thread_id=thread_key, status="ERROR", error=err)
-        _record_smtp_failure(smtp_account, f"SMTP recipient refused: {err}")
+        # Recipient-level rejection — a bad lead address, not a broken inbox.
+        # Do NOT record it as an inbox send failure (that would flip the inbox
+        # health to "failing" and can trip the repeated-failure alert).
         return SendFailure(error_type="invalid_recipient", message=f"SMTP recipient refused: {err}")
     except smtplib.SMTPSenderRefused as e:
         err = str(e)[:300]
@@ -1177,7 +1179,8 @@ def _send_via_smtp(
         # 5xx at DATA time is a permanent rejection (content/policy); 4xx is transient.
         code = getattr(e, "smtp_code", 0) or 0
         if 500 <= code < 600:
-            _record_smtp_failure(smtp_account, f"SMTP rejected the message ({code}): {err}")
+            # Per-message content/policy rejection — not proof the inbox itself
+            # is broken, so don't mark the whole inbox failing.
             return SendFailure(error_type="bounce", message=f"SMTP rejected the message ({code}): {err}")
         _record_smtp_failure(smtp_account, f"SMTP DATA error ({code}): {err}")
         return None

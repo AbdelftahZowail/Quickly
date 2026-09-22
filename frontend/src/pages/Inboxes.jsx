@@ -1220,8 +1220,22 @@ export default function Inboxes() {
         imap_port: +payload.imap_port,
       });
       setEditingSmtp((prev) => ({ ...prev, smtp_password: '', imap_password: '', _meta: saved }));
-      setSmtpTestMsg({ type: 'success', text: `Switched to ${mode === 'ssl' ? 'SSL (465)' : 'STARTTLS (587)'} — running diagnosis…` });
-      await runSmtpDiagnose();
+      // Re-diagnose right away. The first probe set a cooldown a few seconds
+      // ago, so a 429 here is expected — retry once after the window instead
+      // of surfacing a raw JSON error.
+      setSmtpTesting(true);
+      try {
+        await runSmtpDiagnose();
+      } catch (err) {
+        if (err?.retryAfter || err?.status === 429) {
+          await new Promise((r) => setTimeout(r, (err.retryAfter || 21) * 1000));
+          await runSmtpDiagnose();
+        } else {
+          throw err;
+        }
+      } finally {
+        setSmtpTesting(false);
+      }
     } catch (err) {
       setSmtpTestMsg({ type: 'error', text: err.message });
     }
@@ -1261,17 +1275,15 @@ export default function Inboxes() {
     setSmtpTestMsg(null);
     try {
       const report = await api.post('/smtp/diagnose', {
-        host: smtpForm.smtp_host,
-        port: +smtpForm.smtp_port,
-        use_tls: !!smtpForm.smtp_use_tls,
-        use_ssl: !!smtpForm.smtp_use_ssl,
-        username: smtpForm.smtp_username,
-        password: smtpForm.smtp_password,
-        from_email: form.email,
-        to_email: form.email,
-        imap_host: smtpForm.imap_host.trim() || null,
+        smtp_host: smtpForm.smtp_host,
+        smtp_port: +smtpForm.smtp_port,
+        smtp_username: smtpForm.smtp_username,
+        smtp_password: smtpForm.smtp_password,
+        smtp_use_tls: !!smtpForm.smtp_use_tls,
+        smtp_use_ssl: !!smtpForm.smtp_use_ssl,
+        imap_host: smtpForm.imap_host.trim(),
         imap_port: +smtpForm.imap_port,
-        imap_username: smtpForm.imap_username.trim() || null,
+        imap_username: smtpForm.imap_username.trim(),
         imap_password: smtpForm.imap_password,
         imap_use_ssl: !!smtpForm.imap_use_ssl,
       });
@@ -2268,7 +2280,8 @@ export default function Inboxes() {
                             setAddSmtpSendTestBusy(true);
                           setAddSmtpSendTestMsg(null);
                           submitSmtp({ ...form, tracking_domain: addTrackingMode === 'dns' ? form.tracking_domain.trim() || null : null }, to)
-                            .catch((e) => setAddSmtpSendTestMsg({ type: 'error', text: e.message }));
+                            .catch((e) => setAddSmtpSendTestMsg({ type: 'error', text: e.message }))
+                            .finally(() => setAddSmtpSendTestBusy(false));
                         }}
                       >
                         {addSmtpSendTestBusy ? 'Sending…' : 'Send'}

@@ -28,7 +28,7 @@ import ssl
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 log = logging.getLogger("quickly.smtp_diagnose")
 
@@ -65,16 +65,29 @@ STAGE_NAMES = ("dns", "tcp", "tls", "ehlo", "auth", "mail_from", "rcpt_to", "dat
 DEFAULT_STAGE_TIMEOUT = 8.0
 DEFAULT_TOTAL_TIMEOUT = 30.0
 
-# A probe sender that must never be a real address: if the relay accepts MAIL
-# FROM with it, the relay does not enforce sender policy at all.
-_PROBE_MESSAGE_ID_DOMAIN = "diagnose.quickly.invalid"
-
 # Password-shaped tokens. The probe never logs the password by construction,
 # but ``raw`` can echo server banners and error strings; scrub defensively.
 _CRED_PATTERNS = (
     re.compile(r"(AUTH\s+(?:PLAIN|LOGIN)\s+)\S+", re.IGNORECASE),
     re.compile(r"([Pp]assword[=:\s]+)\S+"),
 )
+
+# A bare base64 blob (e.g. the username/password lines AUTH LOGIN sends).
+# Base64 has no spaces, so an all-base64 long token is a credential.
+_B64_LINE = re.compile(r"^[A-Za-z0-9+/=]{8,}$")
+
+
+def _is_credential_line(line: str) -> bool:
+    """True for a client line that carries credential material.
+
+    Catches ``AUTH ...`` commands (already masked by :func:`redact`) and the
+    bare base64 username/password lines AUTH LOGIN sends, with or without the
+    ``C: `` transcript prefix.
+    """
+    body = line.strip()
+    if body.startswith("C:"):
+        body = body[2:].strip()
+    return bool(_B64_LINE.match(body))
 
 
 def is_cloudflare_ip(ip: str) -> bool:
@@ -317,25 +330,17 @@ def _stage_tcp(host: str, port: int, timeout: float, stage: StageResult) -> tupl
 def _stage_tls_implicit(
     sock: socket.socket, host: str, mode: str, port: int, stage: StageResult
 ) -> tuple[socket.socket | None, list[str]]:
-    """Wrap an already-connected socket in implicit TLS."""
+    """Wrap an already-connected socket in implicit TLS (port 465)."""
     ctx = ssl.create_default_context()
     try:
         tls = ctx.wrap_socket(sock, server_hostname=host)
     except ssl.SSLError as e:
         stage.ok = False
         stage.detail = f"Implicit TLS handshake failed: {e}"
-        hints = []
-        if mode != "ssl":
-            hints.append(
-                f"TLS handshake failed on port {port} in STARTTLS mode. Port 465 is "
-                "implicit SSL — switch the inbox to SSL (465)."
-            )
-        else:
-            hints.append(
-                f"Implicit TLS handshake failed: {e}. Check the port (465 is SSL, 587 "
-                "is STARTTLS) and that the certificate is valid."
-            )
-        return None, hints
+        return None, [
+            f"Implicit TLS handshake failed: {e}. Check the port (465 is SSL, 587 "
+            "is STARTTLS) and that the certificate is valid."
+        ]
     except OSError as e:
         stage.ok = False
         stage.detail = f"TLS socket error: {e}"
@@ -409,24 +414,37 @@ def _stage_ehlo(conn: _SmtpConn, stage: StageResult) -> list[str]:
 
 
 def _stage_auth(conn: _SmtpConn, username: str, password: str, stage: StageResult) -> list[str]:
-    """Authenticate with PLAIN (falling back to LOGIN when not advertised)."""
-    caps = " ".join(stage.raw).upper()
-    mechanisms = "PLAIN LOGIN"
+    """Authenticate with PLAIN (falling back to LOGIN when not advertised).
+
+    The AUTH mechanisms come from the EHLO capabilities on this connection
+    (``conn.stage``), not from ``stage`` — the auth stage's own transcript is
+    still empty when this runs.
+    """
+    caps = " ".join(conn.stage.raw).upper()
+    mechanisms = ""
     m = re.search(r"AUTH[ =]([A-Z0-9 _-]+)", caps)
     if m:
         mechanisms = m.group(1).strip()
+    if not mechanisms:
+        mechanisms = "PLAIN LOGIN"
     if "PLAIN" in mechanisms:
         token = base64.b64encode(f"\0{username}\0{password}".encode()).decode()
         resp = conn.cmd(f"AUTH PLAIN {token}", redacted=True)
     elif "LOGIN" in mechanisms:
-        conn.cmd("AUTH LOGIN", redacted=True)
+        conn.cmd("AUTH LOGIN")
         conn.cmd(base64.b64encode(username.encode()).decode(), redacted=True)
         resp = conn.cmd(base64.b64encode(password.encode()).decode(), redacted=True)
     else:
         stage.ok = False
         stage.detail = f"No supported AUTH mechanism (advertised: {mechanisms or 'none'})"
         return ["The relay advertises no AUTH PLAIN/LOGIN mechanism — it may require a different TLS port or not allow relaying."]
-    stage.raw = list(conn.stage.raw[-2 * len(resp) - 1:])
+    # Keep only the AUTH command line + its reply; never the bare base64
+    # credential lines the LOGIN flow sends (they are not password-shaped and
+    # would survive ``redact``).
+    stage.raw = [
+        ln for ln in conn.stage.raw[-2 * len(resp) - 1:]
+        if not _is_credential_line(ln)
+    ]
     code = _code(resp)
     if code == 235:
         stage.ok = True
@@ -448,7 +466,9 @@ def _stage_send_probe(
     hints: list[str] = []
 
     mf = stages["mail_from"]
+    before = len(conn.stage.raw)
     resp = conn.cmd(f"MAIL FROM:<{from_email}>")
+    mf.raw = list(conn.stage.raw[before:])
     code = _code(resp)
     if code != 250:
         mf.ok = False
@@ -475,7 +495,9 @@ def _stage_send_probe(
         stages["data"].ok = True
         stages["data"].detail = "Skipped — no recipient supplied for the probe."
         return hints
+    before_rcpt = len(conn.stage.raw)
     resp = conn.cmd(f"RCPT TO:<{to_email}>")
+    rc.raw = list(conn.stage.raw[before_rcpt:])
     code = _code(resp)
     if code != 250 and code != 251:
         rc.ok = False
@@ -490,8 +512,10 @@ def _stage_send_probe(
     rc.detail = f"Recipient accepted ({to_email})"
 
     data = stages["data"]
+    before_data = len(conn.stage.raw)
     resp = conn.cmd("DATA")
     if _code(resp) != 354:
+        data.raw = list(conn.stage.raw[before_data:])
         data.ok = False
         data.detail = f"DATA refused: {conn.last}"
         hints.append(f"The relay refused DATA: {conn.last}")
@@ -510,6 +534,7 @@ def _stage_send_probe(
     conn.sock.sendall(body.encode())
     resp = conn.read_response()
     code = _code(resp)
+    data.raw = list(conn.stage.raw[before_data:])
     if code == 250:
         data.ok = True
         data.detail = "Message accepted by the relay"
@@ -682,16 +707,24 @@ def _probe_once(
                 report.verdict = f"Connected, but the relay rejected EHLO on {host}:{port}."
                 report.hints = all_hints
                 return report
-            conn, tls_hints = _stage_tls_starttls(conn, host, mode, port, stages["tls"])
-            all_hints.extend(tls_hints)
-            if conn is None:
-                report.verdict = f"STARTTLS could not be established on {host}:{port}."
-                report.hints = all_hints
-                return report
-            # Re-EHLO over the encrypted channel (required after STARTTLS).
-            conn.cmd("EHLO quickly-diagnose.local")
-            convo.ok = True
-            convo.detail = "SMTP session completed"
+            if mode != "starttls":
+                # Explicit plain mode (CLI --mode plain): no TLS upgrade. The
+                # tls stage is marked skipped so it cannot fail the report.
+                stages["tls"].ok = True
+                stages["tls"].detail = "Skipped — plain mode selected."
+                convo.ok = True
+                convo.detail = "SMTP session completed (plaintext)"
+            else:
+                conn, tls_hints = _stage_tls_starttls(conn, host, mode, port, stages["tls"])
+                all_hints.extend(tls_hints)
+                if conn is None:
+                    report.verdict = f"STARTTLS could not be established on {host}:{port}."
+                    report.hints = all_hints
+                    return report
+                # Re-EHLO over the encrypted channel (required after STARTTLS).
+                conn.cmd("EHLO quickly-diagnose.local")
+                convo.ok = True
+                convo.detail = "SMTP session completed"
 
         # ── AUTH ───────────────────────────────────────────────────────────
         if username:

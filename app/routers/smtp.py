@@ -243,12 +243,35 @@ async def diagnose_unsaved(
     keeps the request worker safe even if the thread stalls.
     """
     from app.smtp_diagnose import diagnose
+    from app.smtp_utils import _assert_host_not_private
+
+    # Same SSRF guard the save path applies: this endpoint opens sockets to an
+    # operator-supplied host, so it must not become an internal port-scanner.
+    for candidate in (data.smtp_host, data.imap_host):
+        if candidate:
+            blocked = _assert_host_not_private(candidate)
+            if blocked:
+                raise HTTPException(400, blocked)
+
+    # Cooldown keyed by host so the endpoint cannot be hammered/port-scanned.
+    key = (data.smtp_host or "").strip().lower()
+    remaining = _cooldown_remaining(_last_diagnose_at, key, DIAGNOSE_COOLDOWN_SECONDS)
+    if remaining > 0:
+        raise HTTPException(
+            429,
+            {
+                "error": "cooldown",
+                "message": f"Please wait {int(remaining) + 1}s before diagnosing again.",
+                "retry_after": int(remaining) + 1,
+            },
+        )
 
     # Same inference the save path applies, so the probe sees the effective mode
     # (e.g. 465 forces SSL even if the operator ticked STARTTLS).
     use_tls, use_ssl = apply_port_tls_inference(
         int(data.smtp_port or 587), bool(data.smtp_use_tls), bool(data.smtp_use_ssl)
     )
+    _last_diagnose_at[key] = __import__("time").monotonic()
 
     report = await asyncio.wait_for(
         asyncio.to_thread(
@@ -324,6 +347,10 @@ async def diagnose_smtp_account(
     acct.last_test_ok = bool(report.get("ok"))
     if report.get("ok"):
         acct.last_test_error = ""
+        # A fully-green probe means the transport/credentials are healthy, so
+        # clear the stale send error too — otherwise the inbox stays red until a
+        # real campaign send happens to succeed.
+        acct.last_send_error = ""
     else:
         acct.last_test_error = sanitize_connection_error(report.get("verdict") or "")[:2000]
     if report.get("ok"):
