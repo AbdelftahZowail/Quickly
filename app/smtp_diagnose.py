@@ -139,6 +139,7 @@ class DiagnosticReport:
             "verdict": self.verdict,
             "hints": list(self.hints),
             "suggested_mode": self.suggested_mode,
+            "alternate": None,
             "stages": [s.to_dict() for s in self.stages],
             "duration_ms": self.duration_ms,
         }
@@ -798,6 +799,7 @@ def diagnose(
     )
 
     suggested_mode: str | None = None
+    alternate_report: dict[str, Any] | None = None
     if not primary.ok and not deadline.exhausted:
         other = "starttls" if mode == "ssl" else "ssl"
         # Only worth retrying when the failure could plausibly be the TLS mode
@@ -812,6 +814,7 @@ def diagnose(
             )
             if alt.ok:
                 suggested_mode = other
+                alternate_report = alt.to_dict()
                 notes.append(
                     f"These settings work with {'implicit SSL' if other == 'ssl' else 'STARTTLS'} "
                     f"on port {port}. Switch the inbox to that mode."
@@ -824,6 +827,7 @@ def diagnose(
     report = primary.to_dict()
     report["ok"] = primary.ok
     report["suggested_mode"] = suggested_mode
+    report["alternate"] = alternate_report
     report["duration_ms"] = int((time.monotonic() - t0) * 1000)
     if notes:
         report["hints"] = notes + report["hints"]
