@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.models import EmailLog, GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox, LeadReply
+from app.models import AppSetting, EmailLog, GmailAccount, GmailMessage, GmailSyncState, GmailThread, Inbox, LeadReply
 from app.routers import unibox as unibox_router
 from app.routers.unibox import UniboxLoadMoreRequest, UniboxSendRequest
 from app.sender import SendResult
@@ -244,6 +244,8 @@ async def test_gmail_push_does_not_advance_history_checkpoint(session, monkeypat
             last_history_id="100",
         )
     )
+    # The push endpoint is public and authenticates with this shared token.
+    session.add(AppSetting(key="gmail_push_webhook_token", value="push-secret"))
     await session.flush()
 
     called: dict[str, int | str] = {}
@@ -258,6 +260,8 @@ async def test_gmail_push_does_not_advance_history_checkpoint(session, monkeypat
     raw = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii").rstrip("=")
 
     class DummyRequest:
+        query_params = {"token": "push-secret"}
+
         async def json(self):
             return {"message": {"data": raw}}
 
@@ -270,6 +274,33 @@ async def test_gmail_push_does_not_advance_history_checkpoint(session, monkeypat
     state = state_row.scalar_one()
     assert state.latest_history_id == "100"
     assert state.last_history_id == "100"
+
+
+@pytest.mark.asyncio
+async def test_gmail_push_requires_valid_token(session):
+    """Google Pub/Sub cannot carry a session cookie; the endpoint must reject
+    missing/incorrect shared tokens and accept the configured one."""
+    session.add(AppSetting(key="gmail_push_webhook_token", value="right-token"))
+    await session.flush()
+
+    payload = {"emailAddress": "push-owner@example.com", "historyId": "200"}
+    raw = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii").rstrip("=")
+
+    class DummyRequest:
+        def __init__(self, token):
+            self.query_params = {} if token is None else {"token": token}
+
+        async def json(self):
+            return {"message": {"data": raw}}
+
+    for bad_token in (None, "", "wrong-token"):
+        with pytest.raises(HTTPException) as exc:
+            await unibox_router.gmail_push_webhook(request=DummyRequest(bad_token), db=session)
+        assert exc.value.status_code == 401
+
+    # Correct token: the unknown inbox is ignored, but the request is accepted.
+    res = await unibox_router.gmail_push_webhook(request=DummyRequest("right-token"), db=session)
+    assert res["ok"] is True
 
 
 @pytest.mark.asyncio

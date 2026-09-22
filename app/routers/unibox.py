@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import secrets
 from datetime import datetime
 from typing import Any
 
@@ -41,6 +42,12 @@ from app.unibox import (
 log = logging.getLogger("quickly.unibox.router")
 
 router = APIRouter(prefix="/api/unibox", tags=["unibox"])
+
+# Public router: endpoints that are called by external services (Google
+# Pub/Sub) and therefore cannot carry a Quickly session cookie.  They are
+# included without the global auth dependency and validate their own
+# shared secret — see ``gmail_push_webhook`` below.
+public_router = APIRouter(prefix="/api/unibox", tags=["unibox"])
 
 
 class UniboxSendRequest(BaseModel):
@@ -299,7 +306,8 @@ async def send_unibox_email(data: UniboxSendRequest, db: AsyncSession = Depends(
                 if reply_to and not references:
                     references = reply_to
 
-    send_result = send_email(
+    send_result = await asyncio.to_thread(
+        send_email,
         to_email=data.to_email,
         subject=data.subject,
         body=data.body,
@@ -450,11 +458,40 @@ async def unibox_events_sse(request: Request):
     return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
 
-@router.post("/gmail/push")
+@public_router.post("/gmail/push")
 async def gmail_push_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Receive Gmail Pub/Sub push notifications (PUBLIC — called by Google).
+
+    Google cannot present a Quickly session cookie, so this route lives on
+    ``public_router`` and authenticates the caller with the shared secret
+    configured in Settings → Gmail sync (``app_setting.gmail_push_webhook_token``),
+    passed as ``?token=...`` in the Pub/Sub push endpoint URL.
+
+    Validation is intentionally fail-closed: if no token is configured, or the
+    provided token does not match, the notification is rejected with 401.
+    """
+    from app.app_settings import GMAIL_PUSH_WEBHOOK_TOKEN_KEY, get_setting
+
+    expected_token = (await get_setting(db, GMAIL_PUSH_WEBHOOK_TOKEN_KEY) or "").strip()
+    provided_token = (request.query_params.get("token") or "").strip()
+    # Compare as bytes: compare_digest raises TypeError on non-ASCII str input,
+    # which a malicious query parameter could otherwise turn into a 500.
+    if (
+        not expected_token
+        or not provided_token
+        or not secrets.compare_digest(provided_token.encode(), expected_token.encode())
+    ):
+        # Missing token is usually a misconfigured Pub/Sub URL — keep it quiet;
+        # an incorrect token is worth a warning.
+        if provided_token:
+            log.warning("gmail push webhook rejected: invalid token")
+        else:
+            log.debug("gmail push webhook rejected: missing token")
+        raise HTTPException(status_code=401, detail="Invalid push token")
+
     try:
         envelope = await request.json()
     except Exception as exc:

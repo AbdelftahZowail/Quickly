@@ -235,6 +235,9 @@ app.include_router(schedule_router.router, dependencies=_auth_deps)
 app.include_router(settings_router.router, dependencies=_auth_deps)
 app.include_router(backup_router.router, dependencies=_auth_deps)
 app.include_router(unibox_router.router, dependencies=_auth_deps)
+# Gmail Pub/Sub push endpoint is called by Google (no session cookie); it
+# validates its own shared token — see gmail_push_webhook.
+app.include_router(unibox_router.public_router)
 app.include_router(smtp_router.router, dependencies=_auth_deps)
 app.include_router(tracking_router.router)
 app.include_router(beacon_ingest_router.router)
