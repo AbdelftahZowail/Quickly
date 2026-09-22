@@ -870,6 +870,8 @@ export default function Inboxes() {
 
   const handleChange = (e) => {
     const { name, value, type } = e.target;
+    // A fill-in-the-blanks error is stale the moment the operator types.
+    if (message?.type === 'error') setMessage(null);
     setForm(f => ({ ...f, [name]: type === 'number' ? +value : value }));
   };
 
@@ -1245,16 +1247,32 @@ export default function Inboxes() {
   // ── Add-panel diagnostics ──────────────────────────────────────────────
   // The inbox does not exist yet, so these run the probe against the typed
   // credentials only (nothing is persisted, and a test send is not possible).
-  const addSmtpCredsReady = () => {
-    const f = smtpForm;
-    return !!(form.email.trim() && f.smtp_host.trim() && f.smtp_username.trim() && f.smtp_password);
+  // Returns the labels of whatever is still missing, so the button can spell
+  // out exactly what to fill in instead of silently doing nothing.
+  const addSmtpMissingFields = () => {
+    const missing = [];
+    if (!form.email.trim()) missing.push('the From email address');
+    if (!smtpForm.smtp_host.trim()) missing.push('the SMTP host');
+    if (!smtpForm.smtp_username.trim()) missing.push('the SMTP username');
+    if (!smtpForm.smtp_password) missing.push('the SMTP password');
+    if (smtpForm.imap_host.trim() && !smtpForm.imap_password) {
+      missing.push('the IMAP password (IMAP host is set)');
+    }
+    return missing;
   };
 
   const runAddSmtpDiagnose = async () => {
-    if (!addSmtpCredsReady()) {
-      setMessage({ type: 'error', text: 'Enter the From address, SMTP host, username and password before diagnosing.' });
+    const missing = addSmtpMissingFields();
+    if (missing.length > 0) {
+      // Keep the message on screen next to the form (the modal is a plain form;
+      // ``message`` renders at the top) and disable the button while it shows.
+      setMessage({
+        type: 'error',
+        text: `Enter ${missing.join(', ')} before running Diagnose.`,
+      });
       return;
     }
+    setMessage(null);
     setAddSmtpDiagnosing(true);
     setAddSmtpDiagnose(null);
     setSmtpTestMsg(null);
@@ -1952,12 +1970,6 @@ export default function Inboxes() {
                       </div>
                     )}
 
-                    {selectedInbox.provider === 'smtp' && (
-                      <Button variant="outline" size="sm" className="w-full" onClick={() => openEdit(selectedInbox)}>
-                        Edit SMTP &amp; run diagnostics
-                      </Button>
-                    )}
-
                     {/* Sent today */}
                     <div>
                       <div className="flex justify-between items-center mb-1.5">
@@ -2150,7 +2162,7 @@ export default function Inboxes() {
                   <div className="grid grid-cols-3 gap-2">
                     <div className="col-span-2">
                       <label className="block text-xs font-medium text-gray-700">Host</label>
-                      <input type="text" value={smtpForm.smtp_host} onChange={e => setSmtpForm(f => ({ ...f, smtp_host: e.target.value }))} placeholder="mail.yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                      <input type="text" value={smtpForm.smtp_host} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_host: e.target.value })); }} placeholder="mail.yourdomain.com" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                     </div>
                     <div>
                       <label className="block text-xs font-medium text-gray-700">Port</label>
@@ -2159,11 +2171,11 @@ export default function Inboxes() {
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700">Username</label>
-                    <input type="text" value={smtpForm.smtp_username} onChange={e => setSmtpForm(f => ({ ...f, smtp_username: e.target.value }))} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    <input type="text" value={smtpForm.smtp_username} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_username: e.target.value })); }} autoComplete="off" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                   </div>
                   <div>
                     <label className="block text-xs font-medium text-gray-700">Password</label>
-                    <input type="password" value={smtpForm.smtp_password} onChange={e => setSmtpForm(f => ({ ...f, smtp_password: e.target.value }))} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    <input type="password" value={smtpForm.smtp_password} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, smtp_password: e.target.value })); }} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                   </div>
                   <div className="flex gap-4 text-sm text-gray-700">
                     <label className="flex items-center gap-1.5 cursor-pointer">
@@ -2178,7 +2190,7 @@ export default function Inboxes() {
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide pt-1">IMAP (inbound replies — optional)</p>
                   <div>
                     <label className="block text-xs font-medium text-gray-700">Host</label>
-                    <input type="text" value={smtpForm.imap_host} onChange={e => setSmtpForm(f => ({ ...f, imap_host: e.target.value }))} placeholder="Leave empty for send-only" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                    <input type="text" value={smtpForm.imap_host} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, imap_host: e.target.value })); }} placeholder="Leave empty for send-only" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                   </div>
                   {smtpForm.imap_host.trim() !== '' && (
                     <>
@@ -2194,7 +2206,7 @@ export default function Inboxes() {
                       </div>
                       <div>
                         <label className="block text-xs font-medium text-gray-700">Password</label>
-                        <input type="password" value={smtpForm.imap_password} onChange={e => setSmtpForm(f => ({ ...f, imap_password: e.target.value }))} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
+                        <input type="password" value={smtpForm.imap_password} onChange={e => { if (message?.type === 'error') setMessage(null); setSmtpForm(f => ({ ...f, imap_password: e.target.value })); }} autoComplete="new-password" className="mt-1 block w-full border-gray-300 rounded-md text-sm" />
                       </div>
                       <label className="flex items-center gap-1.5 cursor-pointer text-sm text-gray-700">
                         <input type="checkbox" checked={!!smtpForm.imap_use_ssl} onChange={e => setSmtpForm(f => ({ ...f, imap_use_ssl: e.target.checked }))} />
@@ -2208,6 +2220,11 @@ export default function Inboxes() {
                       {addSmtpDiagnosing ? 'Diagnosing…' : 'Diagnose'}
                     </Button>
                   </div>
+                  {message?.type === 'error' && addSmtpMissingFields().length > 0 && (
+                    <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2 py-1.5">
+                      Fill in {addSmtpMissingFields().join(', ')} first, then Diagnose.
+                    </p>
+                  )}
                   {addSmtpDiagnose && (
                     <SmtpDiagnosticReport
                       report={addSmtpDiagnose}
