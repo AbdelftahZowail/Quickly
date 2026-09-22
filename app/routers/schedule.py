@@ -15,7 +15,7 @@ from app.models import (
     QueueSlot, CampaignLead, Campaign, Sequence, SequenceVariant,
     Lead, Inbox, EmailLog, EmailOpen, EmailClick, CustomEmailOverride,
 )
-from app.sender import render_body, get_lead_data
+from app.sender import render_body, get_lead_data, RenderContext
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app import time as time_provider
 from app.app_settings import (
@@ -301,8 +301,9 @@ async def _resolve_content(
 
     # ── Step 5: Variable substitution ─────────────────────────────────────
     lead_data = get_lead_data(lead)
-    rendered_subject = render_body(subject_display, lead_data)
-    rendered_body = render_body(seq_body, lead_data) if seq_body else ""
+    render_ctx = RenderContext()  # same {{random: ...}} pick across subject + body
+    rendered_subject = render_body(subject_display, lead_data, context=render_ctx)
+    rendered_body = render_body(seq_body, lead_data, context=render_ctx) if seq_body else ""
 
     return {
         "subject": rendered_subject,
@@ -339,14 +340,20 @@ async def _resolve_sent_content(
     """Resolve the effective body/is_html for a sent email.
 
     The subject is taken from *email_log.subject* (already rendered at send
-    time).  The body is reconstructed from the sequence and the variant that
-    was actually sent (*email_log.variant_id*), with variable substitution.
+    time).  The body is the exact body stored at send time when available
+    (``email_log.body``); for legacy rows without it we fall back to
+    reconstructing from the sequence and the variant that was actually sent
+    (*email_log.variant_id*) with variable substitution.
     """
     resolved = await _resolve_content(
         db, sequence, lead, campaign_lead, campaign, email_log.variant_id
     )
     # Override subject with the sent-time rendered value
     resolved["subject"] = email_log.subject or resolved["subject"]
+    # Prefer the body exactly as sent.  Reconstructing it would re-roll any
+    # {{random: ...}} pick, disagreeing with the stored subject.
+    if getattr(email_log, "body", None):
+        resolved["body"] = email_log.body
     return resolved
 
 

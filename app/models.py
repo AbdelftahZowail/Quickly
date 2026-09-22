@@ -373,6 +373,9 @@ class EmailLog(Base):
     format_override = Column(String(64), nullable=True, default=None)  # why format was overridden
     sent_at = Column(DateTime, default=_utcnow)
     subject = Column(String(512), default="")
+    # Exact rendered body as sent (including any {{random}} picks and preheader),
+    # so the Sent view / quoted replies reproduce what the recipient received.
+    body = Column(Text, nullable=True, default=None)
     message_id = Column(String(512), default=None)  # RFC 822 Message-ID for In-Reply-To threading
     thread_id = Column(String(512), default=None)   # Gmail threadId for thread continuity
     opened = Column(Boolean, default=False, nullable=False)

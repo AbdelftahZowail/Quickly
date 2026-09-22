@@ -2116,14 +2116,24 @@ function VariablesGuide() {
     setTimeout(() => setCopiedVar(null), 1500);
   };
 
+  const VARIABLES = [
+    { v: '{{name}}', hint: 'Lead name' },
+    { v: '{{email}}', hint: 'Lead email' },
+    { v: '{{unsubscribe_link}}', hint: 'One-click unsubscribe URL' },
+    {
+      v: '{{random: a | b}}',
+      hint: 'One option is picked at random per email. Options can include variables, e.g. {{random: Hi {{name}} | Hey there}}',
+    },
+  ];
+
   return (
     <p className="mt-1 text-xs text-gray-500 flex flex-wrap items-center gap-1">
       <span>Variables:</span>
-      {['{{name}}','{{email}}','{{unsubscribe_link}}'].map(v => (
+      {VARIABLES.map(({ v, hint }) => (
         <span key={v} className="relative inline-flex items-center">
           <code
             className="px-1 bg-gray-100 rounded cursor-pointer hover:bg-teal-100 transition-colors select-none"
-            title="Click to copy"
+            title={`${hint} · click to copy`}
             onClick={() => copyVar(v)}
           >
             {v}

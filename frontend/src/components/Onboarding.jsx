@@ -65,6 +65,7 @@ const steps = [
       'Create A/B variants to test different subject lines and copy',
       'Choose sending windows (days of week + time range)',
       'Use template variables like {{name}}, {{company}}, {{custom fields}}',
+      'Vary wording automatically with {{random: option A | option B}}',
     ],
     color: 'from-violet-500 to-purple-500',
     tip: 'Keep sequences to 3-4 steps max. Most replies come from the first two emails.',

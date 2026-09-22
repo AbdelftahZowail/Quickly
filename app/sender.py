@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import random
 import re
 import traceback
 import urllib.request
@@ -108,12 +109,176 @@ def _log_gmail_call(
         log.warning("Could not write to gmail log file at %s", _GMAIL_LOG_PATH)
 
 
-def render_body(body: str, lead_data: Dict[str, Any]) -> str:
-    """Replace {{field}} with lead_data[field]. Supports {{name}}, {{email}}, {{company}}, etc."""
-    def repl(match: re.Match) -> str:
-        key = match.group(1).strip()
-        return str(lead_data.get(key, match.group(0)))
-    return re.sub(r"\{\{\s*(\w+)\s*\}\}", repl, body)
+_RANDOM_PREFIX_RE = re.compile(r"^\s*random\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
+_FIELD_NAME_RE = re.compile(r"^\s*(\w+)\s*$")
+_MAX_RENDER_DEPTH = 10
+
+
+def _split_random_options(raw: str) -> list[str]:
+    """Split a random placeholder body on top-level unescaped ``|``.
+
+    Pipes inside nested ``{{ ... }}`` placeholders are left untouched, so
+    nested variables and nested random branches survive the split.  ``\\|`` is
+    treated as a literal pipe.
+    """
+    options: list[str] = []
+    current: list[str] = []
+    depth = 0
+    i = 0
+    while i < len(raw):
+        if raw.startswith("{{", i):
+            depth += 1
+            current.append("{{")
+            i += 2
+            continue
+        if raw.startswith("}}", i) and depth > 0:
+            depth -= 1
+            current.append("}}")
+            i += 2
+            continue
+        ch = raw[i]
+        if ch == "\\" and i + 1 < len(raw) and raw[i + 1] == "|":
+            current.append("|")
+            i += 2
+            continue
+        if ch == "|" and depth == 0:
+            options.append("".join(current).strip())
+            current = []
+            i += 1
+            continue
+        current.append(ch)
+        i += 1
+    options.append("".join(current).strip())
+    return [o for o in options if o]
+
+
+class RenderContext:
+    """Per-email template rendering state.
+
+    Carries the RNG plus a cache of picked options so that repeated
+    ``{{random: ...}}`` placeholders with the same options resolve to the
+    same value within a single rendered email (subject, body, preheader,
+    from-name).  Without a shared context each render call rolls
+    independently.
+    """
+
+    def __init__(self, rng: random.Random | None = None) -> None:
+        self.rng = rng if rng is not None else random.Random()
+        self._choices: Dict[str, str] = {}
+
+    def choose(self, options: list[str]) -> str:
+        """Return a stable random choice for *options* within this context."""
+        key = "\x00".join(options)
+        chosen = self._choices.get(key)
+        if chosen is None:
+            chosen = self.rng.choice(options)
+            self._choices[key] = chosen
+        return chosen
+
+
+def _find_closing_braces(text: str, start: int) -> int:
+    """Index of the ``}}`` matching the ``{{`` at *start*, or -1 if unbalanced."""
+    depth = 0
+    i = start + 2
+    while i < len(text):
+        if text.startswith("{{", i):
+            depth += 1
+            i += 2
+        elif text.startswith("}}", i):
+            if depth == 0:
+                return i
+            depth -= 1
+            i += 2
+        else:
+            i += 1
+    return -1
+
+
+def _resolve_token(
+    inner: str, lead_data: Dict[str, Any], context: RenderContext, depth: int
+) -> str:
+    """Resolve a single ``{{ ... }}`` token, recursing into random branches."""
+    raw = inner.strip()
+
+    random_match = _RANDOM_PREFIX_RE.match(raw)
+    if random_match:
+        options = _split_random_options(random_match.group(1))
+        if not options:
+            return "{{" + inner + "}}"
+        # Pick on the raw options so the choice stays stable across the
+        # subject/body of one email, then resolve nested {{fields}} and
+        # {{random: ...}} inside the chosen branch.
+        chosen = context.choose(options)
+        if depth >= _MAX_RENDER_DEPTH:
+            return chosen
+        return _render_text(chosen, lead_data, context, depth + 1)
+
+    field_match = _FIELD_NAME_RE.match(raw)
+    if field_match:
+        key = field_match.group(1)
+        if key in lead_data:
+            return str(lead_data[key])
+    # Unknown token: still resolve nested placeholders inside it, so a known
+    # variable wrapped in otherwise-unknown braces (e.g. "{{ note {{name}} }}")
+    # is not silently dropped.  Field values themselves are never recursed.
+    if depth >= _MAX_RENDER_DEPTH:
+        return "{{" + inner + "}}"
+    rendered = _render_text(inner, lead_data, context, depth + 1)
+    if rendered == inner:
+        return "{{" + inner + "}}"
+    return "{{" + rendered + "}}"
+
+
+def _render_text(
+    text: str, lead_data: Dict[str, Any], context: RenderContext, depth: int
+) -> str:
+    if depth > _MAX_RENDER_DEPTH:
+        return text
+    out: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text.startswith("{{", i):
+            end = _find_closing_braces(text, i)
+            if end == -1:
+                # Unbalanced opener: emit the literal "{{" and keep scanning so
+                # a later valid placeholder is still rendered (matches the old
+                # forgiving regex behaviour, which resolved downstream fields).
+                out.append("{{")
+                i += 2
+                continue
+            out.append(_resolve_token(text[i + 2:end], lead_data, context, depth))
+            i = end + 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def render_body(
+    body: str,
+    lead_data: Dict[str, Any],
+    context: RenderContext | None = None,
+) -> str:
+    """Replace ``{{field}}`` and resolve ``{{random: a | b | c}}`` placeholders.
+
+    - ``{{name}}``, ``{{email}}``, ``{{company}}``, or any lead ``custom_data``
+      key is substituted from *lead_data*.
+    - ``{{random: option A | option B | option C}}`` picks one option. Branches
+      may contain variables or even nested random placeholders, so copy can be
+      both randomised and personalised::
+
+          {{random: Hi {{name}} | Hey {{company}} team | Quick question}}
+
+    - Unknown placeholders are left untouched.
+
+    Pass a shared *context* when rendering several strings for the same email
+    (subject, body, preheader, from-name) so an identical random placeholder
+    picks the same option everywhere.
+    """
+    if context is None:
+        context = RenderContext()
+    return _render_text(body, lead_data, context, 0)
 
 
 def get_lead_data(lead) -> Dict[str, Any]:

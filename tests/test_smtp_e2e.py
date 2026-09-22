@@ -219,6 +219,8 @@ async def test_e2e_smtp_send_through_real_relay(session, smtp_relay, monkeypatch
     log = (await session.execute(select(EmailLog))).scalar_one()
     assert log.inbox_id == inbox.id
     assert log.message_id.startswith("<")
+    # Exact rendered body is persisted for the Sent view / quoting.
+    assert log.body == "Hi Ada, quick note."
     assert log.thread_id == log.message_id  # new thread
     assert (await session.execute(select(func.count(QueueSlot.id)))).scalar() == 0
     await session.refresh(cl)

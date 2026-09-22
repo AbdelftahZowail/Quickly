@@ -282,6 +282,35 @@ async def test_resolve_missing_variables_left_as_is(session):
     assert "{{nonexistent}}" in result["body"]
 
 
+@pytest.mark.asyncio
+async def test_resolve_random_shared_across_subject_and_body(session):
+    """{{random: ...}} resolves to one option, consistent across subject + body."""
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, name="Ran")
+    seq = await make_sequence(session, campaign.id,
+                              subject="{{random: Alpha | Beta | Gamma}}",
+                              body="<p>{{random: Alpha | Beta | Gamma}}</p>")
+
+    result = await _resolve_content(session, seq, lead, None, campaign, None)
+    assert result["subject"] in {"Alpha", "Beta", "Gamma"}
+    assert result["body"] == f"<p>{result['subject']}</p>"
+
+
+@pytest.mark.asyncio
+async def test_resolve_random_nested_variables(session):
+    """Random branches may contain lead variables."""
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, name="Ada")
+    lead.custom_data = {"company": "Acme"}
+    await session.flush()
+    seq = await make_sequence(session, campaign.id,
+                              subject="Hi",
+                              body="{{random: {{name}} at {{company}} | {{company}} team}}")
+
+    result = await _resolve_content(session, seq, lead, None, campaign, None)
+    assert result["body"] in {"Ada at Acme", "Acme team"}
+
+
 # ── Tests: _serialize_scheduled ─────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -462,6 +491,43 @@ async def test_resolve_sent_content_uses_variant_id(session):
                                          campaign)
     assert "Variant VariantUser" in result["body"]
     assert result["variant_id"] == var.id
+
+
+@pytest.mark.asyncio
+async def test_resolve_sent_content_prefers_stored_body(session):
+    """email_log.body (exact body sent) wins over reconstruction, so {{random}}
+    picks stay consistent with the stored subject."""
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, name="Stored")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    seq = await make_sequence(session, campaign.id, subject="Template {{name}}",
+                              body="<p>Reconstructed {{name}}</p>")
+    email_log = await make_email_log(session, lead.id, campaign.id,
+                                     inbox_id=inbox.id, subject="Sent Subject")
+    email_log.body = "<p>EXACT body that was sent</p>"
+    await session.flush()
+
+    result = await _resolve_sent_content(session, email_log, seq, lead, cl, campaign)
+    assert result["body"] == "<p>EXACT body that was sent</p>"
+    assert result["subject"] == "Sent Subject"
+
+
+@pytest.mark.asyncio
+async def test_resolve_sent_content_falls_back_when_no_stored_body(session):
+    """Legacy rows without a stored body still reconstruct as before."""
+    inbox = await make_inbox(session)
+    campaign = await make_campaign(session)
+    lead = await make_lead(session, name="Legacy")
+    cl = await make_campaign_lead(session, campaign.id, lead.id)
+    seq = await make_sequence(session, campaign.id, subject="S",
+                              body="<p>Reconstructed {{name}}</p>")
+    email_log = await make_email_log(session, lead.id, campaign.id,
+                                     inbox_id=inbox.id, subject="Sent Subj")
+    assert email_log.body is None
+
+    result = await _resolve_sent_content(session, email_log, seq, lead, cl, campaign)
+    assert "Reconstructed Legacy" in result["body"]
 
 
 # ── Tests: _assign_variants_to_slots ─────────────────────────────────────────

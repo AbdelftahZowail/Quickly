@@ -38,7 +38,7 @@ from app.models import (
     Office365Message,
     CustomEmailOverride,
 )
-from app.sender import send_email, render_body, get_lead_data, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
+from app.sender import send_email, render_body, get_lead_data, RenderContext, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
 from app.webhooks import fire_webhook_event
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
@@ -450,6 +450,7 @@ async def run_send_job():
                 prev_email_body_plain: str = ""
                 prev_email_body_html: str = ""
                 prev_sent_at = None
+                render_ctx = RenderContext()  # stable {{random: ...}} picks per email
 
                 # ── A/B variant selection ─────────────────────────────────────
                 chosen_variant_id = None
@@ -612,7 +613,10 @@ async def run_send_job():
                                     _prev_body_raw = _prev_var.body
                                     if _prev_var.is_html is not None:
                                         _prev_is_html_raw = _prev_var.is_html
-                            _rendered_prev = render_body(_prev_body_raw, get_lead_data(lead))
+                            if getattr(_prev_log, "body", None):
+                                _rendered_prev = _prev_log.body
+                            else:
+                                _rendered_prev = render_body(_prev_body_raw, get_lead_data(lead), context=render_ctx)
                             if _prev_is_html_raw:
                                 prev_email_body_html = _rendered_prev
                             else:
@@ -662,7 +666,7 @@ async def run_send_job():
 
                 # Apply lead-data variable substitution to the subject line
                 # (same {{firstName}} / {{company}} etc. tokens as the body).
-                subject = render_body(subject, get_lead_data(lead))
+                subject = render_body(subject, get_lead_data(lead), context=render_ctx)
 
                 # ── Determine HTML mode ──────────────────────────────────────
                 # Override chain (highest → lowest priority):
@@ -728,10 +732,11 @@ async def run_send_job():
                 lead_data = get_lead_data(lead)
                 lead_data["unsubscribe_link"] = unsub_url
 
-                body = render_body(seq_body, lead_data)
+                body = render_body(seq_body, lead_data, context=render_ctx)
+                logged_body = body  # exact rendered body persisted on EmailLog
                 # Inject hidden preheader so email clients show the custom preview text.
                 if is_html and seq_preview_text:
-                    rendered_preview = render_body(seq_preview_text, lead_data)
+                    rendered_preview = render_body(seq_preview_text, lead_data, context=render_ctx)
                     preheader = (
                         '<div style="display:none !important; visibility:hidden; '
                         'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
@@ -740,7 +745,7 @@ async def run_send_job():
                     body = preheader + body
                 from_addr = inbox.email
                 # Render lead variables in the sender name too (e.g. "Jane at Acme")
-                from_name = render_body(inbox.display_name or "", lead_data)
+                from_name = render_body(inbox.display_name or "", lead_data, context=render_ctx)
 
                 # ── phase 1: pre-create EmailLog to get an ID for tracking ──
                 email_log_entry = EmailLog(
@@ -750,6 +755,7 @@ async def run_send_job():
                     sequence_index=slot.sequence_index,
                     variant_id=chosen_variant_id,
                     subject=subject,
+                    body=logged_body,
                     format_override=format_override,
                     message_id="",      # filled in after successful send
                     thread_id=prev_thread_id,
@@ -809,7 +815,7 @@ async def run_send_job():
 
                 # ── Append quoted previous email (follow-up sequences only) ──
                 if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
-                    _from_name = render_body(inbox.display_name or inbox.email, lead_data)
+                    _from_name = render_body(inbox.display_name or inbox.email, lead_data, context=render_ctx)
                     _from_email = inbox.email
                     if is_html:
                         _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)
@@ -1391,6 +1397,7 @@ async def send_slot_job(slot_id: int) -> None:
         prev_email_body_plain: str = ""
         prev_email_body_html: str = ""
         prev_sent_at = None
+        render_ctx = RenderContext()  # stable {{random: ...}} picks per email
 
         if (seq_subject or "").strip() == "":
             all_logs_result = await session.execute(
@@ -1459,7 +1466,10 @@ async def send_slot_job(slot_id: int) -> None:
                             _prev_body_raw = _prev_var.body
                             if _prev_var.is_html is not None:
                                 _prev_is_html_raw = _prev_var.is_html
-                    _rendered_prev = render_body(_prev_body_raw, get_lead_data(lead))
+                    if getattr(_prev_log, "body", None):
+                        _rendered_prev = _prev_log.body
+                    else:
+                        _rendered_prev = render_body(_prev_body_raw, get_lead_data(lead), context=render_ctx)
                     if _prev_is_html_raw:
                         prev_email_body_html = _rendered_prev
                     else:
@@ -1500,7 +1510,7 @@ async def send_slot_job(slot_id: int) -> None:
         else:
             subject = seq_subject.strip()
 
-        subject = render_body(subject, get_lead_data(lead))
+        subject = render_body(subject, get_lead_data(lead), context=render_ctx)
 
         # ── HTML / plain-text decision ────────────────────────────────────
         format_override = None
@@ -1544,9 +1554,10 @@ async def send_slot_job(slot_id: int) -> None:
         lead_data = get_lead_data(lead)
         lead_data["unsubscribe_link"] = unsub_url
 
-        body = render_body(seq_body, lead_data)
+        body = render_body(seq_body, lead_data, context=render_ctx)
+        logged_body = body  # exact rendered body persisted on EmailLog
         if is_html and seq_preview_text:
-            rendered_preview = render_body(seq_preview_text, lead_data)
+            rendered_preview = render_body(seq_preview_text, lead_data, context=render_ctx)
             preheader = (
                 '<div style="display:none !important; visibility:hidden; '
                 'font-size:1px; overflow:hidden; max-height:0; mso-hide:all;">'
@@ -1556,7 +1567,7 @@ async def send_slot_job(slot_id: int) -> None:
 
         from_addr = inbox.email
         # Render lead variables in the sender name too (e.g. "Jane at Acme")
-        from_name = render_body(inbox.display_name or "", lead_data)
+        from_name = render_body(inbox.display_name or "", lead_data, context=render_ctx)
 
         # ── Pre-create EmailLog to get an ID for tracking ─────────────────
         email_log_entry = EmailLog(
@@ -1566,6 +1577,7 @@ async def send_slot_job(slot_id: int) -> None:
             sequence_index=slot.sequence_index,
             variant_id=chosen_variant_id,
             subject=subject,
+            body=logged_body,
             format_override=format_override,
             message_id="",
             thread_id=prev_thread_id,
@@ -1618,7 +1630,7 @@ async def send_slot_job(slot_id: int) -> None:
 
         # ── Append quoted previous email ──────────────────────────────────
         if prev_sent_at and (prev_email_body_html or prev_email_body_plain):
-            _from_name = render_body(inbox.display_name or inbox.email, lead_data)
+            _from_name = render_body(inbox.display_name or inbox.email, lead_data, context=render_ctx)
             _from_email = inbox.email
             if is_html:
                 _prev_html = prev_email_body_html or _plain_to_quoted_html(prev_email_body_plain)

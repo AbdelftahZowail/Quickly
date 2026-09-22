@@ -1683,10 +1683,22 @@ Email bodies support Jinja2-style template substitution:
 | `{{company}}` | `custom_data.company` |
 | `{{*}}` | Any key from lead's `custom_data` |
 | `{{unsubscribe_link}}` | Auto-generated one-click unsubscribe URL |
+| `{{random: a \| b \| c}}` | Picks one option at random per received email |
 
 Template variables are also rendered in the **inbox display name** (the `From:` name) for campaign sends — e.g. an inbox display name of `{{name}} at Acme` produces `Jane Doe at Acme`.
 
 Example: `Hi {{name}}, I noticed {{company}} is growing fast...`
+
+### Random (spintax) variables
+
+`{{random: ...}}` picks one of the `|`-separated options each time an email is rendered. Options may contain lead variables or nested random placeholders:
+
+```
+{{random: Hi {{name}} | Hey {{company}} team | Quick question}}
+{{random: {{random: Hey | Hi}} {{name}} | Hello!}}
+```
+
+Within a single email the same placeholder always resolves to the same option (subject, body, preheader and from-name stay consistent). Inside a `{{random: ...}}` placeholder, escape a literal pipe with `\|`; outside random placeholders a backslash is kept as-is. Unknown placeholders are left untouched.
 
 ---
 

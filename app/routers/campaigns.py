@@ -1563,7 +1563,7 @@ async def preview_email(
         preview_is_html = bool(variant.is_html) if variant.is_html is not None else bool(seq.is_html)
         variant_label = variant.label or "Variant"
 
-    from app.sender import render_body, get_lead_data
+    from app.sender import render_body, get_lead_data, RenderContext
 
     # Build substitution data – fall back to placeholder strings when no lead given.
     lead_data: dict = {"name": "{{name}}", "email": "{{email}}"}
@@ -1573,8 +1573,9 @@ async def preview_email(
         if lead:
             lead_data = get_lead_data(lead)
 
-    rendered_body = render_body(preview_body, lead_data)
-    rendered_subject = render_body(preview_subject, lead_data)
+    render_ctx = RenderContext()  # same {{random: ...}} pick across subject + body
+    rendered_body = render_body(preview_body, lead_data, context=render_ctx)
+    rendered_subject = render_body(preview_subject, lead_data, context=render_ctx)
 
     # For HTML sequences inject tracking with a placeholder log id so that
     # tracking URLs look realistic (they won't resolve until a real send).
@@ -1667,7 +1668,7 @@ async def send_test_email(
             send_subject = variant.subject or seq.subject or "(no subject)"
             send_is_html = bool(variant.is_html) if variant.is_html is not None else bool(seq.is_html)
 
-    from app.sender import render_body, get_lead_data
+    from app.sender import render_body, get_lead_data, RenderContext
 
     lead_data: dict = {"name": "Test User", "email": data.to_email}
     if data.lead_id:
@@ -1676,8 +1677,9 @@ async def send_test_email(
         if lead:
             lead_data = get_lead_data(lead)
 
-    rendered_body = render_body(send_body, lead_data)
-    rendered_subject = render_body(send_subject, lead_data)
+    render_ctx = RenderContext()  # same {{random: ...}} pick across subject + body
+    rendered_body = render_body(send_body, lead_data, context=render_ctx)
+    rendered_subject = render_body(send_subject, lead_data, context=render_ctx)
 
     # Get Gmail account if needed
     gmail_account = None
