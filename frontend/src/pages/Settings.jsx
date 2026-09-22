@@ -623,6 +623,7 @@ export default function Settings() {
     'daily_limit': 'Daily Limit Hit',
     'rate_limit': 'Rate Limit',
     'token_expired': 'Token / Auth Failure',
+    'inbox.send_failing': 'Inbox Sending Failing',
   };
 
   const isAllEvents = (events) => eventTypes.length > 0 && events.length === eventTypes.length;

@@ -41,6 +41,7 @@ const EVENT_ICONS = {
   'daily_limit': <RiSpeedLine size={20} />,
   'rate_limit': <RiSpeedLine size={20} />,
   'token_expired': <RiKey2Line size={20} />,
+  'inbox.send_failing': <RiErrorWarningLine size={20} />,
 };
 
 const EVENT_LABELS = {
@@ -60,12 +61,13 @@ const EVENT_LABELS = {
   'daily_limit': 'Daily Limit Hit',
   'rate_limit': 'Rate Limit',
   'token_expired': 'Token / Auth Failure',
+  'inbox.send_failing': 'Inbox Sending Failing',
 };
 
 const EVENT_CATEGORIES = {
   'email': ['email.sent', 'email.opened', 'email.clicked', 'email.bounced'],
   'lead': ['lead.replied', 'lead.unsubscribed', 'lead.status_changed', 'lead.interested', 'lead.not_interested', 'lead.out_of_office', 'lead.wrong_person', 'lead.auto_reply'],
-  'system': ['daily_limit', 'rate_limit', 'token_expired', 'feature.error'],
+  'system': ['daily_limit', 'rate_limit', 'token_expired', 'inbox.send_failing', 'feature.error'],
 };
 
 function timeAgo(iso) {
