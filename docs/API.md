@@ -849,6 +849,8 @@ Create or replace the SMTP/IMAP credentials for an SMTP inbox. On update, an emp
 
 **Body:** `smtp_host`, `smtp_port` (default `587`), `smtp_username`, `smtp_password`, `smtp_use_tls` (default `true`), `smtp_use_ssl` (default `false`), plus optional `imap_host`, `imap_port` (default `993`), `imap_username`, `imap_password`, `imap_use_ssl` (default `true`) for inbound reply sync.
 
+> **At rest:** `smtp_password` / `imap_password` are transparently encrypted with `QUICKLY_ENCRYPTION_KEY` (Fernet). Use the UI/API whenever possible. To update them directly in the database (headless setups, credential rotation), generate the ciphertext with `python scripts/encrypt_secret.py --key-from-db --inbox-id <id> --sql` — see [docs/INSTALL.md](INSTALL.md#updating-smtp-credentials-from-the-command-line).
+
 ### `GET /api/smtp/inboxes/{id}`
 
 Fetch the stored SMTP/IMAP settings (no secrets) including the last connection-test result (`last_tested_at`, `last_test_ok`, `last_test_error`).

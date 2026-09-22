@@ -351,14 +351,23 @@ Fires when the next scheduled slot would violate the `wait_minutes_between` cool
 
 ### `token_expired`
 
-Fires when a Gmail OAuth token cannot be refreshed.
+Fires when an inbox credential fails permanently:
+
+- `provider: "gmail"` / `"office365"` — the OAuth token could not be refreshed (reconnect the inbox).
+- `provider: "smtp"` with `error_type: "auth_failed"` — the SMTP relay rejected the login (update the SMTP username/password, then resume the inbox).
+- `provider: "smtp"` with `error_type: "imap_auth_failed"` / `"imap_sync_failed"` — the IMAP mailbox login failed / reply sync could not connect.
+
+The inbox is paused automatically for SMTP/OAuth auth failures so the send job does not retry a broken credential forever.
 
 ```json
 {
   "event": "token_expired",
   "data": {
     "inbox_id": 3,
-    "inbox_email": "outreach@gmail.com"
+    "inbox_email": "outreach@gmail.com",
+    "provider": "smtp",
+    "error_type": "auth_failed",
+    "error": "SMTP authentication failed: 535 Authentication failed"
   }
 }
 ```

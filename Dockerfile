@@ -33,6 +33,8 @@ COPY app/ ./app/
 # (this directory is only used by the `/validate-queue` route and various
 # development helpers).
 COPY smoke_test/ ./smoke_test/
+# maintenance scripts (e.g. encrypt_secret.py for headless credential updates)
+COPY scripts/ ./scripts/
 COPY README.md ./
 # copy anything else the application might need (templates, etc.).
 # the `static` folder is optional; we create an empty directory in the repo

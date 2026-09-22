@@ -736,6 +736,27 @@ Quickly tests the connection automatically after creation.
 - **Replies:** SES has no mailbox, so there is nothing for IMAP reply-sync to connect to. SES inboxes are **send-only**: replies won't appear in the Unibox unless you route them elsewhere (e.g. set SES to forward replies to a Gmail/IMAP mailbox you also connect).
 - **Bounces:** sends rejected at SMTP time (unverified identity, sandbox violation) surface as `email.bounced` and the lead is marked bounced automatically. Delayed bounces via SNS notifications are not integrated — if you need those, configure SES to forward bounce mail to a monitored mailbox.
 - **Limits:** SES enforces per-region daily quotas and send rates. Mirror them in the inbox's **Max emails per day** and **Wait between emails** so Quickly never outruns your SES limits.
+- **Broken credentials auto-pause:** if the relay rejects authentication (e.g. `535 Authentication failed`), Quickly **pauses the inbox** and fires a `token_expired` notification (with `provider: "smtp"`) instead of retrying forever. Fix the credentials, then resume the inbox from **Inboxes → Resume**.
+
+### Updating SMTP credentials from the command line
+
+`SmtpAccount.smtp_password` / `imap_password` are stored as Fernet ciphertext, so a plain `UPDATE smtp_account SET smtp_password = 'my-password'` would store a value the app cannot decrypt. The UI/API encrypts automatically; for headless setups use the helper script, which derives the same key the app uses:
+
+```bash
+# Reads quickly_encryption_key from the app_setting table (or set
+# QUICKLY_ENCRYPTION_KEY in the environment instead of --key-from-db)
+python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+
+# → UPDATE smtp_account SET smtp_password = 'gAAAAA...', updated_at = NOW() WHERE inbox_id = 7;
+```
+
+Run the printed statement with `psql`, then test the connection from the inbox UI (or `POST /api/smtp/inboxes/7/test`). `--decrypt 'gAAAAA...'` verifies an existing value; `--key` / `--password` are available for scripted use. If `QUICKLY_ENCRYPTION_KEY` is not set, the app auto-generates a key and stores it under `quickly_encryption_key` in `app_setting` — that is what `--key-from-db` reads.
+
+Docker deployments: run the helper inside the backend container, where the app's dependencies are installed:
+
+```bash
+docker compose exec backend python scripts/encrypt_secret.py --key-from-db --inbox-id 7 --sql
+```
 
 ---
 
