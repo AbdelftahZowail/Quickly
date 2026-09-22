@@ -141,8 +141,8 @@ mkdir quickly && cd quickly
 **2. Download Compose and env template.**
 
 ```bash
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.no-caddy.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.no-caddy.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 mv .env.example .env
 ```
 
@@ -199,9 +199,9 @@ If this volume does not exist yet, `docker compose up` will fail — the file ex
 ```bash
 mkdir quickly && cd quickly
 
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/Caddyfile
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 mv .env.example .env
 ```
 
@@ -301,12 +301,12 @@ Choose this if **Caddy is already on your VPS** for other sites and you **do not
    docker volume create quickly_pgdata
    ```
 
-2. Download **`docker-compose-not-host.yml`** from the [releases page](https://github.com/azowail/quickly/releases/latest) (bundled beside `docker-compose.yml`), plus **`.env.example`**:
+2. Download **`docker-compose-not-host.yml`** from the [releases page](https://github.com/AbdelftahZowail/Quickly/releases/latest) (bundled beside `docker-compose.yml`), plus **`.env.example`**:
 
    ```bash
    mkdir quickly && cd quickly
-   curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose-not-host.yml
-   curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+   curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose-not-host.yml
+   curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
    mv .env.example .env
    ```
 
@@ -435,7 +435,7 @@ docker compose up -d
 The fastest way to run everything locally with hot-reload:
 
 ```bash
-git clone https://github.com/azowail/quickly.git
+git clone https://github.com/AbdelftahZowail/Quickly.git
 cd quickly
 cp .env.example .env
 # Edit .env and set: BASE_URL=http://localhost:8000
@@ -453,7 +453,7 @@ Open `http://localhost:5173` — the frontend hot-reloads on changes; the backen
 **1. Clone the repo and set up Python.**
 
 ```bash
-git clone https://github.com/azowail/quickly.git
+git clone https://github.com/AbdelftahZowail/Quickly.git
 cd quickly
 
 python -m venv .venv

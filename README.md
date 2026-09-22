@@ -124,9 +124,9 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 docker volume create quickly_pgdata   # Postgres data — do once before first start
 
 mkdir quickly && cd quickly
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/Caddyfile
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 mv .env.example .env
 ```
 
@@ -153,7 +153,7 @@ Caddy automatically provisions and renews a Let's Encrypt TLS certificate. Open 
 ### Option C: Local Development
 
 ```bash
-git clone https://github.com/azowail/quickly.git
+git clone https://github.com/AbdelftahZowail/Quickly.git
 cd quickly
 
 python -m venv .venv

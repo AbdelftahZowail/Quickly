@@ -133,8 +133,8 @@ If you plan to use **only [Quickly Beacon](INSTALL.md#quickly-beacon-recommended
 ```bash
 mkdir quickly && cd quickly
 
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.no-caddy.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.no-caddy.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 mv .env.example .env
 # Set BASE_URL and your OAuth credentials; terminate HTTPS with nginx, Traefik, host Caddy, etc.
 
@@ -146,9 +146,9 @@ docker compose -f docker-compose.no-caddy.yml up -d
 ```bash
 mkdir quickly && cd quickly
 
-curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
-curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
-curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.yml
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/Caddyfile
+curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
 
 mv .env.example .env
 # Set CADDY_HOST, BASE_URL, and your OAuth credentials in .env

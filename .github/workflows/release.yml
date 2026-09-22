@@ -162,15 +162,15 @@ jobs:
             ```bash
             mkdir quickly && cd quickly
             docker volume create quickly_pgdata
-            curl -LO https://github.com/azowail/quickly/releases/latest/download/docker-compose.yml
-            curl -LO https://github.com/azowail/quickly/releases/latest/download/Caddyfile
-            curl -LO https://github.com/azowail/quickly/releases/latest/download/.env.example
+            curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/docker-compose.yml
+            curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/Caddyfile
+            curl -LO https://github.com/AbdelftahZowail/Quickly/releases/latest/download/.env.example
             mv .env.example .env
             # Edit .env — set CADDY_HOST, BASE_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
             docker compose up -d
             ```
 
-            **Already using Caddy on the server?** Download `docker-compose-not-host.yml` instead of `docker-compose.yml` (no Caddyfile in Docker). Point your host Caddy at `127.0.0.1:5050`. See [INSTALL.md](https://github.com/azowail/quickly/blob/main/docs/INSTALL.md).
+            **Already using Caddy on the server?** Download `docker-compose-not-host.yml` instead of `docker-compose.yml` (no Caddyfile in Docker). Point your host Caddy at `127.0.0.1:5050`. See [INSTALL.md](https://github.com/AbdelftahZowail/Quickly/blob/main/docs/INSTALL.md).
 
             **No reverse proxy in Docker (any TLS/proxy on the host):** Use `docker-compose.no-caddy.yml` — Postgres + app on port 8000, managed data volume (no `docker volume create`). Set `BASE_URL` in `.env` to match how users reach the app.
 
@@ -199,7 +199,7 @@ jobs:
             ### 🛠️ Option 3 — Local / developer setup
 
             ```bash
-            git clone https://github.com/azowail/quickly.git
+            git clone https://github.com/AbdelftahZowail/Quickly.git
             cd quickly
             cp .env.example .env   # fill in GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, BASE_URL
             docker compose -f docker-compose.dev.yml up
@@ -221,4 +221,4 @@ jobs:
             3. Add leads — the queue engine handles scheduling automatically
             4. Monitor sends in **Schedule** or via `GET /api/status`
 
-            > **Docs:** [INSTALL.md](https://github.com/azowail/quickly/blob/main/docs/INSTALL.md) · [API.md](https://github.com/azowail/quickly/blob/main/docs/API.md) · [WEBHOOKS.md](https://github.com/azowail/quickly/blob/main/docs/WEBHOOKS.md)
+            > **Docs:** [INSTALL.md](https://github.com/AbdelftahZowail/Quickly/blob/main/docs/INSTALL.md) · [API.md](https://github.com/AbdelftahZowail/Quickly/blob/main/docs/API.md) · [WEBHOOKS.md](https://github.com/AbdelftahZowail/Quickly/blob/main/docs/WEBHOOKS.md)
