@@ -97,7 +97,12 @@ export default function Leads() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [interestFilter, setInterestFilter] = useState('all');
-  const [selected, setSelected] = useState(() => new Set());
+  const [leadsPage, setLeadsPage] = useState(1);
+  const [leadsTotal, setLeadsTotal] = useState(0);
+  const [leadsHasMore, setLeadsHasMore] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [allSelected, setAllSelected] = useState(false);
+  const [excludedIds, setExcludedIds] = useState(() => new Set());
   const [emailDrafts, setEmailDrafts] = useState({});
   const [bulkEnrollmentStatus, setBulkEnrollmentStatus] = useState('active');
   const [debouncedSearch, setDebouncedSearch] = useState('');
@@ -111,15 +116,21 @@ export default function Leads() {
     return () => clearTimeout(t);
   }, [search]);
 
-  const loadLeads = useCallback(async () => {
+  const LEADS_PAGE_SIZE = 100;
+
+  const loadLeads = useCallback(async (page = 1, resetSelection = false) => {
     loading.start();
     try {
       const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter });
+      params.set('page', String(page)); params.set('page_size', String(LEADS_PAGE_SIZE));
       const qs = params.toString();
-      const data = await api.get('/leads' + (qs ? `?${qs}` : ''));
-      const rows = Array.isArray(data) ? data : [];
+      const data = await api.get('/leads/page' + (qs ? `?${qs}` : ''));
+      const rows = Array.isArray(data?.items) ? data.items : [];
+      setLeadsTotal(data?.total || 0);
+      setLeadsHasMore(!!data?.has_more);
+      setLeadsPage(data?.page || page);
       setLeads(rows);
-      setSelected(new Set());
+      if (resetSelection) { setSelectedIds(new Set()); setAllSelected(false); setExcludedIds(new Set()); }
       setEmailDrafts((prev) => {
         const next = { ...prev };
         rows.forEach((l) => {
@@ -135,40 +146,85 @@ export default function Leads() {
   }, [debouncedSearch, statusFilter, interestFilter, tab, loading, notify]);
 
   useEffect(() => {
-    loadLeads();
+    loadLeads(1, true);
   }, [loadLeads]);
 
   const visibleIds = useMemo(() => leads.map((l) => l.id), [leads]);
 
   const toggleOne = (id) => {
-    setSelected((prev) => {
-      const n = new Set(prev);
-      if (n.has(id)) n.delete(id);
-      else n.add(id);
-      return n;
-    });
-  };
-
-  const toggleAll = () => {
-    if (selected.size === visibleIds.length && visibleIds.length) {
-      setSelected(new Set());
+    if (allSelected) {
+      setExcludedIds((prev) => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
     } else {
-      setSelected(new Set(visibleIds));
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        if (n.has(id)) n.delete(id);
+        else n.add(id);
+        return n;
+      });
     }
   };
 
+  const selectAllLeads = () => {
+    setAllSelected(true);
+    setSelectedIds(new Set());
+    setExcludedIds(new Set());
+  };
+
+  const clearLeadSelection = () => {
+    setAllSelected(false);
+    setSelectedIds(new Set());
+    setExcludedIds(new Set());
+  };
+
+  const togglePageSelection = (checked) => {
+    if (allSelected) {
+      setExcludedIds((prev) => {
+        const n = new Set(prev);
+        visibleIds.forEach((id) => {
+          if (checked) n.delete(id);
+          else n.add(id);
+        });
+        return n;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const n = new Set(prev);
+        visibleIds.forEach((id) => {
+          if (checked) n.add(id);
+          else n.delete(id);
+        });
+        return n;
+      });
+    }
+  };
+
+  const pageSelectedCount = visibleIds.filter((id) =>
+    allSelected ? !excludedIds.has(id) : selectedIds.has(id)
+  ).length;
+
+  const pageFullySelected = visibleIds.length > 0 && pageSelectedCount === visibleIds.length;
+
+  const selectedCount = allSelected
+    ? Math.max(0, leadsTotal - excludedIds.size)
+    : selectedIds.size;
+
   const handleBulkDelete = async () => {
-    if (!selected.size) return;
+    if (!selectedIds.size) return;
     const ok = await confirm(
-      `Permanently delete ${selected.size} lead(s)? This removes enrollments and email history for those leads.`,
+      `Permanently delete ${selectedIds.size} lead(s)? This removes enrollments and email history for those leads.`,
     );
     if (!ok) return;
     loading.start();
     try {
-      const res = await api.post('/leads/bulk-delete', { lead_ids: [...selected] });
-      const n = res.deleted ?? selected.size;
+      const res = await api.post('/leads/bulk-delete', { lead_ids: [...selectedIds] });
+      const n = res.deleted ?? selectedIds.size;
       notify({ type: 'success', message: `Deleted ${n} lead(s).` });
-      await loadLeads();
+      await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Delete failed' });
     } finally {
@@ -177,16 +233,16 @@ export default function Leads() {
   };
 
   const handleBulkStatus = async () => {
-    if (!selected.size) return;
+    if (!selectedIds.size) return;
     const ok = await confirm(
-      `Set enrollment to “${bulkEnrollmentStatus}” on every campaign for ${selected.size} lead(s)? The send queue will be recalculated.`,
+      `Set enrollment to “${bulkEnrollmentStatus}” on every campaign for ${selectedIds.size} lead(s)? The send queue will be recalculated.`,
     );
     if (!ok) return;
     loading.start();
     try {
-      await api.post('/leads/bulk-status', { lead_ids: [...selected], enrollment_status: bulkEnrollmentStatus });
+      await api.post('/leads/bulk-status', { lead_ids: [...selectedIds], enrollment_status: bulkEnrollmentStatus });
       notify({ type: 'success', message: 'Status updated.' });
-      await loadLeads();
+      await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Update failed' });
     } finally {
@@ -195,7 +251,7 @@ export default function Leads() {
   };
 
   const handleBulkReenroll = async () => {
-    const ids = [...selected];
+    const ids = [...selectedIds];
     const targets = ids
       .map((id) => leads.find((l) => l.id === id))
       .filter(Boolean)
@@ -231,7 +287,7 @@ export default function Leads() {
         type: errN ? 'info' : 'success',
         message: `Recovery started for ${n} lead(s).${errN ? ` ${errN} skipped (see API errors).` : ''}`,
       });
-      await loadLeads();
+      await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Re-enroll failed' });
     } finally {
@@ -249,7 +305,7 @@ export default function Leads() {
     try {
       await api.post(`/leads/${lead.id}/recover`, { email, verify_email: true });
       notify({ type: 'success', message: 'Lead updated. Verification or scheduling will follow your account settings.' });
-      await loadLeads();
+      await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Recovery failed' });
     } finally {
@@ -262,7 +318,7 @@ export default function Leads() {
     try {
       await api.patch(`/leads/${lead.id}`, { enrollment_status: 'active' });
       notify({ type: 'success', message: 'All enrollments set to active; queue recalculated.' });
-      await loadLeads();
+      await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Update failed' });
     } finally {
@@ -272,7 +328,8 @@ export default function Leads() {
 
   const exportCsv = async () => {
     const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter });
-    const qs = params.toString();
+    params.set('page', String(page)); params.set('page_size', String(LEADS_PAGE_SIZE));
+      const qs = params.toString();
     loading.start();
     try {
       const res = await api.download('/leads/export' + (qs ? `?${qs}` : ''));
@@ -311,10 +368,10 @@ export default function Leads() {
         type: errN ? 'info' : 'success',
         message: `Recovered ${n} lead(s).${errN ? ` ${errN} row(s) skipped.` : ''}`,
       });
-      await loadLeads();
+      await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Import failed — check CSV format and IDs.' });
-      await loadLeads();
+      await loadLeads(1, true);
     } finally {
       loading.stop();
     }
@@ -437,9 +494,9 @@ export default function Leads() {
         </div>
       </div>
 
-      {selected.size > 0 && (
+      {selectedCount > 0 && (
         <Card className="p-4 flex flex-wrap gap-3 items-center">
-          <span className="text-sm font-medium text-gray-700">{selected.size} selected</span>
+          <span className="text-sm font-medium text-gray-700">{selectedCount} selected</span>
           <Button type="button" variant="destructive" size="sm" onClick={handleBulkDelete}>
             Delete
           </Button>
@@ -473,6 +530,32 @@ export default function Leads() {
           {leads.length} lead{leads.length !== 1 ? 's' : ''}
           {tab === TAB_BOUNCED ? ' (bounced or invalid)' : ''}
         </div>
+        {pageFullySelected && !allSelected && (
+          <div className="mx-4 mt-3 flex items-center justify-between rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
+            <span>All {pageSelectedCount} leads on this page are selected.</span>
+            <button
+              type="button"
+              className="font-medium text-teal-700 hover:underline"
+              onClick={selectAllLeads}
+            >
+              Select all {leadsTotal.toLocaleString()} leads
+            </button>
+          </div>
+        )}
+
+        {allSelected && (
+          <div className="mx-4 mt-3 flex items-center justify-between rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
+            <span>{(leadsTotal - excludedIds.size).toLocaleString()} of {leadsTotal.toLocaleString()} leads selected.</span>
+            <button
+              type="button"
+              className="font-medium text-gray-600 hover:underline"
+              onClick={clearLeadSelection}
+            >
+              Clear selection
+            </button>
+          </div>
+        )}
+
         <table className="min-w-max w-full table-auto border-collapse text-sm">
           <thead>
             <tr className="text-left text-gray-600 border-b">
@@ -480,8 +563,8 @@ export default function Leads() {
                 <input
                   type="checkbox"
                   className="rounded"
-                  checked={visibleIds.length > 0 && selected.size === visibleIds.length}
-                  onChange={toggleAll}
+                  checked={pageFullySelected}
+                  onChange={(e) => togglePageSelection(e.target.checked)}
                   aria-label="Select all"
                 />
               </th>
@@ -509,7 +592,7 @@ export default function Leads() {
                     <input
                       type="checkbox"
                       className="rounded"
-                      checked={selected.has(l.id)}
+                      checked={allSelected ? !excludedIds.has(l.id) : selectedIds.has(l.id)}
                       onChange={() => toggleOne(l.id)}
                       aria-label={`Select ${l.email}`}
                     />
@@ -610,6 +693,29 @@ export default function Leads() {
             )}
           </tbody>
         </table>
+        {leadsTotal > 0 && (
+          <div className="flex items-center justify-center gap-3 py-4">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={leadsPage <= 1}
+              onClick={() => loadLeads(leadsPage - 1)}
+            >
+              Previous
+            </Button>
+            <span className="text-xs text-gray-500">
+              Page {leadsPage} / {Math.ceil(leadsTotal / LEADS_PAGE_SIZE)} · {leadsTotal.toLocaleString()} leads
+            </span>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!leadsHasMore}
+              onClick={() => loadLeads(leadsPage + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        )}
       </Card>
     </div>
   );

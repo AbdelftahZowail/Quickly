@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFi
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete, func, select
+from sqlalchemy import String, cast, delete, func, or_, select
 from sqlalchemy.orm import selectinload
 from datetime import date
 from typing import List
@@ -53,6 +53,7 @@ from app.schemas import (
     SequenceVariantUpdate,
     SequenceVariantResponse,
     CustomEmailWrite,
+    LeadSelectionRequest,
 )
 from app.lead_inbox_resolution import from_inbox_email_by_lead_campaign
 from app.routers.leads import _fetch_lead_interactions_batch
@@ -1133,6 +1134,224 @@ async def list_campaign_leads(campaign_id: int, db: AsyncSession = Depends(get_d
     ]
 
 
+def _campaign_lead_search_filter(search: str = ""):
+    search = (search or "").strip()
+    if not search:
+        return None
+
+    pattern = f"%{search}%"
+    return or_(
+        Lead.email.ilike(pattern),
+        Lead.name.ilike(pattern),
+        cast(Lead.custom_data["company"], String).ilike(pattern),
+        cast(Lead.custom_data["domain"], String).ilike(pattern),
+    )
+
+
+async def _get_campaign_lead_page(
+    campaign_id: int,
+    page: int,
+    page_size: int,
+    db: AsyncSession,
+    search: str = "",
+):
+    offset = (page - 1) * page_size
+
+    search_filter = _campaign_lead_search_filter(search)
+
+    base_filter = [CampaignLead.campaign_id == campaign_id]
+    if search_filter is not None:
+        base_filter.append(search_filter)
+
+    total_result = await db.execute(
+        select(func.count(CampaignLead.id))
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(*base_filter)
+    )
+    total = total_result.scalar() or 0
+
+    result = await db.execute(
+        select(CampaignLead, Lead)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(*base_filter)
+        .order_by(
+            CampaignLead.enrolled_at.desc(),
+            CampaignLead.id.desc(),
+        )
+        .offset(offset)
+        .limit(page_size)
+    )
+    return result.all(), total
+
+
+@router.get("/{campaign_id}/leads/page")
+async def list_campaign_leads_page(
+    campaign_id: int,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    search: str = Query("", max_length=255),
+    db: AsyncSession = Depends(get_db),
+):
+    rows, total = await _get_campaign_lead_page(
+        campaign_id,
+        page,
+        page_size,
+        db,
+        search=search,
+    )
+    lead_ids = [lead.id for _cl, lead in rows]
+    cl_ids = [cl.id for cl, _lead in rows]
+
+    last_sent_map: dict[int, int] = {}
+    opened_set: set[int] = set()
+    clicked_set: set[int] = set()
+    replied_set: set[int] = set()
+
+    if lead_ids:
+        r = await db.execute(
+            select(EmailLog.lead_id, func.max(EmailLog.sequence_index).label("last_index"))
+            .where(EmailLog.campaign_id == campaign_id, EmailLog.lead_id.in_(lead_ids))
+            .group_by(EmailLog.lead_id)
+        )
+        last_sent_map = {x.lead_id: x.last_index for x in r.all()}
+
+        r = await db.execute(
+            select(EmailLog.lead_id).where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+                EmailLog.opened == True,
+            ).distinct()
+        )
+        opened_set = {x[0] for x in r.all()}
+
+        r = await db.execute(
+            select(EmailLog.lead_id).where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+                EmailLog.clicked == True,
+            ).distinct()
+        )
+        clicked_set = {x[0] for x in r.all()}
+
+        r = await db.execute(
+            select(LeadReply.lead_id).where(
+                LeadReply.campaign_id == campaign_id,
+                LeadReply.lead_id.in_(lead_ids),
+            ).distinct()
+        )
+        replied_set = {x[0] for x in r.all()}
+
+    r = await db.execute(select(func.count(Sequence.id)).where(Sequence.campaign_id == campaign_id))
+    total_sequences = r.scalar() or 0
+
+    r = await db.execute(
+        select(Sequence.id, Sequence.position)
+        .where(Sequence.campaign_id == campaign_id, Sequence.sequence_type == "personalized")
+        .order_by(Sequence.position)
+    )
+    personalized_sequences = list(r.all())
+    personalized_seq_ids = [x.id for x in personalized_sequences]
+
+    override_map: dict[int, set[int]] = {}
+    override_details: dict[int, dict[int, dict]] = {}
+    if personalized_seq_ids and cl_ids:
+        r = await db.execute(
+            select(CustomEmailOverride).where(CustomEmailOverride.campaign_lead_id.in_(cl_ids))
+        )
+        for ov in r.scalars().all():
+            override_map.setdefault(ov.campaign_lead_id, set()).add(ov.sequence_id)
+            override_details.setdefault(ov.campaign_lead_id, {})[ov.sequence_id] = {
+                "subject": ov.subject,
+                "body": ov.body,
+                "is_html": ov.is_html,
+            }
+
+    sent_positions: dict[int, set[int]] = {}
+    if lead_ids:
+        r = await db.execute(
+            select(EmailLog.lead_id, EmailLog.sequence_index)
+            .where(
+                EmailLog.campaign_id == campaign_id,
+                EmailLog.lead_id.in_(lead_ids),
+            ).distinct()
+        )
+        for lead_id, seq_idx in r.all():
+            sent_positions.setdefault(lead_id, set()).add(seq_idx)
+
+    inbox_pairs = {(lead.id, campaign_id) for _cl, lead in rows}
+    inbox_by_lead = await from_inbox_email_by_lead_campaign(db, inbox_pairs)
+    interactions_map = await _fetch_lead_interactions_batch(db, lead_ids) if lead_ids else {}
+
+    def stage_label(lead_id: int) -> str:
+        last_index = last_sent_map.get(lead_id, -1)
+        if total_sequences == 0:
+            return "—"
+        next_step = last_index + 1
+        if next_step >= total_sequences:
+            return "Complete"
+        return f"Step {next_step + 1}"
+
+    def custom_email_status_for_cl(cl_id: int, lead_id: int, enrollment_status: str | None) -> dict:
+        if not personalized_sequences:
+            return {"needs_custom_email": False, "personalized": []}
+        written = override_map.get(cl_id, set())
+        sent_for_lead = sent_positions.get(lead_id, set())
+        statuses = []
+        all_written = True
+        for sid, spos in personalized_sequences:
+            already_sent = spos in sent_for_lead
+            is_written = sid in written or already_sent
+            details = override_details.get(cl_id, {}).get(sid, {})
+            statuses.append({
+                "sequence_id": sid,
+                "sequence_position": spos,
+                "subject": details.get("subject"),
+                "written": is_written,
+                "already_sent": already_sent,
+            })
+            if not is_written:
+                all_written = False
+        terminal = (enrollment_status or "").lower() in (
+            "completed", "bounced", "unsubscribed", "wrong_person"
+        )
+        return {
+            "needs_custom_email": False if terminal else not all_written,
+            "personalized": statuses,
+        }
+
+    items = [
+        {
+            "campaign_lead_id": cl.id,
+            "lead_id": lead.id,
+            "email": lead.email,
+            "name": lead.name,
+            "status": getattr(cl, "enrollment_status", None) or "active",
+            "interest": cl.interest_status,
+            "custom_data": lead.custom_data or {},
+            "enrolled_at": cl.enrolled_at.isoformat() if cl.enrolled_at else None,
+            "stage": stage_label(lead.id),
+            "opened": lead.id in opened_set,
+            "clicked": lead.id in clicked_set,
+            "replied": lead.id in replied_set,
+            "sending_paused": cl.sending_paused,
+            "email_verification_status": lead.email_verification_status,
+            "provider": lead.provider,
+            "from_inbox_email": inbox_by_lead.get((lead.id, campaign_id)),
+            "interactions": interactions_map.get(lead.id, []),
+            **custom_email_status_for_cl(cl.id, lead.id, cl.enrollment_status),
+        }
+        for cl, lead in rows
+    ]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": page * page_size < total,
+    }
+
+
 @router.patch("/{campaign_id}/leads/{lead_id}")
 async def patch_campaign_lead(
     campaign_id: int,
@@ -1925,6 +2144,91 @@ async def list_sent_emails(campaign_id: int, db: AsyncSession = Depends(get_db))
         }
         for el, lead, cl, inbox in rows
     ]
+
+
+async def _resolve_campaign_lead_selection_ids(
+    db: AsyncSession,
+    campaign_id: int,
+    body: LeadSelectionRequest,
+) -> list[int]:
+    """Resolve selected Lead IDs within one campaign only."""
+    if not body.all_selected:
+        if not body.lead_ids:
+            return []
+        result = await db.execute(
+            select(CampaignLead.lead_id).where(
+                CampaignLead.campaign_id == campaign_id,
+                CampaignLead.lead_id.in_(body.lead_ids),
+            )
+        )
+        return list(dict.fromkeys(int(x) for x in result.scalars().all()))
+
+    stmt = (
+        select(CampaignLead.lead_id)
+        .join(Lead, CampaignLead.lead_id == Lead.id)
+        .where(CampaignLead.campaign_id == campaign_id)
+    )
+
+    search_filter = _campaign_lead_search_filter(body.filters.q)
+    if search_filter is not None:
+        stmt = stmt.where(search_filter)
+
+    if body.excluded_ids:
+        stmt = stmt.where(~CampaignLead.lead_id.in_(body.excluded_ids))
+
+    result = await db.execute(stmt)
+    return list(dict.fromkeys(int(x) for x in result.scalars().all()))
+
+
+@router.post("/{campaign_id}/leads/bulk-remove")
+async def bulk_remove_leads_from_campaign(
+    campaign_id: int,
+    body: LeadSelectionRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove selected leads from one campaign without deleting global Lead records."""
+    lead_ids = await _resolve_campaign_lead_selection_ids(db, campaign_id, body)
+
+    if not lead_ids:
+        return {"ok": True, "removed": 0}
+
+    result = await db.execute(
+        select(CampaignLead.id).where(
+            CampaignLead.campaign_id == campaign_id,
+            CampaignLead.lead_id.in_(lead_ids),
+        )
+    )
+    campaign_lead_ids = [int(x) for x in result.scalars().all()]
+
+    if not campaign_lead_ids:
+        return {"ok": True, "removed": 0}
+
+    await db.execute(
+        delete(QueueSlot).where(
+            QueueSlot.campaign_lead_id.in_(campaign_lead_ids)
+        )
+    )
+
+    result = await db.execute(
+        delete(CampaignLead).where(
+            CampaignLead.id.in_(campaign_lead_ids)
+        )
+    )
+    removed = result.rowcount or 0
+
+    await db.commit()
+
+    from app.routers.schedule import enqueue_global_recalculate
+    enqueue_global_recalculate(background_tasks)
+
+    log.info(
+        "bulk_remove_leads: campaign=%s removed=%s",
+        campaign_id,
+        removed,
+    )
+
+    return {"ok": True, "removed": removed}
 
 
 @router.delete("/{campaign_id}/leads/{lead_id}")

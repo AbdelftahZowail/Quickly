@@ -44,7 +44,12 @@ export default function CampaignDetail() {
   const [campaign, setCampaign] = useState(() => apiCache.get(`/campaigns/${id}`) || null);
   const [inboxes, setInboxes] = useState(() => apiCache.get('/inboxes') || []);
   const [sequences, setSequences] = useState(() => apiCache.get(`/campaigns/${id}/sequences`) || []);
-  const [leads, setLeads] = useState(() => apiCache.get(`/campaigns/${id}/leads`) || []);
+  const [leads, setLeads] = useState([]);
+  const [leadsPage, setLeadsPage] = useState(1);
+  const [leadsTotal, setLeadsTotal] = useState(0);
+  const [leadsHasMore, setLeadsHasMore] = useState(false);
+  const [leadsSearch, setLeadsSearch] = useState("");
+  const LEADS_PAGE_SIZE = 100;
   const [queueData, setQueueData] = useState(() => apiCache.get(`/campaigns/${id}/queue`) || []);
   const [sentData, setSentData] = useState(() => apiCache.get(`/campaigns/${id}/sent`) || []);
   const [queueFilter, setQueueFilter] = useState(null);
@@ -79,19 +84,15 @@ export default function CampaignDetail() {
   const loadAll = useCallback(async () => {
     loadingCtrl.start();
     try {
-      const [camp, ibxs, seqs, lds, q, s] = await Promise.all([
+      const [camp, ibxs, seqs, s] = await Promise.all([
         api.get(`/campaigns/${id}`),
         api.get('/inboxes'),
         api.get(`/campaigns/${id}/sequences`),
-        api.get(`/campaigns/${id}/leads`),
-        api.get(`/campaigns/${id}/queue`),
         api.get(`/campaigns/${id}/sent`),
       ]);
       setCampaign(camp);
       setInboxes(ibxs);
       setSequences(seqs);
-      setLeads(lds);
-      setQueueData(q);
       setSentData(s);
     } catch (e) {
       setError(e.message);
@@ -102,7 +103,59 @@ export default function CampaignDetail() {
     }
   }, [id]);
 
+  const loadLeads = useCallback(async (page = 1, search = leadsSearch) => {
+    try {
+      const q = (search || "").trim();
+      const searchParam = q ? `&search=${encodeURIComponent(q)}` : "";
+      const res = await api.get(
+        `/campaigns/${id}/leads/page?page=${page}&page_size=${LEADS_PAGE_SIZE}${searchParam}`
+      );
+      setLeads(res.items || []);
+      setLeadsTotal(res.total || 0);
+      setLeadsHasMore(!!res.has_more);
+      setLeadsPage(res.page || page);
+    } catch (e) {
+      notify({ type: "error", message: "Failed to load campaign leads" });
+    }
+  }, [id, leadsSearch]);
+
+  const handleLeadsSearchChange = useCallback((search) => {
+    setLeadsSearch(search);
+    loadLeads(1, search);
+  }, [loadLeads]);
+
+  const refreshLeads = useCallback(
+    () => loadLeads(leadsPage, leadsSearch),
+    [loadLeads, leadsPage, leadsSearch]
+  );
+
+  const loadSequences = useCallback(async () => {
+    try {
+      const seqs = await api.get(`/campaigns/${id}/sequences`);
+      setSequences(seqs);
+    } catch (e) {
+      notify({ type: 'error', message: 'Failed to load campaign sequences' });
+    }
+  }, [id]);
+
+  const loadQueue = useCallback(async () => {
+    try {
+      const q = await api.get(`/campaigns/${id}/queue`);
+      setQueueData(q);
+    } catch (e) {
+      notify({ type: 'error', message: 'Failed to load campaign queue' });
+    }
+  }, [id]);
+
   useEffect(() => { loadAll(); }, [id]);
+
+  useEffect(() => {
+    if (activeTab === 'leads') {
+      loadLeads();
+    } else if (activeTab === 'queue') {
+      loadQueue();
+    }
+  }, [activeTab, loadLeads, loadQueue]);
 
   const scheduleWaitMinutes = useMemo(() => {
     const ids = campaign?.inbox_ids;
@@ -287,7 +340,7 @@ export default function CampaignDetail() {
           campaignId={id}
           campaign={campaign}
           leads={leads}
-          refresh={loadAll}
+          refresh={loadSequences}
         />
       )}
 
@@ -295,8 +348,14 @@ export default function CampaignDetail() {
       {activeTab === 'leads' && (
         <LeadsTab
           leads={leads}
+          leadsPage={leadsPage}
+          leadsTotal={leadsTotal}
+          leadsHasMore={leadsHasMore}
+          leadsSearch={leadsSearch}
+          onLeadsSearchChange={handleLeadsSearchChange}
+          onLeadsPageChange={loadLeads}
           campaignId={id}
-          refresh={loadAll}
+          refresh={refreshLeads}
           onViewQueue={email => {
             setQueueFilter(email);
             setActiveTab('queue');
@@ -400,7 +459,7 @@ function deriveStatuses(lead) {
 }
 
 // ─── Leads Tab ────────────────────────────────────────────────────────────────
-function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
+function LeadsTab({ leads, leadsPage = 1, leadsTotal = 0, leadsHasMore = false, leadsSearch = "", onLeadsSearchChange, onLeadsPageChange, campaignId, refresh, onViewQueue }) {
   const notify  = useNotify();
   const confirm = useConfirm();
   const [mode, setMode]   = useState('single');
@@ -425,6 +484,71 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
   const [confirmPreview, setConfirmPreview] = useState(null);
   const [confirmAddLoading, setConfirmAddLoading] = useState(false);
   const [importFile, setImportFile] = useState(null);
+  const [searchInput, setSearchInput] = useState(leadsSearch);
+
+  useEffect(() => {
+    setSearchInput(leadsSearch);
+  }, [leadsSearch]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = searchInput.trim();
+      if (next !== leadsSearch) {
+        clearLeadSelection();
+        onLeadsSearchChange?.(next);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [searchInput, leadsSearch, onLeadsSearchChange]);
+
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [allSelected, setAllSelected] = useState(false);
+  const [excludedIds, setExcludedIds] = useState(() => new Set());
+  const toggleLead = (id) => {
+    if (allSelected) { setExcludedIds(x => { const n = new Set(x); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+    else { setSelectedIds(x => { const n = new Set(x); n.has(id) ? n.delete(id) : n.add(id); return n; }); }
+  };
+  const selectAllLeads = () => { setAllSelected(true); setSelectedIds(new Set()); setExcludedIds(new Set()); };
+  const clearLeadSelection = () => { setAllSelected(false); setSelectedIds(new Set()); setExcludedIds(new Set()); };
+
+  const handleBulkRemove = async () => {
+    const selectedCount = allSelected
+      ? leadsTotal - excludedIds.size
+      : selectedIds.size;
+
+    if (!selectedCount) return;
+
+    const confirmed = await confirm(
+      "Remove " + selectedCount.toLocaleString() + " lead(s) from this campaign? This will not delete the leads globally."
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await api.post(
+        "/campaigns/" + campaignId + "/leads/bulk-remove",
+        {
+          all_selected: allSelected,
+          lead_ids: [...selectedIds],
+          excluded_ids: [...excludedIds],
+          filters: { q: leadsSearch.trim() },
+        }
+      );
+
+      notify({
+        type: "success",
+        message: (res.removed || 0) + " lead(s) removed from campaign",
+      });
+      clearLeadSelection();
+      refresh();
+    } catch (e) {
+      notify({
+        type: "error",
+        message: e.message || "Failed to remove selected leads",
+      });
+    }
+  };
+
   // filters: { status, interest, opened, replied, clicked, verification }
   const [filters, setFilters] = useState({
     status: 'all',
@@ -475,6 +599,11 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
       return true;
     });
   }, [leads, filters]);
+
+  const togglePageSelection = (checked) => { filteredLeads.forEach(l => { const selected = allSelected ? excludedIds.has(l.lead_id) ? false : true : selectedIds.has(l.lead_id); if (checked != selected) toggleLead(l.lead_id); }); };
+
+  const pageSelectedCount = filteredLeads.filter(l => allSelected ? !excludedIds.has(l.lead_id) : selectedIds.has(l.lead_id)).length;
+  const pageFullySelected = filteredLeads.length > 0 && pageSelectedCount === filteredLeads.length;
 
   // Load verification summary
   const loadVerificationSummary = useCallback(async () => {
@@ -912,6 +1041,37 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         )}
       </div>
 
+      {/* Lead search */}
+      <div className="mb-3 flex items-center gap-3">
+        <div className="relative flex-1 max-w-xl">
+          <input
+            type="search"
+            value={searchInput}
+            onChange={e => setSearchInput(e.target.value)}
+            placeholder="Search email, name, company or domain..."
+            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 pr-9 text-sm outline-none transition focus:border-teal-400 focus:ring-2 focus:ring-teal-200"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => {
+                clearLeadSelection();
+                setSearchInput("");
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 px-1 text-gray-400 hover:text-gray-700"
+              aria-label="Clear search"
+            >
+              ×
+            </button>
+          )}
+        </div>
+        {leadsSearch && (
+          <span className="text-xs text-gray-500 whitespace-nowrap">
+            {leadsTotal.toLocaleString()} matching leads
+          </span>
+        )}
+      </div>
+
       {/* Filter bar */}
       <div className="flex flex-wrap gap-x-6 gap-y-2 p-3 bg-gray-50 dark:bg-gray-800/40 rounded-lg border border-gray-200 dark:border-gray-700 text-xs">
         {/* Status */}
@@ -1005,6 +1165,32 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
       </div>
 
 
+      {pageFullySelected && !allSelected && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
+          <span>All {pageSelectedCount} leads on this page are selected.</span>
+          <button className="font-medium text-teal-700 hover:underline" onClick={selectAllLeads}>
+            Select all {leadsTotal.toLocaleString()} {leadsSearch ? "matching " : ""}leads
+          </button>
+        </div>
+      )}
+
+      {allSelected && (
+        <div className="mb-3 flex items-center justify-between rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
+          <span>
+            {(leadsTotal - excludedIds.size).toLocaleString()} of {leadsTotal.toLocaleString()}
+            {leadsSearch ? " matching" : ""} leads selected.
+          </span>
+          <div className="flex items-center gap-4">
+            <button className="font-medium text-red-600 hover:underline" onClick={handleBulkRemove}>
+              Remove selected
+            </button>
+            <button className="font-medium text-gray-600 hover:underline" onClick={clearLeadSelection}>
+              Clear selection
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Leads table */}
       {filteredLeads.length === 0 ? (
         <div className="bg-gray-50 rounded-lg border border-dashed border-gray-300 p-8 text-center text-gray-400">
@@ -1017,6 +1203,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
           <table className="min-w-max w-full text-sm bg-white">
             <thead>
               <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="px-4 py-3"><input type="checkbox" checked={pageFullySelected} onChange={(e) => togglePageSelection(e.target.checked)} /></th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600 whitespace-nowrap">Email</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Name</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-600">Status</th>
@@ -1034,6 +1221,7 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
             <tbody>
               {filteredLeads.map(l => (
                 <tr key={l.lead_id} className="border-b border-gray-100 hover:bg-gray-50/60 transition-colors">
+                  <td className="px-4 py-2.5"><input type="checkbox" checked={allSelected ? excludedIds.has(l.lead_id) ? false : true : selectedIds.has(l.lead_id)} onChange={() => toggleLead(l.lead_id)} /></td>
                   {/* email */}
                   <td className="px-4 py-2.5">
                     <button
@@ -1173,6 +1361,13 @@ function LeadsTab({ leads, campaignId, refresh, onViewQueue }) {
         </div>
       )}
 
+      {leadsTotal > 0 && (
+        <div className="flex items-center justify-center gap-3 py-4">
+          <Button size="sm" variant="outline" disabled={leadsPage <= 1} onClick={() => onLeadsPageChange?.(leadsPage - 1)}>Previous</Button>
+          <span className="text-xs text-gray-400">Page {leadsPage} / {Math.ceil(leadsTotal / 100)} · {leadsTotal} leads</span>
+          <Button size="sm" variant="outline" disabled={!leadsHasMore} onClick={() => onLeadsPageChange?.(leadsPage + 1)}>Next</Button>
+        </div>
+      )}
       {/* Confirm leads modal */}
       {showLeadsConfirm && confirmPreview && (
         <div

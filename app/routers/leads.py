@@ -8,7 +8,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
-from sqlalchemy import delete, exists, or_, select
+from sqlalchemy import delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,13 +22,17 @@ from app.models import (
     GmailMessage,
     Lead,
     LeadReply,
+    LeadUnsubscribeToken,
+    Notification,
     Office365Message,
+    QueueSlot,
 )
 from app.schemas import (
     LeadBulkDeleteRequest,
     LeadBulkRecoverItem,
     LeadBulkRecoverRequest,
     LeadBulkStatusRequest,
+    LeadSelectionRequest,
     LeadCreate,
     LeadRecoverRequest,
     LeadResponse,
@@ -548,6 +552,75 @@ async def list_leads(
     ]
 
 
+async def _resolve_lead_selection_ids(db: AsyncSession, body: LeadSelectionRequest) -> list[int]:
+    if not body.all_selected:
+        return list(dict.fromkeys(body.lead_ids))
+
+    f = body.filters
+    intr = _optional_interest_for_stmt(f.interest)
+    stmt = _build_leads_stmt(
+        q=f.q,
+        status=f.status,
+        bad_only=f.bad_only,
+        interest=intr,
+    )
+    if body.excluded_ids:
+        stmt = stmt.where(~Lead.id.in_(body.excluded_ids))
+
+    result = await db.execute(stmt.with_only_columns(Lead.id))
+    return [int(x) for x in result.scalars().all()]
+
+
+@router.get("/page")
+async def list_leads_page(
+    status: str | None = Query(None),
+    bad_only: bool = Query(False),
+    interest: str | None = Query(None),
+    q: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    intr = _optional_interest_for_stmt(interest)
+    base_stmt = _build_leads_stmt(q=q, status=status, bad_only=bad_only, interest=intr)
+
+    count_stmt = select(func.count()).select_from(
+        base_stmt.order_by(None).subquery()
+    )
+    total = int((await db.execute(count_stmt)).scalar_one())
+
+    offset = (page - 1) * page_size
+    stmt = base_stmt.offset(offset).limit(page_size)
+    result = await db.execute(stmt)
+    leads = result.scalars().all()
+
+    ids = [x.id for x in leads]
+    opened, clicked, replied = await _engagement_pair_sets(db, ids)
+    pairs: set[tuple[int, int]] = set()
+    for x in leads:
+        for cl in x.campaign_leads:
+            pairs.add((x.id, cl.campaign_id))
+    inbox_by_pair = await from_inbox_email_by_lead_campaign(db, pairs)
+    interactions_map = await _fetch_lead_interactions_batch(db, ids) if ids else {}
+
+    items = [
+        _lead_to_response(
+            x, opened, clicked, replied,
+            interactions=interactions_map.get(x.id, []),
+            inbox_by_pair=inbox_by_pair,
+        )
+        for x in leads
+    ]
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": offset + len(items) < total,
+    }
+
+
 @router.get("/export")
 async def export_leads_csv(
     status: str | None = Query(None),
@@ -634,6 +707,95 @@ async def export_leads_csv(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="leads_{suffix}.csv"'},
     )
+
+
+@router.post("/bulk-delete-selection")
+async def bulk_delete_leads_selection(
+    body: LeadSelectionRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    lead_ids = await _resolve_lead_selection_ids(db, body)
+
+    if not lead_ids:
+        return {"ok": True, "deleted": 0}
+
+    BATCH_SIZE = 1000
+    all_campaign_ids: set[int] = set()
+    deleted = 0
+
+    for start_idx in range(0, len(lead_ids), BATCH_SIZE):
+        batch_ids = lead_ids[start_idx:start_idx + BATCH_SIZE]
+
+        campaign_result = await db.execute(
+            select(CampaignLead.campaign_id)
+            .where(CampaignLead.lead_id.in_(batch_ids))
+            .distinct()
+        )
+        all_campaign_ids.update(
+            int(cid) for (cid,) in campaign_result.all()
+        )
+
+        await db.execute(
+            delete(Notification).where(
+                Notification.lead_id.in_(batch_ids)
+            )
+        )
+
+        await db.execute(
+            delete(LeadUnsubscribeToken).where(
+                LeadUnsubscribeToken.lead_id.in_(batch_ids)
+            )
+        )
+
+        await db.execute(
+            delete(EmailLog).where(
+                EmailLog.lead_id.in_(batch_ids)
+            )
+        )
+
+        await db.execute(
+            delete(LeadReply).where(
+                LeadReply.lead_id.in_(batch_ids)
+            )
+        )
+
+        await db.execute(
+            delete(QueueSlot).where(
+                QueueSlot.campaign_lead_id.in_(
+                    select(CampaignLead.id).where(
+                        CampaignLead.lead_id.in_(batch_ids)
+                    )
+                )
+            )
+        )
+
+        await db.execute(
+            delete(CampaignLead).where(
+                CampaignLead.lead_id.in_(batch_ids)
+            )
+        )
+
+        result = await db.execute(
+            delete(Lead).where(
+                Lead.id.in_(batch_ids)
+            )
+        )
+
+        deleted += result.rowcount or 0
+
+    if deleted:
+        await db.commit()
+
+    if all_campaign_ids:
+        log.info(
+            "bulk_delete_leads_selection: deleted %d lead(s); recalc (campaigns touched)",
+            deleted,
+        )
+        from app.routers.schedule import enqueue_global_recalculate
+        enqueue_global_recalculate(background_tasks)
+
+    return {"ok": True, "deleted": deleted}
 
 
 @router.post("/bulk-delete")
