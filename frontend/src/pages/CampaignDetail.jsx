@@ -2276,6 +2276,11 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null, ed
         lead_id: leadId ? Number(leadId) : null,
         to_email: testEmail.trim(),
         ...(variant ? { variant_id: variant.id } : {}),
+        ...(editingOverride ? {
+          subject_override: editingOverride.subject ?? null,
+          body_override: editingOverride.body ?? null,
+          is_html_override: editingOverride.is_html ?? null,
+        } : {}),
       });
       setTestState('success');
       setTimeout(() => setTestState(null), 3000);

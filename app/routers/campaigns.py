@@ -1618,6 +1618,11 @@ class TestEmailRequest(BaseModel):
     lead_id: int | None = None
     to_email: str
     variant_id: int | None = None  # If set, send this A/B variant's content
+    # Optional unsaved-content overrides so a test email sent from the preview
+    # modal matches exactly what the preview showed.
+    subject_override: str | None = None
+    body_override: str | None = None
+    is_html_override: bool | None = None
 
 
 @router.post("/{campaign_id}/send-test")
@@ -1656,10 +1661,13 @@ async def send_test_email(
     if not inbox:
         raise HTTPException(400, "No inboxes configured for this campaign")
 
-    # Resolve variant content when a variant_id is supplied.
-    send_body = seq.body or ""
-    send_subject = seq.subject or "(no subject)"
-    send_is_html = bool(seq.is_html)
+    # Resolve the content to send.  Unsaved overrides (passed when the preview
+    # modal is open on an unsaved edit) are applied first; an explicit variant
+    # selection still wins — mirroring the preview endpoint so the test email
+    # is identical to what was previewed.
+    send_body = data.body_override if data.body_override is not None else (seq.body or "")
+    send_subject = data.subject_override if data.subject_override is not None else (seq.subject or "(no subject)")
+    send_is_html = data.is_html_override if data.is_html_override is not None else bool(seq.is_html)
     if data.variant_id is not None:
         from app.models import SequenceVariant
         var_result = await db.execute(
@@ -1687,20 +1695,36 @@ async def send_test_email(
     rendered_body = render_body(send_body, lead_data, context=render_ctx)
     rendered_subject = render_body(send_subject, lead_data, context=render_ctx)
 
-    # Get Gmail account if needed
+    # Normalise HTML exactly as the real send path does so the test email is
+    # identical to the delivered email and to the preview.
+    if send_is_html:
+        rendered_body = normalize_email_html(rendered_body)
+
+    # Load provider credentials keyed by inbox_id — the queue/send-job paths do
+    # the same. GmailAccount/Office365Account have no ``email`` column, so the
+    # old ``GmailAccount.email == inbox.email`` lookup raised AttributeError
+    # (500) before Gmail was ever contacted.
+    provider = getattr(inbox, "provider", "") or ""
     gmail_account = None
-    if getattr(inbox, "provider", "") == "gmail":
+    office365_account = None
+    if provider == "gmail":
         from app.models import GmailAccount
         ga_result = await db.execute(
-            select(GmailAccount).where(GmailAccount.email == inbox.email)
+            select(GmailAccount).where(GmailAccount.inbox_id == inbox.id)
         )
         gmail_account = ga_result.scalar_one_or_none()
+    elif provider == "office365":
+        from app.models import Office365Account
+        oa_result = await db.execute(
+            select(Office365Account).where(Office365Account.inbox_id == inbox.id)
+        )
+        office365_account = oa_result.scalar_one_or_none()
 
     # Get SMTP account if needed (otherwise send_email's SMTP branch
     # returns SendFailure — "No SMTP credentials provided" — and the
     # test email can never be sent from an SMTP inbox)
     smtp_account = None
-    if getattr(inbox, "provider", "") == "smtp":
+    if provider == "smtp":
         from app.models import SmtpAccount
         sa_result = await db.execute(
             select(SmtpAccount).where(SmtpAccount.inbox_id == inbox.id)
@@ -1718,8 +1742,9 @@ async def send_test_email(
             from_email=inbox.email or "",
             from_name=inbox.display_name or "",
             is_html=send_is_html,
-            provider=getattr(inbox, "provider", "resend") or "resend",
+            provider=provider or "resend",
             gmail_account=gmail_account,
+            office365_account=office365_account,
             smtp_account=smtp_account,
         ),
     )

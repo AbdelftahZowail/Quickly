@@ -397,6 +397,100 @@ async def test_send_test_email_smtp_missing_account_500(session, monkeypatch):
         )
 
 
+@pytest.mark.asyncio
+async def test_send_test_email_passes_gmail_account(session, monkeypatch):
+    """Regression: a Gmail inbox's test send must load GmailAccount by
+    inbox_id. The old ``GmailAccount.email == inbox.email`` lookup referenced a
+    non-existent column and raised AttributeError -> 500 before Gmail contact."""
+    from app.models import GmailAccount
+    from app.routers import campaigns as campaigns_router
+    from app.routers.campaigns import TestEmailRequest
+
+    campaign = Campaign(name="T", sending_days=[], timezone="UTC")
+    session.add(campaign)
+    await session.flush()
+
+    inbox = Inbox(email="me@gmail.com", provider="gmail")
+    session.add(inbox)
+    await session.flush()
+    session.add(CampaignInbox(campaign_id=campaign.id, inbox_id=inbox.id, position=0))
+
+    seq = Sequence(campaign_id=campaign.id, position=0, subject="Hi", body="Hello")
+    session.add(seq)
+    await session.flush()
+
+    acct = GmailAccount(
+        inbox_id=inbox.id,
+        google_email="me@gmail.com",
+        access_token="access",
+        refresh_token="refresh",
+    )
+    session.add(acct)
+    await session.flush()
+
+    captured = {}
+
+    def _fake_send_email(**kwargs):
+        captured.update(kwargs)
+        return sender_mod.SendResult(message_id="test-gmail", thread_id="t")
+
+    monkeypatch.setattr(sender_mod, "send_email", _fake_send_email)
+
+    result = await campaigns_router.send_test_email(
+        campaign.id, TestEmailRequest(sequence_id=seq.id, to_email="me@me.com"), db=session
+    )
+    assert result["ok"] is True
+    assert captured["provider"] == "gmail"
+    assert captured["gmail_account"] is acct
+
+
+@pytest.mark.asyncio
+async def test_send_test_email_passes_office365_account(session, monkeypatch):
+    """Regression: an Office 365 inbox's test send must load its
+    Office365Account by inbox_id, or send_email returns SendFailure
+    ("No Office 365 credentials provided")."""
+    from app.models import Office365Account
+    from app.routers import campaigns as campaigns_router
+    from app.routers.campaigns import TestEmailRequest
+
+    campaign = Campaign(name="T", sending_days=[], timezone="UTC")
+    session.add(campaign)
+    await session.flush()
+
+    inbox = Inbox(email="me@contoso.com", provider="office365")
+    session.add(inbox)
+    await session.flush()
+    session.add(CampaignInbox(campaign_id=campaign.id, inbox_id=inbox.id, position=0))
+
+    seq = Sequence(campaign_id=campaign.id, position=0, subject="Hi", body="Hello")
+    session.add(seq)
+    await session.flush()
+
+    acct = Office365Account(
+        inbox_id=inbox.id,
+        microsoft_email="me@contoso.com",
+        access_token="access",
+        refresh_token="refresh",
+    )
+    session.add(acct)
+    await session.flush()
+
+    captured = {}
+
+    def _fake_send_email(**kwargs):
+        captured.update(kwargs)
+        return sender_mod.SendResult(message_id="test-o365", thread_id="t")
+
+    monkeypatch.setattr(sender_mod, "send_email", _fake_send_email)
+
+    result = await campaigns_router.send_test_email(
+        campaign.id, TestEmailRequest(sequence_id=seq.id, to_email="me@me.com"), db=session
+    )
+    assert result["ok"] is True
+    assert captured["provider"] == "office365"
+    assert captured["office365_account"] is acct
+
+
 # ---- SMTP router CRUD ------------------------------------------------------
 
 
