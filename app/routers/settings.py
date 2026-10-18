@@ -369,6 +369,44 @@ async def set_test_mode_endpoint(
         raise HTTPException(500, f"Failed to update test mode: {e}")
 
 
+# Telemetry ---------------------------------------------------------------
+
+from app.auth import require_admin as _require_admin
+
+
+@router.get("/telemetry")
+async def get_telemetry_endpoint(
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(_require_admin),
+):
+    """Return whether anonymous usage telemetry is enabled on this instance."""
+    from app.app_settings import get_telemetry_enabled
+
+    return {"telemetry_enabled": await get_telemetry_enabled(db)}
+
+
+class _TelemetryPayload(_BaseModel):
+    telemetry_enabled: bool
+
+
+@router.post("/telemetry")
+async def set_telemetry_endpoint(
+    payload: _TelemetryPayload,
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(_require_admin),
+):
+    """Enable or disable anonymous usage telemetry from the settings UI."""
+    try:
+        from app.app_settings import set_telemetry_enabled
+
+        await set_telemetry_enabled(db, payload.telemetry_enabled)
+        await db.commit()
+        return {"ok": True, "telemetry_enabled": payload.telemetry_enabled}
+    except Exception as e:
+        log.error("set_telemetry failed: %s", e)
+        raise HTTPException(500, f"Failed to update telemetry: {e}")
+
+
 # Survey tools / utility endpoints ----------------------------------------
 
 

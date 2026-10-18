@@ -206,6 +206,10 @@ The `.env` file is intentionally minimal. All runtime settings — AI providers,
 | `OFFICE365_TENANT_ID`     | No             | Defaults to `common` (multi-tenant); set to your tenant ID for single-tenant orgs |
 | `QUICKLY_SECRET_KEY`      | Recommended    | JWT signing secret                                                                |
 | `CORS_ORIGINS`            | No             | Comma-separated allowed origins                                                   |
+| `QUICKLY_TELEMETRY`       | No             | Opt-out aggregate telemetry; defaults to `true`, set `false` to disable. Sends coarse install scale (RAM rounded up to GB, CPU count, `docker`/`bare`, OS/CPU family) and aggregate usage counts only |
+| `QUICKLY_TELEMETRY_URL`   | No             | Managed hub base URL; official releases use `https://telemetry.shortformfunnels.com` |
+| `QUICKLY_TELEMETRY_KEY`   | No             | Managed hub write key, supplied as a release-build secret; never commit it     |
+| `QUICKLY_VERSION`         | Release only   | Injected by release builds; source builds default to `unknown` and do not send    |
 
 See [`.env.example`](.env.example) for the full annotated reference.
 

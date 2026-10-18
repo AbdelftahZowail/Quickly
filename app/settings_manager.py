@@ -65,6 +65,19 @@ class Settings:
             "yes",
         )
 
+        # Anonymous usage telemetry (see app/telemetry.py).
+        #   telemetry_env_enabled — process environment; QUICKLY_TELEMETRY=false
+        #     turns it off and wins over the UI toggle.
+        #   telemetry_enabled     — DB-backed opt-out toggle exposed in Settings.
+        #   telemetry_url/key     — hub endpoint; empty disables sending.
+        # Telemetry is opt-out for self-hosted installs.
+        self.telemetry_env_enabled: bool = os.getenv(
+            "QUICKLY_TELEMETRY", "true"
+        ).lower() not in ("false", "0", "no", "off")
+        self.telemetry_enabled: bool = True
+        self.telemetry_url: str = os.getenv("QUICKLY_TELEMETRY_URL", "").strip()
+        self.telemetry_key: str = os.getenv("QUICKLY_TELEMETRY_KEY", "").strip()
+
         # Time travel offset (integer days). 0 means real now.
         # Can be overridden via the TIME_OFFSET_DAYS environment variable when
         # the application first starts (useful for tests or quick manual
@@ -106,6 +119,12 @@ class Settings:
             self.queue_check_interval_minutes = int(data["queue_check_interval_minutes"])
         if "test_mode" in data:
             self.test_mode = str(data["test_mode"]).lower() in ("true", "1", "yes")
+        if "telemetry_enabled" in data:
+            self.telemetry_enabled = str(data["telemetry_enabled"]).lower() in (
+                "true",
+                "1",
+                "yes",
+            )
         if "time_offset_days" in data:
             try:
                 self.time_offset_days = int(data["time_offset_days"])
@@ -194,6 +213,7 @@ async def initialize_settings(db: AsyncSession):
             "base_url": settings.base_url,
             "queue_check_interval_minutes": str(settings.queue_check_interval_minutes),
             "test_mode": str(settings.test_mode),
+            "telemetry_enabled": str(settings.telemetry_enabled),
             "time_offset_days": str(settings.time_offset_days),
         }
         await save_all_settings_to_db(db, default_data)
@@ -218,6 +238,16 @@ async def initialize_settings(db: AsyncSession):
     # When BASE_URL is configured in the environment, it overrides DB (including
     # values from an older backup) and the stored setting is brought in sync.
     await _sync_base_url_from_environment(db)
+
+    # Persist the default opt-out state on an existing installation too.  The
+    # absence of a key is treated as enabled by the API/helper, but writing it
+    # explicitly makes the operator's choice visible and survives restarts.
+    if "telemetry_enabled" not in data:
+        await save_setting_to_db(db, "telemetry_enabled", "true")
+        settings.telemetry_enabled = True
+        # This branch runs for existing databases. Commit the explicit default
+        # before the security-secret reconciliation below so it survives restart.
+        await db.commit()
 
     # Ensure all persistent security secrets exist (generates + saves if absent).
     await _ensure_secrets(db)

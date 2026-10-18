@@ -207,7 +207,13 @@ The `.env` file is intentionally minimal. All runtime settings (test mode, time 
 | `OFFICE365_CLIENT_SECRET` | For Office 365 | Microsoft Entra app client secret |
 | `OFFICE365_TENANT_ID` | No | Directory (tenant) ID. Defaults to `common` (multi-tenant) |
 | `QUICKLY_SECRET_KEY` | Recommended | JWT signing secret. Auto-generated if not set (tokens reset on restart) |
+| `QUICKLY_TELEMETRY` | No | Opt-out aggregate telemetry; defaults to `true`, set `false` to disable. Sends coarse install scale (RAM rounded up to GB, CPU count, `docker`/`bare`, OS/CPU family) and aggregate usage counts only. |
+| `QUICKLY_TELEMETRY_URL` | No | Managed hub base URL; official releases use `https://telemetry.shortformfunnels.com`. |
+| `QUICKLY_TELEMETRY_KEY` | No | Managed hub write key, supplied to release builds as a secret. Keep it out of source control. |
+| `QUICKLY_VERSION` | Release only | Injected by the release image build; local source builds default to `unknown` and do not send. |
 | `CORS_ORIGINS` | No | Comma-separated allowed origins for CORS (default: localhost dev setup) |
+
+> **Notices vs telemetry.** The in-app notice strip and version check (`GET /api/notices`, auth-gated) proxy the **public** hub announcement and version feeds. They are independent of usage telemetry: `QUICKLY_TELEMETRY=false` stops the heartbeat but does **not** disable the read-only feed.
 
 ---
 

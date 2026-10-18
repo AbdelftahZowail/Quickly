@@ -49,6 +49,16 @@ COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 # expose the port our FastAPI server listens on
 EXPOSE 8000
 
+# Release builds pass the tag (for example v2.4.0) as a build argument.  The
+# application strips the leading v when reporting its version.  A source/dev
+# build intentionally remains "unknown" and therefore never sends telemetry.
+ARG QUICKLY_VERSION=unknown
+ENV QUICKLY_VERSION=${QUICKLY_VERSION}
+# The managed hub key is intentionally a low-privilege ingestion filter. Keep
+# it out of source control; release automation supplies it as a build arg.
+ARG QUICKLY_TELEMETRY_KEY=""
+ENV QUICKLY_TELEMETRY_KEY=${QUICKLY_TELEMETRY_KEY}
+ENV QUICKLY_TELEMETRY_URL=https://telemetry.shortformfunnels.com
 # production builds default to production mode; override with
 # QUICKLY_MODE=development in your .env / environment if needed.
 ENV QUICKLY_MODE=production

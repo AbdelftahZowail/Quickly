@@ -48,7 +48,7 @@ from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
 from app.routers import system_health as system_health_router
 from app.routers import analytics as analytics_router
-from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count
+from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count, run_telemetry_heartbeat_job
 from app.unibox import queue_sync_for_all_inboxes, run_unibox_sync_job
 from app import time as time_provider
 import app.scheduler as scheduler_mod
@@ -96,6 +96,20 @@ async def lifespan(app: FastAPI):
             hours=6,
             id="office365_graph_subscription_renewal",
             replace_existing=True,
+        )
+        # Anonymous usage heartbeat (app/telemetry.py). Disabled by the Settings
+        # toggle or QUICKLY_TELEMETRY=false; enabled by default; fails open when the hub is
+        # unreachable. Fires once shortly after boot, then every 12 hours.
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+        schedule.add_job(
+            run_telemetry_heartbeat_job,
+            "interval",
+            hours=12,
+            id="telemetry_heartbeat",
+            replace_existing=True,
+            max_instances=1,
+            next_run_time=_dt.now(_tz.utc) + _td(seconds=45),
         )
         # Single periodic worker: every minute it looks ahead 60 seconds and spawns
         # a lightweight asyncio.Task per slot timed to its exact scheduled_date.

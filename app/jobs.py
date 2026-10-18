@@ -1947,3 +1947,21 @@ async def run_slot_scan_job() -> None:
             "run_slot_scan_job: dispatched %d task(s) (window %s → +60 s)",
             dispatched, now.isoformat(),
         )
+
+
+async def run_telemetry_heartbeat_job() -> None:
+    """Periodic anonymous usage heartbeat (see app/telemetry.py).
+
+    Registered in main.py. Sends only when telemetry is enabled and configured;
+    every error is swallowed so an unreachable hub can never affect the app.
+    """
+    from app import telemetry
+
+    if not telemetry.telemetry_active():
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            if await telemetry.send_telemetry(session):
+                log.info("telemetry: heartbeat sent")
+    except Exception:
+        log.debug("telemetry: heartbeat failed", exc_info=True)

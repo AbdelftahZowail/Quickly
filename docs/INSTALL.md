@@ -940,6 +940,10 @@ The PostgreSQL Docker volume keeps your data across updates (`quickly_pgdata` fo
 |`OFFICE365_TENANT_ID`|No|`common`|Use `common` for multi-tenant, or your specific tenant ID — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
 |`QUICKLY_SECRET_KEY`|No|auto-generated|JWT signing key — **set this** or sessions reset on every restart|
 |`CORS_ORIGINS`|No|`http://localhost:5173,...`|Comma-separated allowed CORS origins|
+|`QUICKLY_TELEMETRY`|No|`true`|Opt-out aggregate usage telemetry; set `false` to disable. Sends coarse install scale (RAM rounded up to GB, CPU count, `docker`/`bare`, OS/CPU family) and aggregate usage counts only|
+|`QUICKLY_TELEMETRY_URL`|No|`https://telemetry.shortformfunnels.com`|Managed telemetry hub base URL; the client appends `/v1/telemetry`|
+|`QUICKLY_TELEMETRY_KEY`|No|_(release build secret)_|Managed hub write key; never commit a real key|
+|`QUICKLY_VERSION`|Release build only|_(injected)_|Release version used by telemetry; source builds default to `unknown` and do not send|
 |`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo (including **`docker-compose.no-caddy.yml`**) set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest backup files (`.qbk` wrapper format). PaaS without a volume: use **webhook** instead.|
 |`QUICKLY_PREBUILT_IMAGE`|No|`1` in Docker image|When `1`/`true`/`yes`, the inbox UI hides CNAME-to-Quickly custom tracking setup so operators use **Beacon** instead. **`docker-compose.dev.yml`** sets `0` (CNAME UI visible while hacking). Production **`docker-compose-not-host.yml`** sets `0` for legacy host-Caddy + CNAME tracking. **`docker-compose.no-caddy.yml`**, **`docker-compose.no-caddy.dev.yml`**, and **`docker-compose-not-host.dev.yml`** set `1` to mirror the prebuilt image.|
 |`QUICKLY_TRACKING_CNAME_UI`|No|_(off)_|Set to `1`/`true`/`yes` to **show** the CNAME custom tracking UI even when `QUICKLY_PREBUILT_IMAGE=1` (advanced / host-Caddy setups).|

@@ -63,6 +63,9 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            QUICKLY_VERSION=${{ steps.tagger.outputs.TAG }}
+            QUICKLY_TELEMETRY_KEY=${{ secrets.QUICKLY_TELEMETRY_KEY }}
           push: ${{ github.event_name != 'workflow_dispatch' || inputs.push_image }}
           outputs: type=image,name=azowail/quickly,push-by-digest=true,name-canonical=true
           cache-from: type=registry,ref=azowail/quickly:cache-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}

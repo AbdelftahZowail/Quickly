@@ -21,6 +21,9 @@ log = logging.getLogger("quickly.app_settings")
 GOOGLE_CLIENT_ID_KEY = "google_client_id"
 GOOGLE_CLIENT_SECRET_KEY = "google_client_secret"
 TEST_MODE_KEY = "test_mode"
+# Anonymous usage telemetry UI toggle. Enabled by default; the UI or
+# QUICKLY_TELEMETRY=false can turn it off (see app/telemetry.py).
+TELEMETRY_ENABLED_KEY = "telemetry_enabled"
 SCHEDULING_STRATEGY_KEY = "scheduling_strategy"  # "priority" (default) | "round_robin"
 # ISO-8601 UTC timestamp; bumped when a global queue recalculation completes successfully.
 GLOBAL_RECALC_FINISHED_AT_KEY = "global_recalc_finished_at"
@@ -113,6 +116,25 @@ async def set_test_mode(db: AsyncSession, enabled: bool) -> None:
     from app.settings_manager import reload_settings
     await reload_settings(db)
     log.info("Test mode %s", "enabled" if enabled else "disabled")
+
+
+# Telemetry convenience --------------------------------------------------------
+
+async def get_telemetry_enabled(db: AsyncSession) -> bool:
+    """Return the in-app telemetry toggle (opt-out by default)."""
+    value = await get_setting(db, TELEMETRY_ENABLED_KEY)
+    if value is None:
+        return True
+    return value.strip().lower() in ("true", "1", "yes")
+
+
+async def set_telemetry_enabled(db: AsyncSession, enabled: bool) -> None:
+    """Enable or disable anonymous usage telemetry from the settings UI."""
+    await put_setting(db, TELEMETRY_ENABLED_KEY, "true" if enabled else "false")
+    await db.flush()
+    from app.settings_manager import reload_settings
+    await reload_settings(db)
+    log.info("Telemetry %s", "enabled" if enabled else "disabled")
 
 
 # Scheduling strategy convenience ---------------------------------------------

@@ -32,13 +32,19 @@ class BackupPackageError(Exception):
 
 
 def _app_version() -> str:
-    try:
-        from importlib.metadata import version
-
-        return version("quickly")
-    except Exception:
-        pass
-    return os.getenv("QUICKLY_VERSION", "unknown")
+    # The build-time release value is authoritative.  Prefer it over package
+    # metadata so a stale/local package version cannot misreport an official
+    # image (and so a ``v``-prefixed Git tag is normalized for the wire format).
+    value = os.getenv("QUICKLY_VERSION", "").strip()
+    if not value:
+        # A source checkout is not a release build. Do not fall back to package
+        # metadata (which may report a stale development version); telemetry
+        # must remain disabled until QUICKLY_VERSION is explicitly injected.
+        value = "unknown"
+    value = value.strip()
+    if value.startswith("v"):
+        value = value[1:]
+    return value
 
 
 def mask_email_for_preview(email: str) -> str:
