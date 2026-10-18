@@ -6,6 +6,7 @@ import { api, apiCache } from '../api';
 import { Button } from '../components/ui/Button';
 import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
+import EmailContent from '../components/EmailContent';
 import DatePicker from '../components/ui/DatePicker';
 import { useConfirm } from '../context/ConfirmContext';
 import { useAppMode } from '../context/AppModeContext';
@@ -2345,10 +2346,12 @@ function PreviewModal({ sequence, campaignId, leads, onClose, variant = null, ed
               <div>
                 <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
                 {preview.is_html ? (
-                  <div
-                    className="border rounded-lg p-5 bg-white prose prose-sm max-w-none"
-                    dangerouslySetInnerHTML={{ __html: preview.body }}
-                  />
+                  <div className="border rounded-lg p-5 bg-white">
+                    {/* Rendered in an isolated shadow root so app CSS (Tailwind
+                        preflight) cannot distort the email the way a client
+                        renders it. */}
+                    <EmailContent html={preview.body} />
+                  </div>
                 ) : (
                   <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800">
                     {preview.body}
@@ -3167,7 +3170,7 @@ function SequencesTab({ sequences, campaignId, campaign, leads, refresh }) {
                   <div>
                     <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
                     {selectedSeq.is_html ? (
-                      <div className="border rounded-lg p-5 bg-white prose prose-sm max-w-none min-h-[200px]" dangerouslySetInnerHTML={{ __html: selectedSeq.body }} />
+                      <div className="border rounded-lg p-5 bg-white min-h-[200px]" dangerouslySetInnerHTML={{ __html: selectedSeq.body }} />
                     ) : (
                       <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800 min-h-[200px]">{selectedSeq.body || '(empty)'}</pre>
                     )}

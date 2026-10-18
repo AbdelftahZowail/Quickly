@@ -18,6 +18,7 @@ from datetime import date
 from typing import List
 
 from app.database import get_db
+from app.email_html import normalize_email_html
 from app.models import (
     Campaign,
     Sequence,
@@ -1576,6 +1577,11 @@ async def preview_email(
     render_ctx = RenderContext()  # same {{random: ...}} pick across subject + body
     rendered_body = render_body(preview_body, lead_data, context=render_ctx)
     rendered_subject = render_body(preview_subject, lead_data, context=render_ctx)
+
+    # Normalise HTML exactly as the send path does so the preview is identical
+    # to the delivered email.
+    if preview_is_html:
+        rendered_body = normalize_email_html(rendered_body)
 
     # For HTML sequences inject tracking with a placeholder log id so that
     # tracking URLs look realistic (they won't resolve until a real send).

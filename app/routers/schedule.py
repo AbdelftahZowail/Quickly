@@ -16,6 +16,7 @@ from app.models import (
     Lead, Inbox, EmailLog, EmailOpen, EmailClick, CustomEmailOverride,
 )
 from app.sender import render_body, get_lead_data, RenderContext
+from app.email_html import normalize_email_html
 from app.queue_logic import recalculate_queue_after_sequence_change_for_leads, recalculate_queue_round_robin
 from app import time as time_provider
 from app.app_settings import (
@@ -91,6 +92,10 @@ def _serialize_sent(
         is_html = bool(seq.is_html) if seq else False
         variant_id = None
         has_variants = False
+    # Normalise HTML exactly as the send path does so the Schedule preview
+    # matches the delivered email (idempotent for already-normalised bodies).
+    if is_html and body:
+        body = normalize_email_html(body)
     return {
         "type": "sent",
         "log_id": el.id,
@@ -154,6 +159,10 @@ def _serialize_scheduled(
         is_html = bool(seq.is_html) if seq else False
         variant_id = None
         has_variants = False
+    # Normalise HTML exactly as the send path does so the Schedule preview
+    # matches the delivered email (idempotent for already-normalised bodies).
+    if is_html and body:
+        body = normalize_email_html(body)
     return {
         "type": "scheduled",
         "slot_id": slot.id,

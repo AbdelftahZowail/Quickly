@@ -39,6 +39,7 @@ from app.models import (
     CustomEmailOverride,
 )
 from app.sender import send_email, render_body, get_lead_data, RenderContext, SendResult, SendFailure, build_quote_html, build_quote_plain, _plain_to_quoted_html, _strip_html_tags
+from app.email_html import normalize_email_html
 from app.webhooks import fire_webhook_event
 from app.app_settings import get_google_oauth_credentials, get_office365_oauth_credentials
 from app import time as time_provider
@@ -733,6 +734,10 @@ async def run_send_job():
                 lead_data["unsubscribe_link"] = unsub_url
 
                 body = render_body(seq_body, lead_data, context=render_ctx)
+                if is_html:
+                    # Inline the editor's block spacing so every mail client
+                    # renders the message exactly as previewed.
+                    body = normalize_email_html(body)
                 logged_body = body  # exact rendered body persisted on EmailLog
                 # Inject hidden preheader so email clients show the custom preview text.
                 if is_html and seq_preview_text:
@@ -1555,6 +1560,10 @@ async def send_slot_job(slot_id: int) -> None:
         lead_data["unsubscribe_link"] = unsub_url
 
         body = render_body(seq_body, lead_data, context=render_ctx)
+        if is_html:
+            # Inline the editor's block spacing so every mail client renders
+            # the message exactly as previewed.
+            body = normalize_email_html(body)
         logged_body = body  # exact rendered body persisted on EmailLog
         if is_html and seq_preview_text:
             rendered_preview = render_body(seq_preview_text, lead_data, context=render_ctx)

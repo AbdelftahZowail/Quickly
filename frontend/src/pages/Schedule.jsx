@@ -6,6 +6,7 @@ import { useConfirm } from '../context/ConfirmContext';
 import { useAppMode } from '../context/AppModeContext';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
+import EmailContent from '../components/EmailContent';
 import {
   addDaysToDateKey,
   formatDateKey,
@@ -96,10 +97,9 @@ function ScheduleEmailPreviewModal({ item, onClose }) {
             <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide block mb-2">Body</span>
             {body ? (
               isHtml ? (
-                <div
-                  className="border rounded-lg p-5 bg-white prose prose-sm max-w-none"
-                  dangerouslySetInnerHTML={{ __html: body }}
-                />
+                <div className="border rounded-lg p-5 bg-white">
+                  <EmailContent html={body} />
+                </div>
               ) : (
                 <pre className="border rounded-lg p-5 bg-gray-50 text-sm whitespace-pre-wrap font-sans text-gray-800">
                   {body}
@@ -470,7 +470,11 @@ export default function Schedule() {
                       View full preview
                     </Button>
                   </div>
-                  <div className="body-preview" dangerouslySetInnerHTML={{__html:item.sequence_body.trim().startsWith('<')?item.sequence_body:escapeHtml(item.sequence_body)}} />
+                  {item.sequence_body.trim().startsWith('<') ? (
+                    <div className="body-preview"><EmailContent html={item.sequence_body} /></div>
+                  ) : (
+                    <div className="body-preview" dangerouslySetInnerHTML={{__html: escapeHtml(item.sequence_body)}} />
+                  )}
                 </div>
               )}
             </div>

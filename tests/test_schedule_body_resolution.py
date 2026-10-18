@@ -333,7 +333,9 @@ async def test_serialize_scheduled_with_resolved_content(session):
     result = _serialize_scheduled(slot, cl, lead, campaign, inbox, seq,
                                   include_body=True, resolved_content=resolved)
     assert result["type"] == "scheduled"
-    assert result["sequence_body"] == "<p>Rendered body</p>"
+    # HTML bodies are normalised for the preview (see app.email_html).
+    assert 'data-email-normalized="1"' in result["sequence_body"]
+    assert '<p style="margin:0;padding:0;">Rendered body</p>' in result["sequence_body"]
     assert result["sequence_is_html"] is True
     assert result["variant_id"] == 42
     assert result["has_variants"] is True
@@ -401,7 +403,9 @@ async def test_serialize_sent_with_resolved_content(session):
                              include_body=True, include_events=False,
                              resolved_content=resolved)
     assert result["type"] == "sent"
-    assert result["sequence_body"] == "<p>Reconstructed body for SentUser</p>"
+    # HTML bodies are normalised for the preview (see app.email_html).
+    assert 'data-email-normalized="1"' in result["sequence_body"]
+    assert '<p style="margin:0;padding:0;">Reconstructed body for SentUser</p>' in result["sequence_body"]
     assert result["subject"] == "Already rendered subject"
     assert result["variant_id"] == 7
     assert result["has_variants"] is True
