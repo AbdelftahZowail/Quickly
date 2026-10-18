@@ -46,6 +46,7 @@ from app.routers import email_provider as email_provider_router
 from app.routers import smtp as smtp_router
 from app.routers import app_oauth as app_oauth_router
 from app.routers import notifications as notifications_router
+from app.routers import notices as notices_router
 from app.routers import system_health as system_health_router
 from app.routers import analytics as analytics_router
 from app.jobs import run_send_job, run_slot_scan_job, last_send_job_run, last_send_job_sent_count, run_telemetry_heartbeat_job
@@ -262,6 +263,7 @@ app.include_router(smtp_router.router, dependencies=_auth_deps)
 app.include_router(tracking_router.router)
 app.include_router(beacon_ingest_router.router)
 app.include_router(notifications_router.router, dependencies=_auth_deps)
+app.include_router(notices_router.router, dependencies=_auth_deps)
 app.include_router(system_health_router.router, dependencies=_auth_deps)
 app.include_router(analytics_router.router, dependencies=_auth_deps)
 

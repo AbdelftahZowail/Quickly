@@ -1,6 +1,7 @@
 import React from 'react';
 import Sidebar from './ui/Sidebar';
 import TestModeBanner from './TestModeBanner';
+import AppNotices from './AppNotices';
 import Onboarding from './Onboarding';
 import { NotificationProvider } from '../context/NotificationContext';
 import { LoadingProvider } from '../context/LoadingContext';
@@ -31,6 +32,7 @@ function LayoutInner({ children, sidebarCollapsed, setSidebarCollapsed }) {
         className={`${contentMargin} flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-gray-50 text-gray-900`}
       >
         {!isProduction && <TestModeBanner />}
+        <AppNotices />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {children}
         </div>

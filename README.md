@@ -215,6 +215,14 @@ See [`.env.example`](.env.example) for the full annotated reference.
 
 ---
 
+## In-app Notices & Version Check
+
+The UI shows a dismissible notice strip with product announcements and a "newer version available" prompt. It is served by `GET /api/notices` (auth-gated), which proxies two **public** hub feeds — `/v1/announcements` and `/v1/versions` (release notes) — using the same hub base URL as telemetry. Only the constant `product=quickly` is sent; nothing about the install leaves the server. The read is fail-open (a cached copy is served when the hub is unreachable), and notices are dismissible per browser.
+
+> The version/announcement check is separate from usage telemetry: `QUICKLY_TELEMETRY=false` (or the Settings toggle) stops the **heartbeat** and never disables this read-only feed. To guarantee no outbound hub contact at all, point `QUICKLY_TELEMETRY_URL` at a host you control or block it at the network layer.
+
+---
+
 ## Tech Stack
 
 | Layer         | Technology                                                |

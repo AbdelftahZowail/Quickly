@@ -1,4 +1,13 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
+import {
+  RiAlertLine,
+  RiArrowUpLine,
+  RiCheckboxCircleLine,
+  RiInformationLine,
+  RiMegaphoneLine,
+  RiShieldLine,
+} from 'react-icons/ri';
 import { api, apiCache, postJsonForDownload } from '../api';
 import { useDarkMode } from '../context/DarkModeContext';
 import { useConfirm } from '../context/ConfirmContext';
@@ -25,6 +34,7 @@ const SECTIONS_BY_TAB = {
     { id: 'appearance', label: 'Appearance' },
     { id: 'account', label: 'Account & Security' },
     { id: 'known-ips', label: 'Known IPs' },
+    { id: 'about', label: 'About' },
   ],
   setup: [
     { id: 'gmail-sync', label: 'Gmail sync' },
@@ -42,6 +52,53 @@ const SECTIONS_BY_TAB = {
   dev: [{ id: 'test-mode', label: 'Test mode' }],
 };
 
+/* ── About section helpers ─────────────────────────────────────────────── */
+
+// security > warning > info; anything unknown falls back to info.
+const NOTICE_LEVEL_STYLE = {
+  security: {
+    badge: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+    border: 'border-red-300 dark:border-red-800',
+    iconClass: 'text-red-600 dark:text-red-400',
+    label: 'Security',
+    Icon: RiShieldLine,
+  },
+  warning: {
+    badge: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+    border: 'border-amber-300 dark:border-amber-800',
+    iconClass: 'text-amber-500',
+    label: 'Warning',
+    Icon: RiAlertLine,
+  },
+  info: {
+    badge: 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300',
+    border: 'border-gray-200 dark:border-gray-700',
+    iconClass: 'text-blue-500',
+    label: 'Info',
+    Icon: RiMegaphoneLine,
+  },
+};
+
+/** Newest-first by published_at (stable for missing/equal timestamps). */
+function noticeNewestFirst(list) {
+  return (list || []).slice().sort((a, b) => {
+    const ta = Date.parse(a?.published_at || '') || 0;
+    const tb = Date.parse(b?.published_at || '') || 0;
+    return tb - ta;
+  });
+}
+
+/** `2026-10-16T00:00:00Z` → `Oct 16, 2026` (empty when missing/invalid). */
+function noticeDate(iso) {
+  const t = Date.parse(iso || '');
+  if (!t) return '';
+  return new Date(t).toLocaleDateString(undefined, {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  });
+}
+
 /* ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ */
 
 export default function Settings() {
@@ -50,10 +107,15 @@ export default function Settings() {
   const confirm = useConfirm();
   const { isProduction } = useAppMode();
   const { user, logout } = useAuth();
+  const location = useLocation();
 
   /* ── state ── */
   const [strategy, setStrategy] = useState('priority');
   const [testMode, setTestMode] = useState(false);
+  const [telemetryEnabled, setTelemetryEnabled] = useState(true);
+  // Hub version + announcement feeds (the same GET /api/notices the floating
+  // notice card reads) — the permanent Settings › About home.
+  const [notices, setNotices] = useState(() => apiCache.get('/notices') || null);
 
   // Account & Security
   // API Keys
@@ -245,7 +307,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -257,9 +319,13 @@ export default function Settings() {
         api.get('/notifications/config').catch(() => null),
         api.get('/settings/gmail-sync').catch(() => null),
         api.get('/settings/mcp-setup').catch(() => null),
+        api.get('/settings/telemetry').catch(() => null),
+        api.get('/notices').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
+      if (telData) setTelemetryEnabled(telData.telemetry_enabled !== false);
+      if (noticesData) setNotices(noticesData);
       setWebhooks(whList || []);
       setEventTypes(evtData.events || []);
       // default new webhook events = all
@@ -325,7 +391,48 @@ export default function Settings() {
     [isProduction],
   );
 
-  const sectionNav = SECTIONS_BY_TAB[activeTab] || [];
+  // The About section (version / What's New / announcements) is visible to
+  // everyone; only its usage-data toggle is admin-only, rendered inside it.
+  const sectionNav = useMemo(() => SECTIONS_BY_TAB[activeTab] || [], [activeTab]);
+
+  // Derived About data — the hub feeds, newest first (dead-simple, no state).
+  const about = useMemo(
+    () => ({
+      version: notices?.current_version || null,
+      latest: notices?.latest_version || null,
+      updateAvailable: Boolean(notices?.update_available),
+      unavailable: Boolean(notices?.unavailable),
+      announcements: noticeNewestFirst(notices?.announcements),
+      releases: noticeNewestFirst(notices?.versions),
+    }),
+    [notices],
+  );
+
+  // Deep link: /settings?section=<id> opens the tab that owns the section and
+  // scrolls to it — the floating notice card's Details link uses this. The
+  // query is dropped immediately so a later manual tab switch is never hijacked.
+  useEffect(() => {
+    const requested = new URLSearchParams(location.search).get('section');
+    if (!requested) return;
+    const owner = Object.keys(SECTIONS_BY_TAB).find(tab =>
+      SECTIONS_BY_TAB[tab].some(s => s.id === requested),
+    );
+    window.history.replaceState(
+      null,
+      '',
+      `${window.location.pathname}${window.location.hash || ''}`,
+    );
+    if (!owner || !visibleTabs.some(t => t.id === owner)) return;
+    setActiveTab(owner);
+    const timer = setTimeout(() => {
+      const el = document.getElementById(`settings-${requested}`);
+      if (el) {
+        setActiveSectionDomId(`settings-${requested}`);
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 60);
+    return () => clearTimeout(timer);
+  }, [location.search, visibleTabs]);
 
   useEffect(() => {
     const syncFromHash = () => {
@@ -340,14 +447,14 @@ export default function Settings() {
     syncFromHash();
     window.addEventListener('hashchange', syncFromHash);
     return () => window.removeEventListener('hashchange', syncFromHash);
-  }, [visibleTabs]);
+  }, [visibleTabs, sectionNav]);
 
   useEffect(() => {
     tabContentRef.current?.scrollTo(0, 0);
   }, [activeTab]);
 
   useEffect(() => {
-    const ids = (SECTIONS_BY_TAB[activeTab] || []).map(s => `settings-${s.id}`);
+    const ids = (sectionNav || []).map(s => `settings-${s.id}`);
     const root = tabContentRef.current;
     setActiveSectionDomId(ids[0] || '');
     if (!root || ids.length === 0) return;
@@ -384,7 +491,7 @@ export default function Settings() {
       ro?.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [activeTab]);
+  }, [sectionNav]);
 
   const selectTab = id => {
     if (!visibleTabs.some(t => t.id === id)) return;
@@ -426,6 +533,15 @@ export default function Settings() {
       await api.post('/settings/test-mode', { test_mode: val });
       setTestMode(val);
       notify({ type: 'success', message: 'Test mode saved' });
+    } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  /* ── telemetry ── */
+  const submitTelemetry = async val => {
+    try {
+      await api.post('/settings/telemetry', { telemetry_enabled: val });
+      setTelemetryEnabled(val);
+      notify({ type: 'success', message: 'Telemetry saved' });
     } catch (e) { notify({ type: 'error', message: e.message }); }
   };
 
@@ -870,6 +986,171 @@ export default function Settings() {
           <Button size="sm" variant="outline" onClick={() => setKnownIpsOpen(true)}>
             Manage Known IPs
           </Button>
+        </section>
+
+        <section id="settings-about" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">About</h2>
+          <p className="text-xs text-gray-500 dark:text-gray-400 mb-4">
+            Your version, what&apos;s new, announcements, and anonymous usage data.
+          </p>
+
+          {/* 1 — version + channel */}
+          <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-medium">
+                  Quickly{' '}
+                  <span className="font-mono">{about.version || '—'}</span>
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                  {isProduction ? 'Production install' : 'Development install'}
+                </p>
+              </div>
+              {about.updateAvailable ? (
+                <span className="flex shrink-0 items-center gap-1 text-xs text-teal-600 dark:text-teal-400">
+                  <RiArrowUpLine size={14} />
+                  update available
+                </span>
+              ) : about.unavailable ? (
+                <span className="flex shrink-0 items-center gap-1 text-xs text-gray-400">
+                  <RiInformationLine size={14} />
+                  checks unavailable
+                </span>
+              ) : (
+                <span className="flex shrink-0 items-center gap-1 text-xs text-green-600 dark:text-green-400">
+                  <RiCheckboxCircleLine size={14} />
+                  up to date
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* 2 — updates + What's New */}
+          <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4">
+            <div className="text-sm font-medium">Updates</div>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+              {about.unavailable
+                ? 'Update checks are unavailable right now.'
+                : about.updateAvailable && about.latest
+                  ? `A newer version (v${about.latest}) is available.`
+                  : 'You are on the latest version.'}
+            </p>
+            <details className="mt-3 border-t border-gray-200 dark:border-gray-700 pt-3">
+              <summary className="cursor-pointer text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
+                What&apos;s New
+              </summary>
+              <div className="mt-2 max-h-64 overflow-y-auto space-y-2">
+                {about.releases.length === 0 ? (
+                  <p className="text-xs text-gray-400">No release notes yet.</p>
+                ) : (
+                  about.releases.map(release => (
+                    <div
+                      key={release.name}
+                      className="rounded-md border border-gray-200 dark:border-gray-700 p-2.5"
+                    >
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="font-mono text-xs font-medium">{release.name}</span>
+                        {release.title && release.title !== release.name && (
+                          <span className="text-xs text-gray-500 dark:text-gray-400">
+                            {release.title}
+                          </span>
+                        )}
+                        {release.security && (
+                          <span className="rounded px-1 py-px text-[10px] font-semibold uppercase tracking-wide bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300">
+                            security
+                          </span>
+                        )}
+                        {release.prerelease && (
+                          <span className="rounded border border-gray-200 dark:border-gray-700 px-1 py-px text-[10px] uppercase tracking-wide text-gray-400">
+                            pre-release
+                          </span>
+                        )}
+                      </div>
+                      {release.body && (
+                        <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+                          {release.body}
+                        </p>
+                      )}
+                      {noticeDate(release.published_at) && (
+                        <p className="mt-1 text-[10px] text-gray-400">
+                          {noticeDate(release.published_at)}
+                        </p>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </details>
+          </div>
+
+          {/* 3 — announcements (full live list; independent of card dismissal) */}
+          <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-4 mb-4">
+            <div className="flex items-center gap-1.5 text-sm font-medium mb-2">
+              <RiMegaphoneLine size={14} />
+              Announcements
+            </div>
+            {about.announcements.length === 0 ? (
+              <p className="text-xs text-gray-400">No announcements right now.</p>
+            ) : (
+              <div className="space-y-2">
+                {about.announcements.map(announcement => {
+                  const style = NOTICE_LEVEL_STYLE[announcement.level] || NOTICE_LEVEL_STYLE.info;
+                  const { Icon } = style;
+                  return (
+                    <div
+                      key={announcement.id}
+                      className={`rounded-md border p-2.5 ${style.border}`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <Icon className={`mt-0.5 shrink-0 ${style.iconClass}`} size={15} />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                            <span
+                              className={`rounded px-1 py-px text-[10px] font-semibold uppercase tracking-wide ${style.badge}`}
+                            >
+                              {style.label}
+                            </span>
+                            <span className="text-xs font-medium text-gray-900 dark:text-gray-100">
+                              {announcement.title}
+                            </span>
+                          </div>
+                          {announcement.body && (
+                            <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-gray-600 dark:text-gray-300">
+                              {announcement.body}
+                            </p>
+                          )}
+                          {noticeDate(announcement.published_at) && (
+                            <p className="mt-1 text-[10px] text-gray-400">
+                              {noticeDate(announcement.published_at)}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 4 — usage data (the telemetry opt-out, at the bottom of About) */}
+          {user?.role === 'admin' && (
+            <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-4">
+              <div className="text-sm font-medium">Usage data</div>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                A coarse heartbeat that never identifies you or your leads — uncheck to opt
+                out, and nothing is sent.
+              </p>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={telemetryEnabled}
+                  onChange={e => submitTelemetry(e.target.checked)}
+                />
+                <span className="text-sm">Send anonymous usage data</span>
+              </label>
+            </div>
+          )}
         </section>
           </>
         )}
