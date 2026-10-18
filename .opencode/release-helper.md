@@ -39,16 +39,28 @@ From the repo root, on `main`, with a clean release scope:
      fail on a pristine `git archive HEAD` export before blaming the release)
 3. **Commit** by workstream (conventional subject + a body enumerating the change
    and the gates). Keep unrelated work in separate commits.
-4. **Tag:** `git tag v{version}` (semver).
-5. **Push:** `git push origin main --tags` (never force). Pushing the tag runs
-   `.github/workflows/release.yml`: it builds + pushes the multi-arch Docker
-   image(s) and creates a **GitHub Release** with the compose files / `.env.example`
-   / Caddyfile attached. A `workflow_dispatch` run only creates a **draft** when
-   **both** `push_image` and `create_release` are checked — `release` `needs: merge`
-   and `merge` is skipped unless `push_image` is true, so defaults skip it.
+4. **Tag:** `git tag -a v{version}` (semver; annotated, with a summary message
+   like the earlier releases).
+5. **Push:** `git push origin main` then `git push origin v{version}` — push the
+   **specific** tag, **not** `--tags` (see Gotchas: stale local tags get swept in).
+   ⚠️ **A tag pushed from this environment does NOT trigger the Release
+   workflow** — the `git` push credential here suppresses GitHub Actions events
+   (verified on v2.5.0: `main` + 8 tags pushed, zero runs). Do the publication
+   explicitly with `workflow_dispatch`, which uses the `gh` OAuth token and DOES
+   trigger:
+   ```bash
+   gh workflow run release.yml --ref main \
+     -f tag=v{version} -f push_image=true -f create_release=true
+   gh run watch --exit-status               # the newest run
+   ```
+   This builds + pushes the multi-arch image(s) and creates the GitHub Release
+   as a **draft** (workflow_dispatch always drafts; `release` `needs: merge`,
+   which needs `push_image=true`).
 6. **Verify it landed:** Docker Hub shows the new tags
-   (`docker buildx imagetools inspect azowail/quickly:v{version}`); the GitHub
-   Release + tag page resolve.
+   (`docker buildx imagetools inspect azowail/quickly:v{version}` and `:latest`
+   must share the same digest); the GitHub Release + tag page resolve
+   (`git ls-remote --tags origin v{version}`). The `.env.example` asset is
+   uploaded as **`default.env.example`** by `ncipollo/release-action`.
 7. **Write the "What's New" — REQUIRED, not optional.** The GitHub Release body is
    what feeds the hub's version feed, which is what users see in the in-app
    **notice card** and **Settings**. The workflow ships a **static** body (Docker
@@ -59,7 +71,8 @@ From the repo root, on `main`, with a clean release scope:
    ```bash
    gh release view v{version} --json body -q .body > /tmp/body.md
    { cat /tmp/whats-new.md; echo; echo '---'; echo; cat /tmp/body.md; } > /tmp/combined.md
-   gh release edit v{version} --notes-file /tmp/combined.md
+   # workflow_dispatch leaves the release a DRAFT: publish it in the same edit.
+   gh release edit v{version} --notes-file /tmp/combined.md --draft=false --latest
    ```
    (or edit the release on github.com). See `## "What's New" is a release artifact`.
 8. **Update this file** (last version in the header + a new entry under `## Releases`).
@@ -89,10 +102,27 @@ Release is the source of truth.
 - **`app/database.py` owns migrations** (`Base.metadata.create_all`; new columns
   are added with idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS`). Any schema
   change ships in the release commit.
+- ⚠️ **`git push` here does not trigger Actions.** The push credential in this
+  environment suppresses workflow events (no run is created for `main`, brand-new
+  tags, or any pushed tag). Publish with `gh workflow run release.yml …`
+  (see Release steps 5–7) instead of relying on the tag-push trigger.
+- ⚠️ **Use `git push origin v{version}`, not `--tags`.** This checkout carried
+  local-only older tags; `--tags` swept them onto the remote (v2.5.0: v1.0.7,
+  v1.1.0–v1.1.3, v1.1.5, v1.1.6). Harmless here (their GitHub Releases already
+  existed and nothing triggered), but avoid it.
+- **Hidden assets get renamed.** `ncipollo/release-action` uploads `.env.example`
+  as `default.env.example`.
+- **The telemetry key is baked into the public image by design** (`Dockerfile`
+  `ENV QUICKLY_TELEMETRY_KEY`), so `docker`'s `SecretsUsedInArgOrEnv` build
+  warnings (`Dockerfile#59`, `#60`) are expected — it is a low-privilege
+  ingestion filter, not a credential.
 
 ## Releases
 
-- **v2.5.0** — anonymous opt-out usage telemetry (heartbeat + hub), in-app
-  notices/version check proxying the public hub feeds, HTML email-spacing
+- **v2.5.0** (2026-10-18) — anonymous opt-out usage telemetry (heartbeat + hub),
+  in-app notices/version check proxying the public hub feeds, HTML email-spacing
   normalisation shared by previews/sends, `{{random}}` template variable, and a
-  test-email provider-credential fix. Committed the release-helper doc itself.
+  test-email provider-credential fix. Also committed this helper doc.
+  Published via `gh workflow run` (tag push did not trigger Actions); image
+  `azowail/quickly:v2.5.0` == `:latest`, digest `sha256:544e80c0…`;
+  release https://github.com/AbdelftahZowail/Quickly/releases/tag/v2.5.0.
