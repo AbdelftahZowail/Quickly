@@ -49,8 +49,9 @@ jobs:
           custom-notsigned-prcomment: |
             Thank you for your pull request! 🎉
 
-            Before it can be merged, we ask you to sign our
-            [Contributor License Agreement]($pathToCLADocument) — it only takes one comment.
+            Before it can be merged, we ask $you to sign our
+            [Contributor License Agreement](https://github.com/AbdelftahZowail/Quickly/blob/main/CLA.md)
+            — it only takes one comment.
 
             Please read the CLA, then reply to this pull request with exactly:
 
