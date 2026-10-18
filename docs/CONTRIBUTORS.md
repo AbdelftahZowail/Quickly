@@ -201,6 +201,32 @@ When filing a bug report, include:
 
 ---
 
-## License
+## License and the CLA
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the MIT
+License, and you accept the [Contributor License Agreement](../CLA.md).
+
+### Signing the CLA
+
+It's a one-time step per contributor. Open your pull request, and reply to the
+CLA Assistant bot's comment with:
+
+```
+I have read the CLA Document and I hereby sign the CLA
+```
+
+Once you've signed, the CLA check passes for that pull request and all of your
+future ones.
+
+### What the CLA does and doesn't do
+
+- **You keep the copyright to your work.** It is a license, not a copyright
+  assignment.
+- **Your contributions stay open.** They remain available to the public under the
+  MIT License, and the project remains fully open source.
+- **It lets the project change or dual-license its terms in the future** — for
+  example, offering a commercial edition alongside the MIT one. That's the only
+  extra right it grants. Without it, a single past contributor who could no longer
+  be reached would be able to block any future license change.
+
+The full text is in [CLA.md](../CLA.md).

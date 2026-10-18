@@ -1,0 +1,64 @@
+name: "CLA Assistant"
+
+# pull_request_target (not pull_request) so the workflow runs from the base
+# repository and can comment on / label pull requests that come from forks.
+# issue_comment is what lets a contributor sign by commenting on the PR.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# This repository's default workflow permissions are read-only, so the action
+# needs them declared explicitly: it comments on PRs, sets a commit status, and
+# commits the signature file.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  CLAAssistant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        # Pinned to the v2.6.1 commit (released 2024-09-26) rather than the tag.
+        # Upstream was archived on 2026-03-23 and is no longer maintained, but the
+        # released action still works; pinning the SHA means the code cannot change
+        # under us. Remove this workflow if a maintained fork is adopted.
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: 'signatures/version1/cla.json'
+          path-to-document: 'https://github.com/AbdelftahZowail/Quickly/blob/main/CLA.md'
+          # `main` is not branch-protected, so the action can commit the signature
+          # file directly. If protection is ever added, point this at an
+          # unprotected branch (e.g. `cla-signatures`) and use a token that can
+          # write to it.
+          branch: 'main'
+          # The repository owner and bots are not required to sign.
+          allowlist: 'AbdelftahZowail,dependabot[bot],copilot-swe-agent[bot],github-actions[bot]'
+          create-file-commit-message: 'chore: create CLA signature store'
+          signed-commit-message: '$contributorName has signed the CLA in #$pullRequestNo'
+          # Locks the PR conversation after merge so a signature comment cannot be
+          # edited or deleted afterwards. Keep this true.
+          lock-pullrequest-aftermerge: true
+          custom-notsigned-prcomment: |
+            Thank you for your pull request! 🎉
+
+            Before it can be merged, we ask you to sign our
+            [Contributor License Agreement]($pathToCLADocument) — it only takes one comment.
+
+            Please read the CLA, then reply to this pull request with exactly:
+
+            I have read the CLA Document and I hereby sign the CLA
+
+            You only need to do this once; it covers all your future contributions
+            to the Project. It is a license, not a copyright assignment — you keep
+            the copyright to your work, and your contributions stay available to
+            everyone under the MIT License.
+
+            If you have already signed and this check looks stale, reply with `recheck`.
