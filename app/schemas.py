@@ -93,6 +93,20 @@ class LeadBulkRecoverRequest(BaseModel):
     verify_email: bool = True
 
 
+class LeadSelectionFilters(BaseModel):
+    q: Optional[str] = None
+    status: Optional[str] = None
+    bad_only: bool = False
+    interest: Optional[str] = None
+
+
+class LeadSelectionRequest(BaseModel):
+    all_selected: bool = False
+    lead_ids: List[int] = Field(default_factory=list)
+    excluded_ids: List[int] = Field(default_factory=list)
+    filters: LeadSelectionFilters = Field(default_factory=LeadSelectionFilters)
+
+
 class InboxCreate(BaseModel):
     email: str
     display_name: str = ""
