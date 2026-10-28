@@ -531,6 +531,9 @@ function LeadsTab({ leads, leadsPage = 1, leadsTotal = 0, leadsHasMore = false, 
           all_selected: allSelected,
           lead_ids: [...selectedIds],
           excluded_ids: [...excludedIds],
+          // "Select all" is only offered while no filter-bar filter is active
+          // (see the selection banner), so the search box is the only narrowing
+          // the server has to reproduce here.
           filters: { q: leadsSearch.trim() },
         }
       );
@@ -1165,12 +1168,31 @@ function LeadsTab({ leads, leadsPage = 1, leadsTotal = 0, leadsHasMore = false, 
       </div>
 
 
-      {pageFullySelected && !allSelected && (
-        <div className="mb-3 flex items-center justify-between rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
-          <span>All {pageSelectedCount} leads on this page are selected.</span>
-          <button className="font-medium text-teal-700 hover:underline" onClick={selectAllLeads}>
-            Select all {leadsTotal.toLocaleString()} {leadsSearch ? "matching " : ""}leads
-          </button>
+      {!allSelected && selectedIds.size > 0 && (
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-teal-200 bg-teal-50 px-4 py-3 text-sm">
+          <span>
+            {pageFullySelected
+              ? `All ${pageSelectedCount} leads on this page are selected.`
+              : `${selectedIds.size} lead(s) selected on this page.`}
+            {pageFullySelected && hasActiveFilter && (
+              <span className="text-gray-600">
+                {" "}The filter bar only narrows this page, so “select all” stays unavailable while it is active.
+              </span>
+            )}
+          </span>
+          <div className="flex items-center gap-4">
+            {pageFullySelected && !hasActiveFilter && (
+              <button className="font-medium text-teal-700 hover:underline" onClick={selectAllLeads}>
+                Select all {leadsTotal.toLocaleString()} {leadsSearch ? "matching " : ""}leads
+              </button>
+            )}
+            <button className="font-medium text-red-600 hover:underline" onClick={handleBulkRemove}>
+              Remove selected
+            </button>
+            <button className="font-medium text-gray-600 hover:underline" onClick={clearLeadSelection}>
+              Clear selection
+            </button>
+          </div>
         </div>
       )}
 

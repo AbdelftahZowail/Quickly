@@ -2151,7 +2151,15 @@ async def _resolve_campaign_lead_selection_ids(
     campaign_id: int,
     body: LeadSelectionRequest,
 ) -> list[int]:
-    """Resolve selected Lead IDs within one campaign only."""
+    """Resolve selected Lead IDs within one campaign only.
+
+    Only the free-text ``q`` filter is reproduced server-side. The campaign
+    Leads-tab filter bar (status / interest / opened / replied / clicked /
+    verification, plus the virtual "needs custom email" status) is applied
+    client-side to the current page, so it cannot be reproduced here — silently
+    ignoring it would resolve a *wider* set than the user can see and remove
+    leads they never selected. Fail closed instead.
+    """
     if not body.all_selected:
         if not body.lead_ids:
             return []
@@ -2162,6 +2170,24 @@ async def _resolve_campaign_lead_selection_ids(
             )
         )
         return list(dict.fromkeys(int(x) for x in result.scalars().all()))
+
+    unsupported = [
+        name
+        for name, value in (
+            ("status", body.filters.status),
+            ("interest", body.filters.interest),
+        )
+        if (value or "").strip() and value.strip().lower() != "all"
+    ]
+    if body.filters.bad_only:
+        unsupported.append("bad_only")
+    if unsupported:
+        raise HTTPException(
+            400,
+            "Campaign bulk-remove cannot apply these filters server-side: "
+            + ", ".join(unsupported)
+            + ". Narrow with the search box, or pass explicit lead_ids.",
+        )
 
     stmt = (
         select(CampaignLead.lead_id)

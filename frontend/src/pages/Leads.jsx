@@ -213,16 +213,36 @@ export default function Leads() {
     ? Math.max(0, leadsTotal - excludedIds.size)
     : selectedIds.size;
 
+  // A bulk action must resolve to exactly the set the user is looking at, so the
+  // same filters that built the list are sent along with the selection. Without
+  // this, "select all" would resolve to a wider set than the user can see.
+  const selectionFilters = () => {
+    const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter });
+    return {
+      q: params.get('q') || null,
+      status: params.get('status') || null,
+      bad_only: params.get('bad_only') === 'true',
+      interest: params.get('interest') || null,
+    };
+  };
+
+  const selectionPayload = () => ({
+    all_selected: allSelected,
+    lead_ids: [...selectedIds],
+    excluded_ids: [...excludedIds],
+    filters: selectionFilters(),
+  });
+
   const handleBulkDelete = async () => {
-    if (!selectedIds.size) return;
+    if (!selectedCount) return;
     const ok = await confirm(
-      `Permanently delete ${selectedIds.size} lead(s)? This removes enrollments and email history for those leads.`,
+      `Permanently delete ${selectedCount.toLocaleString()} lead(s)? This removes enrollments and email history for those leads.`,
     );
     if (!ok) return;
     loading.start();
     try {
-      const res = await api.post('/leads/bulk-delete', { lead_ids: [...selectedIds] });
-      const n = res.deleted ?? selectedIds.size;
+      const res = await api.post('/leads/bulk-delete-selection', selectionPayload());
+      const n = res.deleted ?? selectedCount;
       notify({ type: 'success', message: `Deleted ${n} lead(s).` });
       await loadLeads(1, true);
     } catch (e) {
@@ -233,15 +253,19 @@ export default function Leads() {
   };
 
   const handleBulkStatus = async () => {
-    if (!selectedIds.size) return;
+    if (!selectedCount) return;
     const ok = await confirm(
-      `Set enrollment to “${bulkEnrollmentStatus}” on every campaign for ${selectedIds.size} lead(s)? The send queue will be recalculated.`,
+      `Set enrollment to “${bulkEnrollmentStatus}” on every campaign for ${selectedCount.toLocaleString()} lead(s)? The send queue will be recalculated.`,
     );
     if (!ok) return;
     loading.start();
     try {
-      await api.post('/leads/bulk-status', { lead_ids: [...selectedIds], enrollment_status: bulkEnrollmentStatus });
-      notify({ type: 'success', message: 'Status updated.' });
+      const res = await api.post('/leads/bulk-status', {
+        ...selectionPayload(),
+        enrollment_status: bulkEnrollmentStatus,
+      });
+      const n = res.updated ?? selectedCount;
+      notify({ type: 'success', message: `Enrollment updated on ${n} enrollment(s).` });
       await loadLeads(1, true);
     } catch (e) {
       notify({ type: 'error', message: e.message || 'Update failed' });
@@ -251,6 +275,15 @@ export default function Leads() {
   };
 
   const handleBulkReenroll = async () => {
+    if (allSelected) {
+      // Re-enroll edits a corrected email per lead, which needs the individual
+      // rows — it cannot be applied to a set the user has not looked at.
+      notify({
+        type: 'info',
+        message: 'Re-enroll needs a corrected email per lead — select the leads individually instead of "select all".',
+      });
+      return;
+    }
     const ids = [...selectedIds];
     const targets = ids
       .map((id) => leads.find((l) => l.id === id))
@@ -327,9 +360,10 @@ export default function Leads() {
   };
 
   const exportCsv = async () => {
+    // Export covers the whole filtered set, not just the visible page — so the
+    // pagination params must NOT be sent here.
     const params = buildLeadsQueryParams({ tab, debouncedSearch, statusFilter, interestFilter });
-    params.set('page', String(page)); params.set('page_size', String(LEADS_PAGE_SIZE));
-      const qs = params.toString();
+    const qs = params.toString();
     loading.start();
     try {
       const res = await api.download('/leads/export' + (qs ? `?${qs}` : ''));

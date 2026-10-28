@@ -841,12 +841,21 @@ async def bulk_update_lead_status(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    if not body.lead_ids:
+    lead_ids = await _resolve_lead_selection_ids(
+        db,
+        LeadSelectionRequest(
+            all_selected=body.all_selected,
+            lead_ids=body.lead_ids,
+            excluded_ids=body.excluded_ids,
+            filters=body.filters,
+        ),
+    )
+    if not lead_ids:
         return {"ok": True, "updated": 0}
     target = normalize_enrollment_status(body.enrollment_status)
     changed = False
     updated = 0
-    for lead_id in body.lead_ids:
+    for lead_id in lead_ids:
         res = await db.execute(select(CampaignLead).where(CampaignLead.lead_id == lead_id))
         for cl in res.scalars().all():
             if cl.enrollment_status != target:
