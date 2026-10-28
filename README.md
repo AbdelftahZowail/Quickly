@@ -270,7 +270,7 @@ No. Quickly supports 19 AI providers including Anthropic, Google Gemini, Mistral
 
 ## Contributing
 
-Contributions are welcome — bug reports, feature requests, and pull requests. See [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) for setup instructions and contribution guidelines. All contributors accept a one-time [CLA](CLA.md) on their first pull request.
+Contributions are welcome — bug reports, feature requests, and pull requests. See [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) for setup instructions and contribution guidelines.
 
 If Quickly is saving you money or replacing a paid tool in your workflow, a ⭐ goes a long way toward helping others find it.
 
