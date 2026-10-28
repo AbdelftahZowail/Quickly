@@ -4,6 +4,16 @@
 against the actual repo state (`git log`, `git tag --sort=-v:refname | head`,
 `.github/workflows/release.yml`) — evidence from the repo beats this file.
 
+> **Run releases through the super-vibe skill (ship mode).** This file is the
+> repo's release contract; super-vibe supplies the method (recon, scoping,
+> independent verification, workstream commits, publish + verify). The mapping
+> is: helper 1 = ship recon · helper 2 gates = ship gates **plus** the boot
+> smoke and the agentic verification (helper step 4 / `.opencode/release-verify.md`)
+> = ship's adversarial verification · helper 3 = ship commits · helper 4–7 =
+> ship release mechanics · helper 8 = ship helper-doc step. **Super-vibe does
+> not replace any step below** — if a ship run reaches tagging without one of
+> these having happened, stop and do it.
+
 > Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
 > skill looks for exactly this path.
 
