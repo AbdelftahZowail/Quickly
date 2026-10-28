@@ -49,6 +49,11 @@ From the repo root, on `main`, with a clean release scope:
    and the gates). Keep unrelated work in separate commits.
 4. **Tag:** `git tag -a v{version}` (semver; annotated, with a summary message
    like the earlier releases).
+   ⚠️ **Before tagging: run the agentic verification protocol**
+   (`.opencode/release-verify.md`) — spawn an independent brother agent with
+   the Verifier prompt and only proceed on `VERDICT: SHIP`. v2.5.1 and v2.6.1
+   shipped on the releaser's inline judgment alone; this gate is what catches
+   the third bug class ("boots, serves, and is *wrong*").
 5. **Push:** `git push origin main` then `git push origin v{version}` — push the
    **specific** tag, **not** `--tags` (see Gotchas: stale local tags get swept in).
    ⚠️ **The tag push DOES trigger the Release workflow now** (observed on v2.5.1
