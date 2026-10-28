@@ -7,7 +7,7 @@ against the actual repo state (`git log`, `git tag --sort=-v:refname | head`,
 > Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
 > skill looks for exactly this path.
 
-- **Last released version:** `v2.5.0` (tag `v2.5.0`)
+- **Last released version:** `v2.5.1` (tag `v2.5.1`)
 - **Version source of truth:** the **git tag** — there is no version file. The
   tag is passed to the image build as `QUICKLY_VERSION` (build arg) and the app
   strips the leading `v` for the wire format; a source/dev build reports
@@ -119,6 +119,19 @@ Release is the source of truth.
 
 ## Releases
 
+- **v2.5.1** (2026-10-28) — fix(deps): `sqlalchemy[asyncio]` so `greenlet` ships
+  in fresh builds — `v2.5.0`/`latest` images crash-looped at startup with
+  `ImportError: The SQLAlchemy asyncio module requires that the Python 'greenlet'
+  library is installed` (SQLAlchemy 2.1.x no longer installs greenlet
+  implicitly). #11 by fsioni, merged after local repro of the failure and the
+  fix; the CLA workflow/agreement/store + its bot comments were removed the
+  same day, so the PR merged despite an unrecorded signature. Published via
+  `gh workflow run` (tag push did not trigger Actions); image
+  `azowail/quickly:v2.5.1` == `:latest`, digest `sha256:ff227c84…`;
+  release https://github.com/AbdelftahZowail/Quickly/releases/tag/v2.5.1.
+  ⚠️ One `gh workflow run` call dispatched THREE concurrent duplicate runs —
+  cancel extras fast (`gh run cancel`), duplicate builds race on the manifest
+  push in `merge`.
 - **v2.5.0** (2026-10-18) — anonymous opt-out usage telemetry (heartbeat + hub),
   in-app notices/version check proxying the public hub feeds, HTML email-spacing
   normalisation shared by previews/sends, `{{random}}` template variable, and a
