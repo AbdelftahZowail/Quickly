@@ -7,7 +7,7 @@ against the actual repo state (`git log`, `git tag --sort=-v:refname | head`,
 > Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
 > skill looks for exactly this path.
 
-- **Last released version:** `v2.5.1` (tag `v2.5.1`)
+- **Last released version:** `v2.6.0` (tag `v2.6.0`)
 - **Version source of truth:** the **git tag** — there is no version file. The
   tag is passed to the image build as `QUICKLY_VERSION` (build arg) and the app
   strips the leading `v` for the wire format; a source/dev build reports
@@ -43,19 +43,25 @@ From the repo root, on `main`, with a clean release scope:
    like the earlier releases).
 5. **Push:** `git push origin main` then `git push origin v{version}` — push the
    **specific** tag, **not** `--tags` (see Gotchas: stale local tags get swept in).
-   ⚠️ **A tag pushed from this environment does NOT trigger the Release
-   workflow** — the `git` push credential here suppresses GitHub Actions events
-   (verified on v2.5.0: `main` + 8 tags pushed, zero runs). Do the publication
-   explicitly with `workflow_dispatch`, which uses the `gh` OAuth token and DOES
-   trigger:
-   ```bash
-   gh workflow run release.yml --ref main \
-     -f tag=v{version} -f push_image=true -f create_release=true
-   gh run watch --exit-status               # the newest run
-   ```
-   This builds + pushes the multi-arch image(s) and creates the GitHub Release
-   as a **draft** (workflow_dispatch always drafts; `release` `needs: merge`,
-   which needs `push_image=true`).
+   ⚠️ **The tag push DOES trigger the Release workflow now** (observed on v2.5.1
+   and v2.6.0; the "pushes are suppressed here" note only held up to v2.5.0). That
+   run builds + pushes the image and publishes the release with the **static**
+   body. Two ways to publish:
+   - *Tag push only:* watch the run, then prepend "What's New" with `gh release
+     edit` (step 7) — the release is already published, so omit `--draft=false`.
+   - *Explicit dispatch (preferred — gives you a draft to finish before it goes
+     live):*
+     ```bash
+     gh workflow run release.yml --ref main \
+       -f tag=v{version} -f push_image=true -f create_release=true
+     gh run list --workflow=release.yml --limit 3    # find the tag-push duplicate
+     gh run cancel <duplicate-id>                    # cancel it NOW, before `merge`
+     gh run watch <dispatch-id> --exit-status
+     ```
+     Dispatch creates the GitHub Release as a **draft** (`release` `needs: merge`,
+     which needs `push_image=true`).
+   ⚠️ **Never leave both runs alive** — they build the same image and race on the
+   manifest push in `merge`.
 6. **Verify it landed:** Docker Hub shows the new tags
    (`docker buildx imagetools inspect azowail/quickly:v{version}` and `:latest`
    must share the same digest); the GitHub Release + tag page resolve
@@ -102,10 +108,12 @@ Release is the source of truth.
 - **`app/database.py` owns migrations** (`Base.metadata.create_all`; new columns
   are added with idempotent `ALTER TABLE … ADD COLUMN IF NOT EXISTS`). Any schema
   change ships in the release commit.
-- ⚠️ **`git push` here does not trigger Actions.** The push credential in this
-  environment suppresses workflow events (no run is created for `main`, brand-new
-  tags, or any pushed tag). Publish with `gh workflow run release.yml …`
-  (see Release steps 5–7) instead of relying on the tag-push trigger.
+- ⚠️ **A tag push DOES trigger the Release workflow (as of v2.5.1).** The older
+  "pushes are suppressed in this environment" behavior only held up to v2.5.0;
+  both v2.5.1 and v2.6.0 produced a `push`-triggered run alongside the dispatch.
+  If you dispatch as well, cancel one of the two **immediately** — they race on
+  the manifest push in `merge`. (v2.6.0 kept the dispatch run, so the release
+  started as a draft, and cancelled the push run.)
 - ⚠️ **Use `git push origin v{version}`, not `--tags`.** This checkout carried
   local-only older tags; `--tags` swept them onto the remote (v2.5.0: v1.0.7,
   v1.1.0–v1.1.3, v1.1.5, v1.1.6). Harmless here (their GitHub Releases already
@@ -119,6 +127,19 @@ Release is the source of truth.
 
 ## Releases
 
+- **v2.6.0** (2026-10-28) — paginated lead management (#13, carried from #8): the
+  Leads page and a campaign's Leads tab paginate server-side (100/page) with search
+  over email/name/company/domain, "select all N matching" with per-lead exclusions,
+  and bulk remove-from-campaign / bulk delete. Ships @tuancrabit's contribution
+  unchanged plus fixes for the three blocking review issues (broken CSV export,
+  select-all bulk actions that no-opped, campaign select-all removing leads outside
+  the active filter — now fails closed with a 400). Gates: 101 targeted tests
+  passed, `vite build` clean. Tag push triggered a run AND the dispatch triggered
+  one; the push run was cancelled to avoid the manifest race, the dispatch run
+  created a draft, then `gh release edit --draft=false --latest` added "What's New"
+  and published. Image `azowail/quickly:v2.6.0` == `:latest`, digest
+  `sha256:6582103e…`; release
+  https://github.com/AbdelftahZowail/Quickly/releases/tag/v2.6.0.
 - **v2.5.1** (2026-10-28) — fix(deps): `sqlalchemy[asyncio]` so `greenlet` ships
   in fresh builds — `v2.5.0`/`latest` images crash-looped at startup with
   `ImportError: The SQLAlchemy asyncio module requires that the Python 'greenlet'
