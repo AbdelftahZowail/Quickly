@@ -73,12 +73,31 @@ class LeadResponse(BaseModel):
         from_attributes = True
 
 
+class LeadSelectionFilters(BaseModel):
+    q: Optional[str] = None
+    status: Optional[str] = None
+    bad_only: bool = False
+    interest: Optional[str] = None
+
+
+class LeadSelectionRequest(BaseModel):
+    all_selected: bool = False
+    lead_ids: List[int] = Field(default_factory=list)
+    excluded_ids: List[int] = Field(default_factory=list)
+    filters: LeadSelectionFilters = Field(default_factory=LeadSelectionFilters)
+
+
 class LeadBulkDeleteRequest(BaseModel):
     lead_ids: List[int]
 
 
 class LeadBulkStatusRequest(BaseModel):
-    lead_ids: List[int]
+    lead_ids: List[int] = Field(default_factory=list)
+    # Optional selection-based form: when all_selected is true, lead_ids is
+    # ignored and the target set is resolved from filters / excluded_ids.
+    all_selected: bool = False
+    excluded_ids: List[int] = Field(default_factory=list)
+    filters: LeadSelectionFilters = Field(default_factory=LeadSelectionFilters)
     # Per-campaign enrollment status applied to every enrollment of each lead
     enrollment_status: str
 
