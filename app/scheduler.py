@@ -46,15 +46,21 @@ def build_jobstores(db_url: str) -> dict:
         log.info("build_jobstores: using MemoryJobStore (SQLite / test environment)")
         return {}  # APScheduler defaults to MemoryJobStore when none is specified
 
-    # Derive a synchronous PostgreSQL URL from the async asyncpg URL:
-    #   postgresql+asyncpg://... → postgresql://...
-    sync_url = db_url.replace("+asyncpg", "")
-    if sync_url.startswith("postgres://"):
-        sync_url = sync_url.replace("postgres://", "postgresql://", 1)
+    # Derive a synchronous PostgreSQL URL from the async asyncpg URL.
+    # Name the driver explicitly: since SQLAlchemy 2.1 a bare
+    # ``postgresql://`` URL defaults to the psycopg (v3) driver, which is not
+    # installed — SQLAlchemyJobStore would fail to build its engine and we
+    # would silently fall back to MemoryJobStore (see issue #14).
+    from sqlalchemy import make_url  # noqa: PLC0415
+
+    sync_url = make_url(db_url).set(drivername="postgresql+psycopg2")
 
     try:
         from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore  # noqa: PLC0415
-        log.info("build_jobstores: using SQLAlchemyJobStore (%s...)", sync_url[:40])
+        log.info(
+            "build_jobstores: using SQLAlchemyJobStore (%s)",
+            sync_url.render_as_string(hide_password=True),
+        )
         return {"default": SQLAlchemyJobStore(url=sync_url)}
     except Exception as exc:
         log.warning(
