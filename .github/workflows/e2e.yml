@@ -1,0 +1,43 @@
+# E2E boot smoke on every PR / push that touches runtime code.
+#
+# Catches the "builds fine, doesn't run" bug class before it reaches a
+# release: import-time crashes (issue #11, greenlet) and silent startup
+# degradations (issue #14, MemoryJobStore fallback). Runs the same script the
+# release workflow gates on: scripts/e2e_boot_smoke.sh.
+
+name: E2E boot smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "docker-compose.e2e.yml"
+      - "scripts/e2e_boot_smoke.sh"
+  pull_request:
+    paths:
+      - "app/**"
+      - "requirements.txt"
+      - "Dockerfile"
+      - "docker-compose.e2e.yml"
+      - "scripts/e2e_boot_smoke.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  boot-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build the image under test
+        run: docker build -t quickly-under-test:local .
+
+      - name: Boot smoke (real container + real PostgreSQL)
+        run: bash scripts/e2e_boot_smoke.sh quickly-under-test:local

@@ -1,0 +1,39 @@
+# E2E boot smoke stack.
+#
+# Boots a real Quickly container against a real PostgreSQL so failures that
+# unit tests cannot see are caught before release:
+#   - import-time crashes (greenlet: #11 — container dies before serving)
+#   - silent degradations (psycopg: #14 — APScheduler falls back to
+#     MemoryJobStore, which only shows up in the logs)
+#
+# The application image is parametrised via E2E_IMAGE so the same file is used
+# by `scripts/e2e_boot_smoke.sh` locally, by the e2e workflow, and by the
+# release smoke job. Ports are fixed and distinct from the dev compose files
+# (which use 8000 / 5433 / 5434) so they can run side by side.
+
+name: quickly-e2e
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: quickly
+    ports:
+      - "127.0.0.1:5451:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d quickly"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    image: ${E2E_IMAGE:-quickly-under-test:local}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/quickly
+      BASE_URL: http://localhost:8301
+    ports:
+      - "127.0.0.1:8301:8000"
+    depends_on:
+      db:
+        condition: service_healthy

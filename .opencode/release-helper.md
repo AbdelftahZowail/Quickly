@@ -34,6 +34,14 @@ From the repo root, on `main`, with a clean release scope:
 2. **Gates** (all green):
    - `.venv/bin/python -m pytest tests/test_telemetry.py tests/test_email_html.py tests/test_notices.py tests/test_smtp.py tests/test_schedule_body_resolution.py -q`
    - `cd frontend && npm run build`
+   - **Boot smoke (release-blocking, runs inside `release.yml`):** the `smoke`
+     job boots the freshly pushed `azowail/quickly:<tag>` against a real
+     PostgreSQL via `scripts/e2e_boot_smoke.sh` and fails the release if the
+     container doesn't serve, or the scheduler silently falls back to
+     MemoryJobStore, or credentials leak into the logs. This gate exists
+     because #11 (greenlet, crash-loop) and #14 (psycopg, silent memory
+     store) both shipped despite green unit tests. The same script runs on
+     every PR/push via `.github/workflows/e2e.yml`.
    - (the full suite has known **pre-existing** failures unrelated to a release —
      auth/env isolation — note them, don't be blocked by them; confirm they also
      fail on a pristine `git archive HEAD` export before blaming the release)

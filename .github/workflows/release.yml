@@ -119,9 +119,37 @@ jobs:
             -t azowail/quickly:latest \
             $(printf 'azowail/quickly@sha256:%s ' *)
 
-  release:
+  # Release gate: boot the freshly pushed image against a real PostgreSQL and
+  # assert it serves and actually attaches the persistent scheduler job store.
+  # This is what would have caught #11 (greenlet crash-loop) and #14 (silent
+  # MemoryJobStore fallback) before they shipped. Skipped for no-push test
+  # dispatches (nothing is published to pull).
+  smoke:
     runs-on: ubuntu-24.04
     needs: merge
+    if: github.event_name != 'workflow_dispatch' || inputs.push_image
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine tag
+        id: tagger
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "TAG=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "TAG=${GITHUB_REF##*/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Pull the freshly pushed image
+        run: docker pull "azowail/quickly:${{ steps.tagger.outputs.TAG }}"
+
+      - name: Boot smoke
+        run: bash scripts/e2e_boot_smoke.sh "azowail/quickly:${{ steps.tagger.outputs.TAG }}"
+
+  release:
+    runs-on: ubuntu-24.04
+    needs: [merge, smoke]
     if: github.event_name != 'workflow_dispatch' || inputs.create_release
     steps:
       - name: Checkout repository
