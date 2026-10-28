@@ -7,7 +7,7 @@ against the actual repo state (`git log`, `git tag --sort=-v:refname | head`,
 > Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
 > skill looks for exactly this path.
 
-- **Last released version:** `v2.6.0` (tag `v2.6.0`)
+- **Last released version:** `v2.6.1` (tag `v2.6.1`)
 - **Version source of truth:** the **git tag** — there is no version file. The
   tag is passed to the image build as `QUICKLY_VERSION` (build arg) and the app
   strips the leading `v` for the wire format; a source/dev build reports
@@ -127,6 +127,18 @@ Release is the source of truth.
 
 ## Releases
 
+- **v2.6.1** (2026-10-28) — fix(scheduler): name the sync job-store driver
+  explicitly (#14): since SQLAlchemy 2.1 a bare `postgresql://` URL defaults to
+  the psycopg (v3) driver (not installed), so SQLAlchemyJobStore failed to
+  build and APScheduler silently fell back to MemoryJobStore on every
+  PostgreSQL deployment; also stopped logging `user:password` from the sync
+  URL, and added `tests/test_scheduler_jobstores.py` (engine construction
+  needs no database). Reproduced in a venv before fixing, like v2.5.1's
+  greenlet fix. Dispatch duplication hit AGAIN (one `gh workflow run` call →
+  two runs 2s apart; duplicate `40689680453` cancelled, keeper `40689676399`).
+  Published via explicit dispatch. Image `azowail/quickly:v2.6.1` == `:latest`,
+  digest `sha256:938c284a…`;
+  release https://github.com/AbdelftahZowail/Quickly/releases/tag/v2.6.1.
 - **v2.6.0** (2026-10-28) — paginated lead management (#13, carried from #8): the
   Leads page and a campaign's Leads tab paginate server-side (100/page) with search
   over email/name/company/domain, "select all N matching" with per-lead exclusions,
