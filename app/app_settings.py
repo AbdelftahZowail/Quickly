@@ -51,6 +51,15 @@ EMAIL_VERIFICATION_CONNECTION_TESTED = "email_verification_connection_tested"
 EMAIL_VERIFICATION_LAST_ERROR = "email_verification_last_error"
 EMAIL_VERIFICATION_LAST_ERROR_AT = "email_verification_last_error_at"
 
+# Precleared cold-email check (app/precleared.py).  The PRECLEARED_* environment
+# variables win over these rows when set; the key row is also where a free key
+# Precleared issued on request is kept.
+PRECLEARED_MODE_KEY = "precleared_mode"  # hold (default) | warn | off
+PRECLEARED_API_KEY_KEY = "precleared_api_key"
+PRECLEARED_SENDER_COUNTRY_KEY = "precleared_sender_country"  # GB (default) | US | AE
+PRECLEARED_LAST_ERROR = "precleared_last_error"
+PRECLEARED_LAST_ERROR_AT = "precleared_last_error_at"
+
 
 # Generic helpers --------------------------------------------------------------
 

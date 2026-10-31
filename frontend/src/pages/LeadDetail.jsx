@@ -85,7 +85,32 @@ export default function LeadDetail() {
             {lead.provider}
           </span>
         )}
+        {lead.precleared_verdict && (
+          <span
+            className={`rounded-full px-2 py-0.5 ${
+              lead.precleared_verdict === 'ok_to_email'
+                ? 'bg-emerald-100 text-emerald-800'
+                : 'bg-amber-100 text-amber-900'
+            }`}
+            title={lead.precleared_check?.receipt_id ? `Precleared receipt ${lead.precleared_check.receipt_id}` : 'Precleared cold-email check'}
+          >
+            precleared: {lead.precleared_verdict}
+          </span>
+        )}
       </div>
+
+      {lead.precleared_verdict && lead.precleared_verdict !== 'ok_to_email' && (
+        <Card className="p-4 border-amber-200 bg-amber-50 text-sm text-amber-900">
+          <p className="font-medium">
+            Cold email held by the Precleared check ({lead.precleared_verdict}). Sending to this lead is paused; resume it to check again.
+          </p>
+          {lead.precleared_check?.reason && <p className="mt-1">{lead.precleared_check.reason}</p>}
+          {lead.precleared_check?.next_step && <p className="mt-1">Next step: {lead.precleared_check.next_step}</p>}
+          {lead.precleared_check?.receipt_id && (
+            <p className="mt-1 font-mono text-xs text-amber-800">receipt {lead.precleared_check.receipt_id}</p>
+          )}
+        </Card>
+      )}
 
       <Card className="p-4">
         <h2 className="text-lg font-semibold mb-3 border-b border-gray-200 dark:border-gray-700 pb-2">

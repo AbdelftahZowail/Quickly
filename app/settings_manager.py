@@ -50,7 +50,13 @@ class Settings:
         self.office365_client_id: str = os.getenv("OFFICE365_CLIENT_ID", "")
         self.office365_client_secret: str = os.getenv("OFFICE365_CLIENT_SECRET", "")
         self.office365_tenant_id: str = os.getenv("OFFICE365_TENANT_ID", "common")
-        
+
+        # Precleared cold-email check (see app/precleared.py).  Empty means
+        # "use the app_setting row, else the default": mode hold, no key, GB.
+        self.precleared_mode: str = os.getenv("PRECLEARED_MODE", "")
+        self.precleared_api_key: str = os.getenv("PRECLEARED_API_KEY", "")
+        self.precleared_sender_country: str = os.getenv("PRECLEARED_SENDER_COUNTRY", "")
+
         # Background job interval
         self.queue_check_interval_minutes: int = 1
         

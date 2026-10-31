@@ -433,6 +433,10 @@ const BADGE_STYLES = {
   unknown:        'bg-gray-200 text-gray-600',
   pending:        'bg-blue-100 text-blue-600',
   needs_custom_email: 'bg-purple-100 text-purple-700',
+  // Precleared cold-email check holds (ok_to_email needs no badge)
+  precleared_consent_needed: 'bg-amber-100 text-amber-800',
+  precleared_blocked:        'bg-red-100 text-red-700',
+  precleared_unknown:        'bg-gray-200 text-gray-600',
 };
 
 function StatusBadge({ label }) {
@@ -456,6 +460,9 @@ function deriveStatuses(lead) {
   if (intr === 'auto_reply') badges.push('auto_reply');
   if (lead.sending_paused) badges.push('paused');
   if (lead.email_verification_status) badges.push(lead.email_verification_status);
+  if (lead.precleared_verdict && lead.precleared_verdict !== 'ok_to_email') {
+    badges.push(`precleared_${lead.precleared_verdict}`);
+  }
   return badges;
 }
 

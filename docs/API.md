@@ -486,6 +486,8 @@ List leads with optional filters. Each item includes enrollments and verificatio
 | `custom_data` | Object of custom template fields |
 | `provider` | Detected email provider (e.g. Google / Microsoft), or `null` |
 | `email_verification_status` | Typically `valid`, `invalid`, `pending`, or `null` (other provider values may appear) |
+| `precleared_verdict` | Precleared cold-email check before the first email: `ok_to_email`, `consent_needed`, `blocked`, `unknown`, or `null` (not checked yet) |
+| `precleared_check` | Details of that check: `reason`, `next_step`, `receipt_id`, `checked_at`; `null` until checked |
 | `created_at` | Creation timestamp |
 | `campaigns` | Per enrollment: `campaign_id`, `campaign_public_id`, `campaign_name`, `enrolled_at`, **`status`** (enrollment), **`interest`** (reply intent), **`opened`**, **`clicked`**, **`replied`** (booleans for that campaign), `sending_paused` |
 | `interactions` | On **`GET /api/leads/{id}`** only: merged timeline of outbound sends and inbound mirrored messages / reply markers (see below). Empty on list. |
@@ -494,7 +496,7 @@ List leads with optional filters. Each item includes enrollments and verificatio
 
 Download leads as **CSV** (`text/csv`). Uses the **same filters** as `GET /api/leads` (`q`, `status`, `bad_only`, `interest`), with the same stacking rules.
 
-**Columns:** `id`, `email`, `name`, `email_verification_status`, `campaigns` (semicolon-separated names), **`enrollments_json`** (JSON array of per-campaign enrollment slices: `campaign_id`, `campaign_public_id`, `campaign_name`, `status`, `interest`, `opened`, `clicked`, `replied`, `sending_paused`), `enrolled_earliest` (ISO date), then every **`custom_data` key** (sorted alphabetically). Object/array values in `custom_data` are JSON-encoded in the cell.
+**Columns:** `id`, `email`, `name`, `email_verification_status`, `precleared_verdict`, `precleared_receipt_id`, `campaigns` (semicolon-separated names), **`enrollments_json`** (JSON array of per-campaign enrollment slices: `campaign_id`, `campaign_public_id`, `campaign_name`, `status`, `interest`, `opened`, `clicked`, `replied`, `sending_paused`), `enrolled_earliest` (ISO date), then every **`custom_data` key** (sorted alphabetically). Object/array values in `custom_data` are JSON-encoded in the cell.
 
 **Response:** File download (`Content-Disposition: attachment; filename="leads_export.csv"` or `leads_bounced_invalid.csv` when `bad_only=true`).
 

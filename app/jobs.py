@@ -21,6 +21,7 @@ except ImportError:
 
 from app.settings_manager import settings
 from app.database import AsyncSessionLocal
+from app import precleared
 from app.models import (
     QueueSlot,
     CampaignLead,
@@ -138,6 +139,67 @@ async def _alert_repeated_send_failure(
             "timestamp": time_provider.utcnow().isoformat() + "Z",
         },
     )
+
+
+async def _precleared_gate(
+    session: AsyncSession, slot: QueueSlot, cl: CampaignLead, lead: Lead, campaign: Campaign, inbox: Inbox
+) -> bool:
+    """Precleared cold-email check before the first email to a lead.
+
+    Returns True when the send may go ahead.  In ``hold`` mode (the default)
+    anything but ``ok_to_email`` stops it: a definite hold (consent_needed,
+    blocked) or ``unknown`` pauses the enrolment and drops its queue slots,
+    with the verdict, reason, next step and receipt id kept on the lead; a
+    check that could not run keeps the slot so a later scan retries it.
+    ``warn`` mode records the verdict and sends anyway.  Follow-ups, replies
+    and test-mode sends are never checked.
+    """
+    if slot.sequence_index != 0 or settings.test_mode:
+        return True
+    config = await precleared.load_config(session)
+    if config.mode == precleared.MODE_OFF:
+        return True
+
+    result = await precleared.check_lead(session, lead, config, operator_email=inbox.email)
+    if not result.cached:
+        # The verdict (and a free key Precleared may just have issued) must
+        # survive whatever happens to the send below.
+        await session.commit()
+    if result.ok:
+        return True
+    if config.mode == precleared.MODE_WARN:
+        log.warning(
+            "send_slot_job: Precleared warn mode, sending to lead %s anyway: %s",
+            lead.email, result.summary(),
+        )
+        return True
+    if result.unavailable:
+        log.warning(
+            "send_slot_job: Precleared check unavailable, slot %d for lead %s retained: %s",
+            slot.id, lead.email, result.error,
+        )
+        return False
+
+    log.warning(
+        "send_slot_job: Precleared held lead %s, pausing enrolment %d: %s",
+        lead.email, cl.id, result.summary(),
+    )
+    cl.sending_paused = True
+    from sqlalchemy import delete as _sql_delete
+    await session.execute(_sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+    await fire_webhook_event(session, "lead.status_changed", {
+        "lead_id": lead.id, "lead_email": lead.email,
+        "campaign_id": campaign.id,
+        "old_status": "active", "new_status": "paused",
+        "old_enrollment_status": cl.enrollment_status, "new_enrollment_status": cl.enrollment_status,
+        "sending_paused": True,
+        "reason": f"Precleared: {result.summary()}",
+        "precleared_verdict": result.verdict,
+        "precleared_receipt_id": result.receipt_id,
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+    })
+    await session.commit()
+    return False
 
 
 async def _update_enrollment_after_send(session: AsyncSession, cl: CampaignLead, campaign: Campaign, sequence: Sequence) -> None:
@@ -443,6 +505,10 @@ async def run_send_job():
                     if reply_check.scalar_one_or_none():
                         await session.delete(slot)
                         continue
+
+                # Precleared cold-email check (first email to a lead only)
+                if not await _precleared_gate(session, slot, cl, lead, campaign, inbox):
+                    continue
 
                 reply_to_msg_id = None
                 prev_thread_id = None
@@ -1323,6 +1389,10 @@ async def send_slot_job(slot_id: int) -> None:
                         inbox.email, slot_id,
                     )
                     return
+
+        # ── Precleared cold-email check (first email to a lead only) ─────
+        if not await _precleared_gate(session, slot, cl, lead, campaign, inbox):
+            return
 
         # ── A/B variant selection ────────────────────────────────────────
         chosen_variant_id = None

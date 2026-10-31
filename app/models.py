@@ -144,6 +144,11 @@ class Lead(Base):
     email_verification_status = Column(String(32), nullable=True, default=None, index=True)
     # Raw JSON result from the verification provider
     email_verification_result = Column(JSON, nullable=True, default=None)
+    # Precleared cold-email check (app/precleared.py): ok_to_email, consent_needed,
+    # blocked, unknown, or null (not checked yet)
+    precleared_verdict = Column(String(32), nullable=True, default=None)
+    # Details of that check: reason, next_step, receipt_id, checked_at, inputs
+    precleared_check = Column(JSON, nullable=True, default=None)
     # Detected email hosting provider (e.g. "Google Workspace", "Office 365") via MX lookup
     provider = Column(String(64), nullable=True, default=None, index=True)
     created_at = Column(DateTime, default=_utcnow)

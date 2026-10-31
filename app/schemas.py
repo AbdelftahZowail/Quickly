@@ -64,6 +64,10 @@ class LeadResponse(BaseModel):
     provider: Optional[str] = None
     # valid | invalid | pending | null (other provider values may still appear in DB)
     email_verification_status: Optional[str] = None
+    # Precleared cold-email check: ok_to_email | consent_needed | blocked | unknown | null
+    precleared_verdict: Optional[str] = None
+    # reason, next_step, receipt_id, checked_at (null until checked)
+    precleared_check: Optional[Dict[str, Any]] = None
     created_at: datetime
     campaigns: List["LeadCampaignInfo"] = []
     # Populated on GET /api/leads/{id} only: merged outbound sends + inbound mirror/reply markers

@@ -44,6 +44,15 @@ def quickly_test_logs_dir(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _precleared_off(monkeypatch):
+    """The Precleared cold-email check is on by default and would call out of
+    the send job; tests/test_precleared.py mocks the API and switches it on."""
+    from app.settings_manager import settings
+
+    monkeypatch.setattr(settings, "precleared_mode", "off")
+
+
+@pytest.fixture(autouse=True)
 def _reset_jobs_auth_cooldown():
     """The send-job auth-failure circuit breaker is process-global.
 

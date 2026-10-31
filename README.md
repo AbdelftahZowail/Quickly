@@ -73,6 +73,7 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 * **OAuth2 sending via Gmail & Microsoft 365** — Emails are sent using Google and Microsoft’s official APIs, leveraging their trusted infrastructure and IP reputation instead of shared SMTP servers
 * **Warm-up scheduling** — Built-in ramp-up and configurable send-time jitter to protect deliverability
 * **Bounce detection** — Permanent failures are caught automatically; affected leads are stopped to protect sender reputation
+* **Cold email legality check** — Before the first email to a lead, [Precleared](https://precleared.dev) checks whether a cold email to that address is allowed (UK PECR, US CAN-SPAM, CASL and others); leads that need consent are held with the reason and a receipt. See [Cold email legality check](#cold-email-legality-check-precleared)
 
 ### Personalization & Testing
 
@@ -190,6 +191,24 @@ Quickly supports Gmail (via Google OAuth), Microsoft 365 / Outlook (via Azure OA
 
 ---
 
+## Cold email legality check (Precleared)
+
+Whether you may cold email someone depends on facts that are not visible in the address: in the UK a named contact at a limited company may be emailed under PECR, a sole trader may not without consent, and the rules differ again in the US, Canada, Germany and elsewhere. Before the first email of a campaign goes to a lead, Quickly asks [Precleared](https://precleared.dev) about that address. Precleared looks the company up live (Companies House, the domain, the company's website) and answers with a verdict, the rule that decided it, a next step and a signed receipt id. Follow-ups, replies and test-mode sends are never checked, and a definite verdict is reused for 30 days, so each address costs one check. Precleared receives the lead's email address, your sender country and, when the CSV has them, the lead's `company`, name and two-letter `country`; it does not store the names, and nothing is sent to the lead.
+
+The check is on by default. Three settings, in `.env` (or as `precleared_mode`, `precleared_api_key` and `precleared_sender_country` rows in the `app_setting` table; the environment wins when both are set):
+
+| Variable                    | Default | Description                                                                                                                                              |
+| --------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PRECLEARED_MODE`           | `hold`  | `hold`: send only on `ok_to_email` and pause the lead otherwise, including when the check could not run. `warn`: record the verdict and send anyway. `off`: no check |
+| `PRECLEARED_API_KEY`        | none    | Optional. Without a key Precleared allows 10 checks a day per network; when that runs out Quickly asks for a free key once, with the sending inbox's address, and stores it in `app_setting` |
+| `PRECLEARED_SENDER_COUNTRY` | `GB`    | Where the sending business is based: `GB`, `US` or `AE`                                                                                                  |
+
+**What you see when a lead is held.** The lead's enrolment is paused and its queued steps are dropped, exactly as the Sending toggle does. In the campaign's Leads tab the lead carries a `precleared_consent_needed`, `precleared_blocked` or `precleared_unknown` badge next to `paused`; the lead page shows the rule that decided it, the next step and the receipt id, and the CSV export carries the verdict and receipt. A `lead.status_changed` webhook and notification fire with the reason. Resuming the lead runs the check again (`unknown` is never reused). When the check itself cannot run (no connection, the daily allowance used up, a rejected key) the slot simply waits for a later scan, other first emails pause for 15 minutes, and a `feature.error` notification carries Precleared's message. Nothing is skipped silently.
+
+**Free to start.** No key is needed for 10 checks a day. A free key at [precleared.dev/get-key](https://precleared.dev/get-key) gives 100 a day for 14 days, then 25 a day; Quickly fetches one itself the first time the keyless allowance runs out. Precleared is decision support, not legal advice: it tells you which rule applies and why, and keeps a receipt you can show later.
+
+---
+
 ## Environment Variables
 
 The `.env` file is intentionally minimal. All runtime settings — AI providers, sending windows, warm-up schedules, tracking domains — are configured from the **Settings page** in the UI after deployment.
@@ -205,6 +224,9 @@ The `.env` file is intentionally minimal. All runtime settings — AI providers,
 | `OFFICE365_CLIENT_SECRET` | For Office 365 | Microsoft Entra client secret                                                     |
 | `OFFICE365_TENANT_ID`     | No             | Defaults to `common` (multi-tenant); set to your tenant ID for single-tenant orgs |
 | `QUICKLY_SECRET_KEY`      | Recommended    | JWT signing secret                                                                |
+| `PRECLEARED_MODE`         | No             | Cold email legality check: `hold` (default), `warn` or `off`. See [Cold email legality check](#cold-email-legality-check-precleared) |
+| `PRECLEARED_API_KEY`      | No             | Optional Precleared key; a free one is fetched automatically when the keyless allowance runs out |
+| `PRECLEARED_SENDER_COUNTRY` | No           | Where the sending business is based: `GB` (default), `US` or `AE`                 |
 | `CORS_ORIGINS`            | No             | Comma-separated allowed origins                                                   |
 | `QUICKLY_TELEMETRY`       | No             | Opt-out aggregate telemetry; defaults to `true`, set `false` to disable. Sends coarse install scale (RAM rounded up to GB, CPU count, `docker`/`bare`, OS/CPU family) and aggregate usage counts only |
 | `QUICKLY_TELEMETRY_URL`   | No             | Managed hub base URL; official releases use `https://telemetry.shortformfunnels.com` |

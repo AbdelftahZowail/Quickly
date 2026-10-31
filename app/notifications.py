@@ -86,6 +86,8 @@ def build_notification(event_type: str, data: dict[str, Any]) -> dict[str, Any]:
         new_s = data.get("new_status", "—")
         title = f"Lead status changed — {lead_email}"
         message = f"**{lead_email}** status changed from *{old_s}* to *{new_s}*."
+        if data.get("reason"):
+            message += f" Reason: {data['reason']}"
     elif event_type.startswith("lead."):
         label = event_type.replace("lead.", "").replace("_", " ").title()
         lead_email = data.get("lead_email", "?")

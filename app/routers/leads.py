@@ -109,6 +109,8 @@ def _lead_to_response(
         custom_data=lead.custom_data if isinstance(lead.custom_data, dict) else {},
         provider=lead.provider,
         email_verification_status=lead.email_verification_status,
+        precleared_verdict=lead.precleared_verdict,
+        precleared_check=lead.precleared_check if isinstance(lead.precleared_check, dict) else None,
         created_at=lead.created_at,
         campaigns=camps,
         interactions=interactions or [],
@@ -654,6 +656,8 @@ async def export_leads_csv(
         "email",
         "name",
         "email_verification_status",
+        "precleared_verdict",
+        "precleared_receipt_id",
         "campaigns",
         "enrollments_json",
         "enrolled_earliest",
@@ -680,11 +684,14 @@ async def export_leads_csv(
                     "sending_paused": cl.sending_paused,
                 }
             )
+        pc = lead.precleared_check if isinstance(lead.precleared_check, dict) else {}
         row = [
             lead.id,
             lead.email or "",
             lead.name or "",
             lead.email_verification_status or "",
+            lead.precleared_verdict or "",
+            pc.get("receipt_id") or "",
             camps,
             json.dumps(enc_payload, ensure_ascii=False),
             _enrolled_earliest_iso(lead),

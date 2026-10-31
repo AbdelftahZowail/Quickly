@@ -227,6 +227,8 @@ Fires when a lead's status transitions (e.g. active → bounced, active → unsu
 }
 ```
 
+Also fires when the Precleared cold-email check pauses a lead before its first email (`old_status: "active"`, `new_status: "paused"`, `sending_paused: true`). The payload then carries `precleared_verdict` (`consent_needed`, `blocked` or `unknown`), `precleared_receipt_id` and a `reason` with the rule that decided it and the next step.
+
 ### `lead.interested`
 
 Fires when the AI classifier determines a lead's reply shows positive interest. Requires AI features to be enabled in Settings.
