@@ -17,7 +17,7 @@ against the actual repo state (`git log`, `git tag --sort=-v:refname | head`,
 > Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
 > skill looks for exactly this path.
 
-- **Last released version:** `v2.6.1` (tag `v2.6.1`)
+- **Last released version:** `v2.6.2` (tag `v2.6.2`)
 - **Version source of truth:** the **git tag** — there is no version file. The
   tag is passed to the image build as `QUICKLY_VERSION` (build arg) and the app
   strips the leading `v` for the wire format; a source/dev build reports
@@ -150,6 +150,26 @@ Release is the source of truth.
 
 ## Releases
 
+- **v2.6.2** (2026-11-07) — lead-import dedup fixes (#16, #17): the dedup
+  existence checks in `bulk_add_leads_to_campaign` / `import_campaign_leads`
+  now use `scalars().first()`, so a lead already enrolled in 2+ campaigns is
+  skipped as `already_enrolled` instead of raising `MultipleResultsFound`
+  (HTTP 200 with `added=0, errors=1`); the Add-leads Single form now sends
+  `skip_duplicates`, reports the server outcome instead of always toasting
+  "Lead added", and a fully refused bulk paste keeps its text. Bulk toast
+  prints real `added`/`already_enrolled` counts (red at `added=0`). Regression
+  tests added for both routes and the `skip_duplicates=false` path.
+  Release scope note: tag `v2.6.1` (2c17bc7) precedes four docs/CI commits
+  (boot-smoke gate, agentic-verification gate, helper binding, v2.6.1 record),
+  so `v2.6.1..HEAD` was 6 commits — none user-visible. Gates: 130 targeted
+  tests passed (1 documented pre-existing failure), `vite build` clean, and the
+  independent verifier built the image, ran `e2e_boot_smoke` (E2E PASS) and
+  live-probed both fixes before returning `VERDICT: SHIP`. Dispatch run
+  `42338332496` succeeded (build×2, merge, smoke, release); the tag-push
+  duplicate `42338317577` was cancelled. Image `azowail/quickly:v2.6.2` ==
+  `:latest`, digest `sha256:cec1191a…`; release
+  https://github.com/AbdelftahZowail/Quickly/releases/tag/v2.6.2.
+  Issues #16/#17 auto-closed by the `Fixes #…` commit lines on main.
 - **v2.6.1** (2026-10-28) — fix(scheduler): name the sync job-store driver
   explicitly (#14): since SQLAlchemy 2.1 a bare `postgresql://` URL defaults to
   the psycopg (v3) driver (not installed), so SQLAlchemyJobStore failed to
