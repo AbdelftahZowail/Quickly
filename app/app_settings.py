@@ -51,6 +51,15 @@ EMAIL_VERIFICATION_CONNECTION_TESTED = "email_verification_connection_tested"
 EMAIL_VERIFICATION_LAST_ERROR = "email_verification_last_error"
 EMAIL_VERIFICATION_LAST_ERROR_AT = "email_verification_last_error_at"
 
+# Pre-send decision hook (app/pre_send_hook.py).  The PRE_SEND_HOOK_*
+# environment variables win over these rows when set.
+PRE_SEND_HOOK_URL_KEY = "pre_send_hook_url"            # empty = off
+PRE_SEND_HOOK_SECRET_KEY = "pre_send_hook_secret"      # HMAC secret, optional
+PRE_SEND_HOOK_TIMEOUT_KEY = "pre_send_hook_timeout"    # seconds, 1 to 10, default 3
+PRE_SEND_HOOK_ON_ERROR_KEY = "pre_send_hook_on_error"  # allow (default) | hold
+PRE_SEND_HOOK_FIELDS_KEY = "pre_send_hook_fields"      # minimal (default) | contact
+PRE_SEND_HOOK_SCOPE_KEY = "pre_send_hook_scope"        # first (default) | all
+
 
 # Generic helpers --------------------------------------------------------------
 

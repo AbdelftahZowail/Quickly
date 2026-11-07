@@ -486,6 +486,8 @@ List leads with optional filters. Each item includes enrollments and verificatio
 | `custom_data` | Object of custom template fields |
 | `provider` | Detected email provider (e.g. Google / Microsoft), or `null` |
 | `email_verification_status` | Typically `valid`, `invalid`, `pending`, or `null` (other provider values may appear) |
+| `pre_send_decision` | `allow`, `hold`, `deny`, `error_allow`, `error_hold`, or `null` when the pre-send hook has not been asked (see [PRE_SEND_HOOK.md](PRE_SEND_HOOK.md)) |
+| `pre_send_check` | Details of that decision: `reason`, `reference`, `error`, `checked_at`, `retry_at`, `host`, `fields`, `sequence_index`; `null` until asked |
 | `created_at` | Creation timestamp |
 | `campaigns` | Per enrollment: `campaign_id`, `campaign_public_id`, `campaign_name`, `enrolled_at`, **`status`** (enrollment), **`interest`** (reply intent), **`opened`**, **`clicked`**, **`replied`** (booleans for that campaign), `sending_paused` |
 | `interactions` | On **`GET /api/leads/{id}`** only: merged timeline of outbound sends and inbound mirrored messages / reply markers (see below). Empty on list. |
