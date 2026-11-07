@@ -623,3 +623,94 @@ async def test_csv_import_all_new_no_duplicates(session):
     assert result["added"] == 2
     assert result["duplicate_leads"] == []
     assert result["already_enrolled"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Regression: #16 — leads enrolled in 2+ campaigns must be a duplicate skip,
+# not a MultipleResultsFound error (scalar_one_or_none on an existence check).
+# ══════════════════════════════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_bulk_add_duplicate_enrolled_in_two_campaigns_is_skip(session):
+    """A lead with two campaign_lead rows must report already_enrolled, not error.
+
+    `campaign_lead` has no unique constraint and the global dedup check is an
+    existence check, so it must not fetch "one or none".
+    """
+    target = await make_campaign(session)
+    inbox = await make_inbox(session, email="two-campaigns@test.com")
+    await make_campaign_inbox(session, target.id, inbox.id)
+    await make_sequence(session, target.id, position=0)
+
+    lead = await make_lead(session, email="twice@example.com")
+    first = await make_campaign(session)
+    second = await make_campaign(session)
+    await make_campaign_lead(session, first.id, lead.id)
+    await make_campaign_lead(session, second.id, lead.id)
+
+    result = await bulk_add_leads_to_campaign(
+        campaign_id=target.id,
+        leads_data=[CampaignLeadAdd(email="twice@example.com")],
+        skip_duplicates=True,
+        db=session,
+    )
+
+    assert result["added"] == 0
+    assert result["already_enrolled"] == 1
+    assert result["errors"] == 0
+    assert result["results"][0]["status"] == "already_enrolled"
+    assert "twice@example.com" in result["duplicate_leads"]
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_skip_duplicates_false_handles_two_rows_in_same_campaign(session):
+    """skip_duplicates=False uses the campaign-scoped existence check, which must
+    also tolerate 2+ campaign_lead rows for the same (campaign, lead) pair."""
+    campaign = await make_campaign(session)
+    inbox = await make_inbox(session, email="double-row@test.com")
+    await make_campaign_inbox(session, campaign.id, inbox.id)
+    await make_sequence(session, campaign.id, position=0)
+
+    lead = await make_lead(session, email="double-row@example.com")
+    await make_campaign_lead(session, campaign.id, lead.id)
+    await make_campaign_lead(session, campaign.id, lead.id)
+
+    result = await bulk_add_leads_to_campaign(
+        campaign_id=campaign.id,
+        leads_data=[CampaignLeadAdd(email="double-row@example.com")],
+        skip_duplicates=False,
+        db=session,
+    )
+
+    assert result["added"] == 0
+    assert result["already_enrolled"] == 1
+    assert result["errors"] == 0
+    assert result["results"][0]["status"] == "already_enrolled"
+
+
+@pytest.mark.asyncio
+async def test_csv_import_duplicate_enrolled_in_two_campaigns_is_skip(session):
+    """CSV import must skip (not error on) leads with 2+ campaign_lead rows."""
+    target = await make_campaign(session)
+    inbox = await make_inbox(session, email="csv-two-campaigns@test.com")
+    await make_campaign_inbox(session, target.id, inbox.id)
+    await make_sequence(session, target.id, position=0)
+
+    lead = await make_lead(session, email="csv-twice@example.com")
+    first = await make_campaign(session)
+    second = await make_campaign(session)
+    await make_campaign_lead(session, first.id, lead.id)
+    await make_campaign_lead(session, second.id, lead.id)
+
+    fake_file = _make_csv_upload("email,name\ncsv-twice@example.com,Twice\n")
+    result = await import_campaign_leads(
+        campaign_id=target.id,
+        file=fake_file,
+        skip_duplicates=True,
+        db=session,
+    )
+
+    assert result["added"] == 0
+    assert result["already_enrolled"] == 1
+    assert result["errors"] == 0
+    assert "csv-twice@example.com" in result["duplicate_leads"]

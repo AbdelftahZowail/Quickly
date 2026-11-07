@@ -2442,7 +2442,7 @@ async def bulk_add_leads_to_campaign(
                 existing_any = await db.execute(
                     select(CampaignLead).where(CampaignLead.lead_id == lead.id)
                 )
-                if existing_any.scalar_one_or_none():
+                if existing_any.scalars().first():
                     duplicate_leads.append(email)
                     results.append({"email": email, "status": "already_enrolled"})
                     already_enrolled += 1
@@ -2455,7 +2455,7 @@ async def bulk_add_leads_to_campaign(
                         CampaignLead.lead_id == lead.id,
                     )
                 )
-                if existing_cl.scalar_one_or_none():
+                if existing_cl.scalars().first():
                     results.append({"email": email, "status": "already_enrolled"})
                     already_enrolled += 1
                     continue
@@ -3170,7 +3170,7 @@ async def import_campaign_leads(
                 existing_any = await db.execute(
                     select(CampaignLead).where(CampaignLead.lead_id == lead.id)
                 )
-                if existing_any.scalar_one_or_none():
+                if existing_any.scalars().first():
                     duplicate_leads.append(email)
                     results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
                     already_enrolled += 1
@@ -3183,7 +3183,7 @@ async def import_campaign_leads(
                         CampaignLead.lead_id == lead.id,
                     )
                 )
-                if existing_cl.scalar_one_or_none():
+                if existing_cl.scalars().first():
                     results_list.append({"row": row_num, "email": email, "status": "already_enrolled"})
                     already_enrolled += 1
                     continue
