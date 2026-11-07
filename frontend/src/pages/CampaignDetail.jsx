@@ -741,14 +741,26 @@ function LeadsTab({ leads, leadsPage = 1, leadsTotal = 0, leadsHasMore = false, 
       catch { setMsg({ type: 'error', text: 'Custom data must be valid JSON' }); return; }
     }
     try {
-      await api.post(`/campaigns/${campaignId}/leads`, [{
+      const res = await api.post(`/campaigns/${campaignId}/leads?skip_duplicates=${skipDuplicates}`, [{
         email: single.email.trim(),
         name: single.name.trim() || undefined,
         custom_data,
       }]);
-      setSingle({ email: '', name: '', custom: '' });
-      notify({ type: 'success', message: 'Lead added' });
-      refresh();
+      const row = res?.results?.[0];
+      if (res?.added > 0) {
+        setSingle({ email: '', name: '', custom: '' });
+        notify({ type: 'success', message: 'Lead added' });
+        refresh();
+      } else if (row?.status === 'already_enrolled') {
+        setMsg({
+          type: 'error',
+          text: skipDuplicates
+            ? 'Already enrolled in a campaign — untick "Skip duplicates" to add to this campaign anyway'
+            : 'Already enrolled in this campaign',
+        });
+      } else {
+        setMsg({ type: 'error', text: row?.detail || 'Lead not added' });
+      }
     } catch (e) {
       setMsg({ type: 'error', text: e.message });
     }
@@ -834,9 +846,12 @@ function LeadsTab({ leads, leadsPage = 1, leadsTotal = 0, leadsHasMore = false, 
       let res;
       if (confirmPayload) {
         res = await api.post(`/campaigns/${campaignId}/leads?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, confirmPayload);
-        setBulk('');
-        const dupMsg = res.duplicate_leads?.length ? ` (${res.duplicate_leads.length} duplicate(s) skipped)` : '';
-        notify({ type: 'success', message: `${res.added || confirmPayload.length} lead(s) added${dupMsg}` });
+        if (res.added > 0) setBulk('');
+        const errMsg = res.errors ? `, ${res.errors} error(s)` : '';
+        notify({
+          type: res.added > 0 ? 'success' : 'error',
+          message: `${res.added} added, ${res.already_enrolled} already enrolled${errMsg}`,
+        });
       } else if (importFile) {
         res = await api.upload(`/campaigns/${campaignId}/leads/import?skip_duplicates=${skipDuplicates}&verify_emails=${verifyEmails}`, importFile);
         const dupMsg = res.duplicate_leads?.length ? `, ${res.duplicate_leads.length} duplicate(s) skipped` : '';
