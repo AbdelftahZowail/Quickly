@@ -144,6 +144,11 @@ class Lead(Base):
     email_verification_status = Column(String(32), nullable=True, default=None, index=True)
     # Raw JSON result from the verification provider
     email_verification_result = Column(JSON, nullable=True, default=None)
+    # Pre-send decision hook (app/pre_send_hook.py): allow, hold, deny,
+    # error_allow, error_hold, or null (never asked)
+    pre_send_decision = Column(String(16), nullable=True, default=None)
+    # Details of that decision: reason, reference, checked_at, retry_at, host
+    pre_send_check = Column(JSON, nullable=True, default=None)
     # Detected email hosting provider (e.g. "Google Workspace", "Office 365") via MX lookup
     provider = Column(String(64), nullable=True, default=None, index=True)
     created_at = Column(DateTime, default=_utcnow)

@@ -216,6 +216,9 @@ async def _run_migrations(conn) -> None:
         # view and quoted follow-ups reproduce what was actually sent even when
         # the template uses {{random: ...}} (which cannot be re-derived later).
         "ALTER TABLE email_log ADD COLUMN IF NOT EXISTS body TEXT NULL",
+        # 2026-11-07: pre-send decision hook outcome per lead
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS pre_send_decision VARCHAR(16) NULL",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS pre_send_check JSON NULL",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

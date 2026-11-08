@@ -210,6 +210,7 @@ The `.env` file is intentionally minimal. All runtime settings — AI providers,
 | `QUICKLY_TELEMETRY_URL`   | No             | Managed hub base URL; official releases use `https://telemetry.shortformfunnels.com` |
 | `QUICKLY_TELEMETRY_KEY`   | No             | Managed hub write key, supplied as a release-build secret; never commit it     |
 | `QUICKLY_VERSION`         | Release only   | Injected by release builds; source builds default to `unknown` and do not send    |
+| `PRE_SEND_HOOK_URL`       | No             | Ask one HTTPS endpoint of yours (allow, hold or deny) before the first email to a lead. Off when empty; fails open. See [docs/PRE_SEND_HOOK.md](docs/PRE_SEND_HOOK.md) |
 
 See [`.env.example`](.env.example) for the full annotated reference.
 
@@ -245,6 +246,7 @@ The UI shows a dismissible notice strip with product announcements and a "newer 
 | [docs/API.md](docs/API.md) | Complete REST API reference — 90+ endpoints |
 | [docs/MCP.md](docs/MCP.md) | **MCP for AI clients** — endpoint, auth, tools, Cursor / `mcp-remote` config, troubleshooting |
 | [docs/WEBHOOKS.md](docs/WEBHOOKS.md) | All 15 webhook event types, payload schemas, and authentication |
+| [docs/PRE_SEND_HOOK.md](docs/PRE_SEND_HOOK.md) | **Pre-send decision hook** — ask your own endpoint (allow, hold, deny) before the first email to a lead; signed, short timeout, fail open |
 | [docs/CONTRIBUTORS.md](docs/CONTRIBUTORS.md) | Contributing guidelines and local dev environment setup |
 
 ---

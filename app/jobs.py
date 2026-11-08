@@ -45,6 +45,7 @@ from app.app_settings import get_google_oauth_credentials, get_office365_oauth_c
 from app import time as time_provider
 from app.queue_logic import _parse_time, compute_effective_daily_limit
 from app.campaign_lead_status import campaign_lead_may_receive_sends
+from app import pre_send_hook
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +139,74 @@ async def _alert_repeated_send_failure(
             "timestamp": time_provider.utcnow().isoformat() + "Z",
         },
     )
+
+
+async def _pre_send_hook_gate(
+    session: AsyncSession, slot: QueueSlot, cl: CampaignLead, lead: Lead, campaign: Campaign
+) -> bool:
+    """Ask the pre-send decision hook, if one is configured, before a send.
+
+    Returns True when the send may go ahead.  Off unless a hook URL is set,
+    never asked in test mode, and by default asked only for the first email
+    of a sequence (``PRE_SEND_HOOK_SCOPE=all`` asks for every send).
+
+    ``allow`` sends.  ``hold`` keeps the queue slot and asks again after the
+    hook's ``retry_after_seconds`` (six hours by default).  ``deny`` pauses
+    the enrolment and drops its queue slots, with the reason and reference
+    kept on the lead.  A hook that cannot answer follows
+    ``PRE_SEND_HOOK_ON_ERROR``: ``allow`` (the default, fail open) sends and
+    logs a warning; ``hold`` keeps the slot for a later scan.
+    """
+    if settings.test_mode:
+        return True
+    config = await pre_send_hook.load_config(session)
+    if not config.enabled:
+        return True
+    if config.scope == pre_send_hook.SCOPE_FIRST and slot.sequence_index != 0:
+        return True
+
+    result = await pre_send_hook.decide(session, lead, campaign, slot.sequence_index, config)
+    if not result.cached:
+        # The recorded decision must survive whatever happens to the send below.
+        await session.commit()
+    if result.ok:
+        return True
+    if result.decision == "error":
+        if config.on_error == pre_send_hook.ON_ERROR_HOLD:
+            log.warning(
+                "send_slot_job: pre-send hook unavailable, slot %d for lead %s kept: %s",
+                slot.id, lead.email, result.error,
+            )
+            return False
+        log.warning(
+            "send_slot_job: pre-send hook unavailable, sending to lead %s anyway: %s",
+            lead.email, result.error,
+        )
+        return True
+    if result.decision == "hold":
+        log.info("send_slot_job: pre-send hook held lead %s for now: %s", lead.email, result.summary())
+        return False
+
+    log.warning(
+        "send_slot_job: pre-send hook denied lead %s, pausing enrolment %d: %s",
+        lead.email, cl.id, result.summary(),
+    )
+    cl.sending_paused = True
+    from sqlalchemy import delete as _sql_delete
+    await session.execute(_sql_delete(QueueSlot).where(QueueSlot.campaign_lead_id == cl.id))
+    await fire_webhook_event(session, "lead.status_changed", {
+        "lead_id": lead.id, "lead_email": lead.email,
+        "campaign_id": campaign.id,
+        "old_status": "active", "new_status": "paused",
+        "old_enrollment_status": cl.enrollment_status, "new_enrollment_status": cl.enrollment_status,
+        "sending_paused": True,
+        "reason": f"Pre-send hook: {result.summary()}",
+        "pre_send_decision": result.decision,
+        "pre_send_reference": result.reference,
+        "timestamp": time_provider.utcnow().isoformat() + "Z",
+    })
+    await session.commit()
+    return False
 
 
 async def _update_enrollment_after_send(session: AsyncSession, cl: CampaignLead, campaign: Campaign, sequence: Sequence) -> None:
@@ -443,6 +512,10 @@ async def run_send_job():
                     if reply_check.scalar_one_or_none():
                         await session.delete(slot)
                         continue
+
+                # Pre-send decision hook (off unless configured)
+                if not await _pre_send_hook_gate(session, slot, cl, lead, campaign):
+                    continue
 
                 reply_to_msg_id = None
                 prev_thread_id = None
@@ -1323,6 +1396,10 @@ async def send_slot_job(slot_id: int) -> None:
                         inbox.email, slot_id,
                     )
                     return
+
+        # ── Pre-send decision hook (off unless configured) ───────────────
+        if not await _pre_send_hook_gate(session, slot, cl, lead, campaign):
+            return
 
         # ── A/B variant selection ────────────────────────────────────────
         chosen_variant_id = None
