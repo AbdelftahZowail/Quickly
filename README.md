@@ -105,6 +105,10 @@ If this saves you money, please consider dropping a ⭐ — it helps others find
 
 ## Quick Start
 
+## One-Click Deploy
+
+[![Deploy on RepoCloud](https://d16t0pc4846x52.cloudfront.net/deploylobe.svg)](https://repocloud.io/details/Quickly/)
+
 ### Option A: Deploy on Railway (Fastest — no server needed)
 
 > Up and running in under 5 minutes with automatic HTTPS. Railway has a free tier.
