@@ -17,7 +17,7 @@ against the actual repo state (`git log`, `git tag --sort=-v:refname | head`,
 > Lives at `.opencode/release-helper.md` on purpose: the **super-vibe** ship
 > skill looks for exactly this path.
 
-- **Last released version:** `v2.6.2` (tag `v2.6.2`)
+- **Last released version:** `v2.7.0` (tag `v2.7.0`)
 - **Version source of truth:** the **git tag** — there is no version file. The
   tag is passed to the image build as `QUICKLY_VERSION` (build arg) and the app
   strips the leading `v` for the wire format; a source/dev build reports
@@ -150,6 +150,30 @@ Release is the source of truth.
 
 ## Releases
 
+- **v2.7.0** (2026-11-23) — security and setup release. Printed one-time setup
+  code gates the first admin (password, Google, Microsoft) and pre-setup restore;
+  the login page shows only the code field until verified. Email-or-username
+  login with per-IP/per-account throttling and trusted-proxy client IPs
+  (`QUICKLY_TRUSTED_PROXIES`). Microsoft app login matches `tid:oid` from the
+  id_token (consumer tenants refused, optional tenant pin, legacy subjects
+  upgraded in place); Google requires a verified email. SSRF guards on webhooks,
+  backup webhooks, Beacon, health/tracking probes and custom verification URLs
+  (IPv4-mapped, NAT64, 6to4; no redirects). App sign-in OAuth tokens encrypted at
+  rest; quiet logs by default (`QUICKLY_DEBUG_MAIL_LOGS`,
+  `QUICKLY_DEBUG_SCHEDULE`). Pre-send decision hook (allow/hold/deny) configured
+  in Settings with dispatch-time SSRF re-check and an encrypted signing secret.
+  Markdown notices/release notes; independent `QUICKLY_NOTICES` switch; telemetry
+  opt-out from Settings sends one anonymous count. PR #18 recorded via
+  `git merge -s ours` merge commit `d6192a5` (reimplemented in `0e12943`).
+  Gates: targeted + new-change suites passed (the same 6 documented pre-existing
+  failures confirmed on a pristine export), `vite build` clean, boot smoke and
+  `e2e_setup_flow` PASS, independent verifier `VERDICT: SHIP` (the first attempt
+  BLOCKED an overclaimed encryption bullet, corrected in `708ba63`). Dispatch run
+  `45202128832` succeeded (build×2, merge, smoke, release); tag-push duplicate
+  `45202106565` cancelled. Image `azowail/quickly:v2.7.0` == `:latest`, digest
+  `sha256:3da9031bb455a4795c8a64798da725c2f1d7c91d37df98718b0d7ba680155fd7`;
+  release https://github.com/AbdelftahZowail/Quickly/releases/tag/v2.7.0
+  (published, latest, body carries `<!-- security -->`).
 - **v2.6.2** (2026-11-07) — lead-import dedup fixes (#16, #17): the dedup
   existence checks in `bulk_add_leads_to_campaign` / `import_campaign_leads`
   now use `scalars().first()`, so a lead already enrolled in 2+ campaigns is
