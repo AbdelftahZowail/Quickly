@@ -32,6 +32,14 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@db:5432/quickly
       BASE_URL: http://localhost:8301
+      # Fake OAuth credentials so the setup-flow e2e can assert that the
+      # first-user OAuth authorize endpoint is gated by the setup code.  No
+      # network call is made: the test only checks the 403/redirect decision.
+      GOOGLE_CLIENT_ID: e2e-google-client
+      GOOGLE_CLIENT_SECRET: e2e-google-secret
+      OFFICE365_CLIENT_ID: e2e-ms-client
+      OFFICE365_CLIENT_SECRET: e2e-ms-secret
+      OFFICE365_TENANT_ID: e2e-tenant
     ports:
       - "127.0.0.1:8301:8000"
     depends_on:

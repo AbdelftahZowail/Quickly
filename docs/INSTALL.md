@@ -531,9 +531,19 @@ pytest
 
 **1. Open your Quickly URL in a browser.**
 
+> **First run:** Quickly prints a one-time setup code in the server logs when no users exist yet:
+>
+> ```bash
+> docker compose logs app | grep "Setup code"
+> ```
+>
+> You need this code to create the first admin account (password **or** Google/Microsoft signup) and to restore a backup before setup. It is invalidated once setup completes, so it is no longer needed afterwards. To pin your own code instead of the generated one, set `QUICKLY_SETUP_CODE` in `.env`.
+
 **2. Create your admin account.**
 
 Click **Register** and sign in with your Google or Microsoft account. Make sure you've added credentials for whichever provider you want to use before attempting this (see [Step 3A](#step-3a-connect-gmail-inboxes) or [Step 3B](#step-3b-connect-office-365--outlook-inboxes)).
+
+> **Microsoft app login** accepts work or school accounts only — personal (Outlook.com) accounts are refused. Set `OFFICE365_TENANT_ID` to a tenant GUID to allow only that tenant. Accounts are matched by Microsoft tenant + object id, never by email; existing Microsoft sign-ins are upgraded on their next sign-in.
 
 **3. Log in.**
 
@@ -939,14 +949,39 @@ The PostgreSQL Docker volume keeps your data across updates (`quickly_pgdata` fo
 |`OFFICE365_CLIENT_SECRET`|For Office 365|—|Microsoft Entra app client secret — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
 |`OFFICE365_TENANT_ID`|No|`common`|Use `common` for multi-tenant, or your specific tenant ID — [see Step 3B](#step-3b-connect-office-365--outlook-inboxes)|
 |`QUICKLY_SECRET_KEY`|No|auto-generated|JWT signing key — **set this** or sessions reset on every restart|
+|`QUICKLY_SETUP_CODE`|No|auto-generated|One-time code required to create the first admin or restore before setup. Printed in the logs on first boot; optional override to pin your own|
+|`QUICKLY_TRUSTED_PROXIES`|No|loopback + RFC1918|Comma-separated IPs/CIDRs allowed to supply proxy headers (`CF-Connecting-IP`, `X-Forwarded-For`, …). Requests from anywhere else are keyed on the socket peer, so spoofed headers are ignored — [see behind a reverse proxy](#behind-a-reverse-proxy-client-ips-and-rate-limits)|
+|`QUICKLY_LOGIN_MAX_FAILURES_PER_IP`|No|`10`|Failed logins (and failed setup-code attempts) allowed per client IP within `QUICKLY_LOGIN_WINDOW_SECONDS` before that IP is locked|
+|`QUICKLY_LOGIN_MAX_FAILURES_PER_ACCOUNT`|No|`5`|Failed logins allowed per username/email within `QUICKLY_LOGIN_ACCOUNT_WINDOW_SECONDS` before that account is locked|
+|`QUICKLY_LOGIN_WINDOW_SECONDS`|No|`300`|Per-IP sliding window for the two limits above|
+|`QUICKLY_LOGIN_ACCOUNT_WINDOW_SECONDS`|No|`900`|Per-account sliding window|
+|`QUICKLY_LOGIN_LOCK_SECONDS`|No|`900`|How long a locked IP/account is refused (`HTTP 429` + `Retry-After`); the bucket starts fresh afterwards|
 |`CORS_ORIGINS`|No|`http://localhost:5173,...`|Comma-separated allowed CORS origins|
-|`QUICKLY_TELEMETRY`|No|`true`|Opt-out aggregate usage telemetry; set `false` to disable. Sends coarse install scale (RAM rounded up to GB, CPU count, `docker`/`bare`, OS/CPU family) and aggregate usage counts only|
+|`QUICKLY_TELEMETRY`|No|`true`|Opt-out aggregate usage telemetry; set `false` to disable (sends nothing). The Settings toggle sends one anonymous opt-out count, then nothing. Otherwise sends coarse install scale (RAM rounded up to GB, CPU count, `docker`/`bare`, OS/CPU family) and aggregate usage counts only|
 |`QUICKLY_TELEMETRY_URL`|No|`https://telemetry.shortformfunnels.com`|Managed telemetry hub base URL; the client appends `/v1/telemetry`|
 |`QUICKLY_TELEMETRY_KEY`|No|_(release build secret)_|Managed hub write key; never commit a real key|
 |`QUICKLY_VERSION`|Release build only|_(injected)_|Release version used by telemetry; source builds default to `unknown` and do not send|
+|`QUICKLY_NOTICES`|No|`true`|In-app release and security notices (new-version cards). Independent of telemetry: opting out of usage telemetry does **not** stop update notices, and `false` makes no feed request at all|
+|`QUICKLY_DEBUG_MAIL_LOGS`|No|`false`|Debug only. Writes raw MIME, recipients and subjects of sent mail under `logs/`; redacted/omitted when off|
+|`QUICKLY_DEBUG_SCHEDULE`|No|`false`|Debug only. Writes the per-slot schedule calculation dump (`logs/partial.txt`); off by default|
+|`QUICKLY_WEBHOOK_ALLOW_LOCALHOST`|No|`false`|Development escape hatch that permits webhook targets on `localhost`/loopback, which SSRF protection blocks by default|
 |`QUICKLY_LOCAL_DISK_BACKUPS`|No|_(off)_|Set to `1` or `true` to allow saving backups under a folder in **Settings → Setup → Backup** (default `backups/` under the app directory). The **docker-compose\*.yml** files in this repo (including **`docker-compose.no-caddy.yml`**) set this and mount **`./backups:/app/backups`**. The app keeps the **10** newest backup files (`.qbk` wrapper format). PaaS without a volume: use **webhook** instead.|
 |`QUICKLY_PREBUILT_IMAGE`|No|`1` in Docker image|When `1`/`true`/`yes`, the inbox UI hides CNAME-to-Quickly custom tracking setup so operators use **Beacon** instead. **`docker-compose.dev.yml`** sets `0` (CNAME UI visible while hacking). Production **`docker-compose-not-host.yml`** sets `0` for legacy host-Caddy + CNAME tracking. **`docker-compose.no-caddy.yml`**, **`docker-compose.no-caddy.dev.yml`**, and **`docker-compose-not-host.dev.yml`** set `1` to mirror the prebuilt image.|
 |`QUICKLY_TRACKING_CNAME_UI`|No|_(off)_|Set to `1`/`true`/`yes` to **show** the CNAME custom tracking UI even when `QUICKLY_PREBUILT_IMAGE=1` (advanced / host-Caddy setups).|
+
+### Behind a reverse proxy (client IPs and rate limits)
+
+Proxy headers (`CF-Connecting-IP`, `X-Forwarded-For`, …) are only honoured when
+the **socket peer** is a trusted proxy; otherwise rate limits and logs use the
+peer address, so a spoofed header cannot dodge the login limiter. The default
+trusts loopback and RFC1918 (the bundled Compose stacks). Set
+`QUICKLY_TRUSTED_PROXIES` to replace it with your proxy's addresses — required
+for a cloud load balancer, or every user shares its IP. Malformed values trust
+no peer.
+
+Login protection defaults: 10 failed logins per IP / 5 per account, locked for
+15 minutes (`429` + `Retry-After`); failed setup-code attempts share the per-IP
+budget. Counters are in-memory per worker, so limits scale with worker count.
 
 **Backup and restore:** Backups are packaged as **`.qbk`** files (current format embeds a manifest plus a PostgreSQL custom-format dump). **Encrypted** backups include a small **plaintext preview** of the manifest (admin emails masked) so the UI can show what you are restoring before you enter the password; the dump itself stays encrypted. Older `.qbk` files from previous Quickly versions are not accepted — export a new backup from a current instance. You can download an encrypted backup from Settings (password required to restore; losing the password makes the file unrecoverable). If you enable **Encrypt automatic backups** in Settings, scheduled and “run now” backups use the same saved password (stored in the database, like webhook secrets). Restore uses **read metadata → verify password (if encrypted) → confirm** steps. The app uses `pg_dump` / `pg_restore` internally. The production Docker image includes the PostgreSQL client tools. If you run the backend directly on the host (e.g. `uvicorn` without Docker), install the client package for your OS (e.g. `postgresql-client` on Debian/Ubuntu). Compose dev files mount `./backups` to `/app/backups` so the default folder is persisted on the host. For multi-process deployments, set **`QUICKLY_RESTORE_STAGING_DIR`** to a shared directory so restore confirmation tokens work across workers.
 
