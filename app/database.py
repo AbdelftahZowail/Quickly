@@ -216,6 +216,18 @@ async def _run_migrations(conn) -> None:
         # view and quoted follow-ups reproduce what was actually sent even when
         # the template uses {{random: ...}} (which cannot be re-derived later).
         "ALTER TABLE email_log ADD COLUMN IF NOT EXISTS body TEXT NULL",
+        # pre-send hook outcome per lead
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS pre_send_decision VARCHAR(16) NULL",
+        "ALTER TABLE lead ADD COLUMN IF NOT EXISTS pre_send_check JSON NULL",
+        # 2026-11-23: app-login OAuth notification tokens are encrypted at rest
+        # by EncryptedText (app_user.notif_access_token / notif_refresh_token).
+        # The SQL type stays TEXT, so only existence needs guaranteeing for
+        # databases created before these columns existed.  Legacy plaintext
+        # values keep working through app.security.decrypt's fallback and are
+        # rewritten as ciphertext on the next OAuth login / token refresh.
+        "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notif_access_token TEXT NULL",
+        "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notif_refresh_token TEXT NULL",
+        "ALTER TABLE app_user ADD COLUMN IF NOT EXISTS notif_token_expiry TIMESTAMP WITHOUT TIME ZONE NULL",
     ]
     # custom_email_override table (IF NOT EXISTS — must be a separate stmt
     # because it uses raw SQL, not ALTER TABLE)

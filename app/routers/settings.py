@@ -4,6 +4,7 @@
 # // must also be reflected in the Beacon service (/beacon or the separate Beacon repo).
 # // If you are an AI agent, add a TODO at the end of your response listing what needs to be updated in Beacon.
 
+import asyncio
 import logging
 import urllib.parse
 
@@ -35,11 +36,19 @@ from app.app_settings import (
     set_scheduling_strategy,
     get_test_mode,
     set_test_mode,
+    PRE_SEND_HOOK_FIELDS_KEY,
+    PRE_SEND_HOOK_ON_ERROR_KEY,
+    PRE_SEND_HOOK_SCOPE_KEY,
+    PRE_SEND_HOOK_SECRET_KEY,
+    PRE_SEND_HOOK_URL_KEY,
+    put_setting,
 )
+from app import pre_send_hook
 from sqlalchemy import select
 from app.models import EmailLog, EmailOpen, Webhook, WEBHOOK_EVENT_TYPES, KnownIP
 from app.schemas import WebhookCreate, WebhookUpdate, WebhookResponse
 from app.webhooks import fire_webhook_event
+from app.security import validate_webhook_url
 from app.ai_classifier import verify_ai_key, get_supported_providers, get_models_for_provider
 from app.tracking import register_pending_domain
 
@@ -81,8 +90,12 @@ async def create_webhook(
     invalid = [e for e in payload.events if e not in WEBHOOK_EVENT_TYPES]
     if invalid:
         raise HTTPException(400, f"Invalid event types: {invalid}")
+    url = payload.url.strip()
+    url_error = validate_webhook_url(url, strict_dns=False)
+    if url_error:
+        raise HTTPException(400, f"Invalid webhook URL: {url_error}")
     wh = Webhook(
-        url=payload.url.strip(),
+        url=url,
         secret=payload.secret,
         events=payload.events,
         active=payload.active,
@@ -112,6 +125,9 @@ async def update_webhook(
     for field, value in payload.model_dump(exclude_unset=True).items():
         if field == "url" and value is not None:
             value = value.strip()
+            url_error = validate_webhook_url(value, strict_dns=False)
+            if url_error:
+                raise HTTPException(400, f"Invalid webhook URL: {url_error}")
         setattr(wh, field, value)
     await db.commit()
     await db.refresh(wh)
@@ -389,6 +405,26 @@ class _TelemetryPayload(_BaseModel):
     telemetry_enabled: bool
 
 
+_opt_out_tasks: set[asyncio.Task] = set()
+
+
+def _queue_opt_out_ping() -> None:
+    """Send the one-time opt-out count without delaying the response."""
+    async def _run() -> None:
+        from app.database import AsyncSessionLocal
+        from app.telemetry import send_opt_out
+
+        try:
+            async with AsyncSessionLocal() as session:
+                await send_opt_out(session)
+        except Exception:
+            log.debug("telemetry opt-out ping failed", exc_info=True)
+
+    task = asyncio.create_task(_run())
+    _opt_out_tasks.add(task)
+    task.add_done_callback(_opt_out_tasks.discard)
+
+
 @router.post("/telemetry")
 async def set_telemetry_endpoint(
     payload: _TelemetryPayload,
@@ -397,14 +433,89 @@ async def set_telemetry_endpoint(
 ):
     """Enable or disable anonymous usage telemetry from the settings UI."""
     try:
-        from app.app_settings import set_telemetry_enabled
+        from app.app_settings import get_telemetry_enabled, set_telemetry_enabled
 
+        was_enabled = await get_telemetry_enabled(db)
         await set_telemetry_enabled(db, payload.telemetry_enabled)
         await db.commit()
+        if was_enabled and not payload.telemetry_enabled:
+            _queue_opt_out_ping()
         return {"ok": True, "telemetry_enabled": payload.telemetry_enabled}
     except Exception as e:
         log.error("set_telemetry failed: %s", e)
         raise HTTPException(500, f"Failed to update telemetry: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Pre-send decision hook
+# ---------------------------------------------------------------------------
+
+class _PreSendHookPayload(BaseModel):
+    url: str = ""
+    secret: Optional[str] = None
+    clear_secret: bool = False
+    on_error: str = pre_send_hook.ON_ERROR_ALLOW
+    scope: str = pre_send_hook.SCOPE_FIRST
+    fields: str = pre_send_hook.FIELDS_MINIMAL
+
+
+def _pre_send_hook_view(config: pre_send_hook.HookConfig) -> dict:
+    return {
+        "url": config.url,
+        "secret_set": bool(config.secret),
+        "on_error": config.on_error,
+        "scope": config.scope,
+        "fields": config.fields,
+    }
+
+
+@router.get("/pre-send-hook")
+async def get_pre_send_hook(
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(_require_admin),
+):
+    """Current pre-send hook configuration (the secret is never returned)."""
+    return _pre_send_hook_view(await pre_send_hook.load_config(db))
+
+
+@router.post("/pre-send-hook")
+async def set_pre_send_hook(
+    payload: _PreSendHookPayload,
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(_require_admin),
+):
+    """Save the pre-send hook configuration. An empty URL turns the hook off."""
+    url = payload.url.strip()
+    on_error = payload.on_error.strip().lower()
+    scope = payload.scope.strip().lower()
+    fields = payload.fields.strip().lower()
+
+    if on_error not in (pre_send_hook.ON_ERROR_ALLOW, pre_send_hook.ON_ERROR_HOLD):
+        raise HTTPException(400, "on_error must be 'allow' or 'hold'")
+    if scope not in (pre_send_hook.SCOPE_FIRST, pre_send_hook.SCOPE_ALL):
+        raise HTTPException(400, "scope must be 'first' or 'all'")
+    if fields not in (pre_send_hook.FIELDS_MINIMAL, pre_send_hook.FIELDS_CONTACT):
+        raise HTTPException(400, "fields must be 'minimal' or 'contact'")
+
+    if url:
+        if not pre_send_hook.url_allowed(url):
+            raise HTTPException(400, "Hook URL must be https (or http://localhost for development)")
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if host not in ("localhost", "127.0.0.1", "::1"):
+            url_error = validate_webhook_url(url, strict_dns=False)
+            if url_error:
+                raise HTTPException(400, f"Hook URL rejected: {url_error}")
+
+    await put_setting(db, PRE_SEND_HOOK_URL_KEY, url)
+    if payload.clear_secret:
+        await put_setting(db, PRE_SEND_HOOK_SECRET_KEY, "")
+    elif (payload.secret or "").strip():
+        await put_setting(db, PRE_SEND_HOOK_SECRET_KEY, payload.secret.strip())
+    await put_setting(db, PRE_SEND_HOOK_ON_ERROR_KEY, on_error)
+    await put_setting(db, PRE_SEND_HOOK_SCOPE_KEY, scope)
+    await put_setting(db, PRE_SEND_HOOK_FIELDS_KEY, fields)
+    await db.commit()
+    return _pre_send_hook_view(await pre_send_hook.load_config(db))
 
 
 # Survey tools / utility endpoints ----------------------------------------
@@ -615,6 +726,12 @@ async def verify_tracking_domain(domain: str):
     domain = domain.rstrip("/")
 
     target = f"https://{domain}/api/tracking-probe"
+    # *domain* is user-supplied: refuse private/reserved targets so this probe
+    # cannot be used as an SSRF oracle against internal services.
+    blocked = validate_webhook_url(target, allow_http_localhost=False, strict_dns=True)
+    if blocked:
+        return {"ok": False, "error": f"Domain not allowed: {blocked}"}
+
     last_error: str = ""
     # Try twice: first with strict TLS verification, then without.
     # The second pass catches cases where Caddy is still provisioning the cert
@@ -623,7 +740,7 @@ async def verify_tracking_domain(domain: str):
         try:
             async with httpx.AsyncClient(
                 timeout=30,
-                follow_redirects=True,
+                follow_redirects=False,
                 verify=verify_ssl,
             ) as client:
                 resp = await client.get(target)

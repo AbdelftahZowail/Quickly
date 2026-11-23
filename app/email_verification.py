@@ -8,8 +8,11 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
+
+from app.security import resolve_and_check
 
 log = logging.getLogger("quickly.email_verification")
 
@@ -90,6 +93,24 @@ class MailtesterNinjaProvider(BaseVerificationProvider):
 
 # ── Custom HTTP provider ──────────────────────────────────────────────────────
 
+def _outbound_url_error(url: str) -> str | None:
+    """Return an error string when *url* is unsafe as an outbound request target.
+
+    The custom-provider URL template is user-configured, so it is re-resolved
+    right before the request; private/reserved destinations are refused.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return "URL scheme must be http or https"
+    hostname = (parsed.hostname or "").strip()
+    if not hostname:
+        return "URL must include a hostname"
+    safe, reason = resolve_and_check(hostname, strict_dns=True)
+    if not safe:
+        return reason
+    return None
+
+
 def _get_nested(data: Any, path: str) -> Any:
     """Traverse *data* following a dot-separated *path*.  Returns None if any
     segment is missing or the value is not a dict."""
@@ -133,7 +154,16 @@ class CustomHttpProvider(BaseVerificationProvider):
                 email, UNKNOWN, message="Invalid URL template — must contain {email}"
             )
         url = self.url_template.replace("{email}", email)
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        blocked = _outbound_url_error(url)
+        if blocked:
+            log.warning(
+                "CustomHttpProvider blocked unsafe URL host %r for %s: %s",
+                urlparse(url).hostname,
+                email,
+                blocked,
+            )
+            return VerificationResult(email, UNKNOWN, message=f"URL not allowed: {blocked}")
+        async with httpx.AsyncClient(follow_redirects=False) as client:
             try:
                 if self.method == "POST":
                     resp = await client.post(url, timeout=15)

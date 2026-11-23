@@ -31,6 +31,22 @@ log = logging.getLogger("quickly.schedule")
 
 router = APIRouter(prefix="/api/schedule", tags=["schedule"])
 
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _schedule_debug_dump_enabled() -> bool:
+    """Return True when the PII schedule dump (``logs/partial.txt``) is enabled.
+
+    The dump lists lead email addresses.  It is therefore off by default and
+    must be enabled explicitly with ``QUICKLY_DEBUG_SCHEDULE=1``.  A
+    ``QUICKLY_TEST_LOGS_DIR`` override also enables it: the autouse conftest
+    fixture sets that variable for every test (it is never set in production),
+    and the queue-logic tests assert on the dump contents.
+    """
+    if os.environ.get("QUICKLY_DEBUG_SCHEDULE", "").strip().lower() in _TRUTHY_ENV_VALUES:
+        return True
+    return bool(os.environ.get("QUICKLY_TEST_LOGS_DIR"))
+
 
 async def run_recalculate_all_in_new_session() -> None:
     """Run a full global recalculate in a fresh session (for background tasks).
@@ -697,8 +713,9 @@ async def order_campaign_leads_prioritizing_partials(
 
     Ordering produced: c1_partial, c2_partial, ..., c1_new, c2_new, ...
 
-    Side effect: writes a file under `logs/` listing `campaign_lead_id\tcampaign_id\tcampaign_name`
-    in the produced order.
+    Side effect (opt-in, ``QUICKLY_DEBUG_SCHEDULE=1``): writes a PII debug dump
+    under `logs/partial.txt` listing lead emails and campaign ids in the
+    produced order.  Disabled by default.
     Returns the ordered list of `CampaignLead.id`.
     """
     if not campaign_leads:
@@ -767,6 +784,16 @@ async def order_campaign_leads_prioritizing_partials(
         ordered.extend(campaign_to_new.get(cid, []))
 
     # Write email logs + before/after ordering to `logs/partial.txt`.
+    # This dump contains lead email addresses (PII), so it is opt-in:
+    # ``QUICKLY_DEBUG_SCHEDULE=1`` enables it.  Off by default — nothing is
+    # written unless explicitly requested.
+    #
+    # The test suite relies on the dump; ``tests/conftest.py`` points
+    # ``QUICKLY_TEST_LOGS_DIR`` at a temp dir for every test, which also
+    # enables it (that variable is never set in production).
+    if not _schedule_debug_dump_enabled():
+        return [cl.id for cl in ordered]
+
     # New file format (overwrite on each run):
     #   # EMAIL_LOGS
     #   # lead_id\tlead_email\tcampaign_id\tsequence_index\tsent_at

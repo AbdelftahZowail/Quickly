@@ -9,6 +9,7 @@ model so notification emails can be sent from the user's own account.
 """
 from __future__ import annotations
 
+import base64
 import hmac
 import json
 import logging
@@ -26,9 +27,11 @@ from app.auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     create_access_token,
     create_refresh_token,
+    is_setup_complete,
 )
 from app.database import get_db
 from app.models import OAuthState, User
+from app.setup_code import clear_setup_code, verify_setup_code
 from app.settings_manager import settings
 from app.time import utcnow
 
@@ -50,6 +53,16 @@ APP_GOOGLE_SCOPES = (
 MICROSOFT_AUTHORITY_BASE = "https://login.microsoftonline.com"
 MICROSOFT_GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 APP_MICROSOFT_SCOPES = "openid email profile User.Read Mail.Send offline_access"
+
+# The "consumers" (personal Microsoft accounts) tenant.  Personal accounts are
+# refused for app login: they are not tied to a work/school directory and the
+# nOAuth class of attacks relies on mutable, tenant-controlled email claims.
+MICROSOFT_CONSUMER_TENANT_ID = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
+# Authority values that mean "any tenant" rather than one specific directory.
+# Anything else is treated as a concrete tenant GUID that must match the
+# id_token's ``tid`` claim.
+_MICROSOFT_MULTI_TENANT_AUTHORITIES = {"", "common", "organizations", "consumers"}
 
 STATE_TTL_MINUTES = 10
 
@@ -169,6 +182,65 @@ def _microsoft_userinfo(access_token: str) -> dict | None:
         return None
 
 
+def _decode_jwt_payload(token: str) -> dict | None:
+    """Decode the claims payload of a JWT without verifying its signature.
+
+    The ``id_token`` is received directly from Microsoft's token endpoint over
+    TLS during a confidential-client exchange (we send the client secret in the
+    same request).  The transport therefore already authenticates the issuer and
+    the signature check would only re-prove what TLS established; decoding the
+    claims ourselves avoids adding a JWT dependency.  Never use this helper for
+    tokens that arrive from an untrusted client.
+    """
+    try:
+        parts = token.split(".")
+        if len(parts) < 2 or not parts[1]:
+            return None
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(payload + padding).decode())
+        return claims if isinstance(claims, dict) else None
+    except Exception as e:
+        log.warning("Could not decode id_token claims: %s", e)
+        return None
+
+
+def _microsoft_identity_from_id_token(
+    id_token: str, configured_tenant: str
+) -> str:
+    """Return the immutable app-login subject for a Microsoft id_token.
+
+    Identity is ``<tid>:<oid>`` because Microsoft's per-tenant ``oid`` alone is
+    not globally unique (two tenants can host the same object id) and Graph's
+    ``id`` is tenant-scoped too.  ``tid`` + ``oid`` together are stable for a
+    given directory user.  Raises HTTPException when the token is unsuitable.
+    """
+    claims = _decode_jwt_payload(id_token)
+    if claims is None:
+        raise HTTPException(502, "Microsoft returned an unreadable id_token")
+
+    tid = str(claims.get("tid") or "").strip().lower()
+    oid = str(claims.get("oid") or "").strip().lower()
+    if not tid or not oid:
+        raise HTTPException(
+            502,
+            "Microsoft id_token is missing the tenant (tid) or object (oid) claim",
+        )
+
+    if tid == MICROSOFT_CONSUMER_TENANT_ID:
+        raise HTTPException(403, "Sign in with a work or school Microsoft account")
+
+    configured = (configured_tenant or "").strip().lower()
+    if configured not in _MICROSOFT_MULTI_TENANT_AUTHORITIES and configured != tid:
+        raise HTTPException(
+            403,
+            "This Microsoft account belongs to a different tenant than the one "
+            "configured for this deployment",
+        )
+
+    return f"{tid}:{oid}"
+
+
 # ---------------------------------------------------------------------------
 # Shared user resolution + session creation
 # ---------------------------------------------------------------------------
@@ -183,8 +255,24 @@ async def _resolve_user_and_login(
     access_token: str,
     refresh_token: str,
     token_expiry: datetime,
+    *,
+    allow_email_link: bool,
+    legacy_subs: tuple[str, ...] = (),
 ) -> str:
-    """Find or create the User, set JWT cookies, redirect to /."""
+    """Find or create the User, set JWT cookies, redirect to /.
+
+    ``allow_email_link`` must be passed explicitly by each caller.  Linking a
+    provider identity to an existing local account by email is only safe when
+    the provider has proven the address is verified and controlled by the
+    signer.  For Microsoft that is not the case (a tenant admin can set
+    ``mail``/``userPrincipalName`` arbitrarily — the nOAuth account-takeover
+    class), so Microsoft always passes ``False``.
+
+    ``legacy_subs`` lets a caller upgrade identities stored under an older
+    subject format.  A match requires the same provider *and* the same email,
+    and the stored subject is rewritten to the new one, so this is a one-time
+    migration rather than a new trust path.
+    """
     email = email.lower()
 
     # 1. Match by (oauth_provider, oauth_sub)
@@ -193,8 +281,28 @@ async def _resolve_user_and_login(
     )
     user = result.scalar_one_or_none()
 
-    if user is None:
-        # 2. Fallback: match by email
+    if user is None and legacy_subs:
+        # 1b. Upgrade pre-existing identities saved under the old subject
+        # format (Microsoft used the tenant-scoped Graph id before).  Email is
+        # only a corroborating signal here — the stored subject must match too.
+        candidates = tuple(s for s in legacy_subs if s)
+        if candidates:
+            result_legacy = await db.execute(
+                select(User).where(
+                    User.oauth_provider == provider,
+                    User.oauth_sub.in_(candidates),
+                    func.lower(User.email) == email,
+                )
+            )
+            user = result_legacy.scalar_one_or_none()
+            if user is not None:
+                user.oauth_sub = sub
+                log.info(
+                    "Upgraded legacy %s OAuth subject for user %s", provider, user.id
+                )
+
+    if user is None and allow_email_link:
+        # 2. Fallback: match by email and link the identity to that account.
         result2 = await db.execute(select(User).where(User.email == email))
         user = result2.scalar_one_or_none()
         if user:
@@ -207,6 +315,12 @@ async def _resolve_user_and_login(
         count_result = await db.execute(select(func.count(User.id)))
         user_count = count_result.scalar_one()
         if user_count > 0:
+            if provider == "microsoft":
+                raise HTTPException(
+                    403,
+                    "No account is linked to this Microsoft identity. Sign in "
+                    "with your existing method to continue.",
+                )
             raise HTTPException(
                 403,
                 "No account found for this email. Contact your admin to create your account.",
@@ -228,6 +342,8 @@ async def _resolve_user_and_login(
         )
         db.add(user)
         await db.flush()
+        # Setup is complete now: the printed setup code must stop working.
+        clear_setup_code()
         log.info("First user (admin) created via %s OAuth: %s", provider, email)
 
     if not user.is_active:
@@ -262,12 +378,19 @@ async def _resolve_user_and_login(
 # ---------------------------------------------------------------------------
 
 @router.get("/oauth/app/google/authorize")
-async def app_google_authorize(db: AsyncSession = Depends(get_db)):
+async def app_google_authorize(setup_code: str = "", db: AsyncSession = Depends(get_db)):
     """Redirect user to Google consent screen for app login."""
     from app.app_settings import get_google_oauth_credentials
     client_id, _ = await get_google_oauth_credentials(db)
     if not client_id:
         raise HTTPException(400, "Google OAuth not configured")
+
+    # Before setup, the printed code proves ownership of the deployment.
+    # After setup, the parameter is ignored (normal login).
+    if not await is_setup_complete(db) and not verify_setup_code(setup_code):
+        raise HTTPException(
+            403, "Invalid or missing setup code. Find it in the server logs."
+        )
 
     state_token = await _create_state(db, "app_login")
 
@@ -319,6 +442,14 @@ async def app_google_callback(
     if not userinfo or not userinfo.get("email"):
         raise HTTPException(502, "Failed to get user info from Google")
 
+    # Only a Google-verified address may be used to attach this identity to an
+    # existing local account (prevents email-based account takeover).
+    if userinfo.get("email_verified") is not True:
+        raise HTTPException(
+            403,
+            "Your Google email address is not verified. Verify it with Google and try again.",
+        )
+
     target = settings.base_url.rstrip("/") + "/"
     redirect = RedirectResponse(target, status_code=303)
 
@@ -331,6 +462,7 @@ async def app_google_callback(
         access_token=access_token,
         refresh_token=refresh_token,
         token_expiry=utcnow() + timedelta(seconds=expires_in),
+        allow_email_link=True,
     )
 
     return redirect
@@ -341,12 +473,19 @@ async def app_google_callback(
 # ---------------------------------------------------------------------------
 
 @router.get("/oauth/app/microsoft/authorize")
-async def app_microsoft_authorize(db: AsyncSession = Depends(get_db)):
+async def app_microsoft_authorize(setup_code: str = "", db: AsyncSession = Depends(get_db)):
     """Redirect user to Microsoft consent screen for app login."""
     from app.app_settings import get_office365_oauth_credentials
     client_id, _, tenant_id = await get_office365_oauth_credentials(db)
     if not client_id:
         raise HTTPException(400, "Microsoft OAuth not configured")
+
+    # Before setup, the printed code proves ownership of the deployment.
+    # After setup, the parameter is ignored (normal login).
+    if not await is_setup_complete(db) and not verify_setup_code(setup_code):
+        raise HTTPException(
+            403, "Invalid or missing setup code. Find it in the server logs."
+        )
 
     state_token = await _create_state(db, "app_login")
 
@@ -403,10 +542,12 @@ async def app_microsoft_callback(
     if not email:
         raise HTTPException(502, "Microsoft account has no email address")
 
-    # Microsoft's 'id' field is the unique subject identifier
-    sub = userinfo.get("id", "")
-    if not sub:
-        raise HTTPException(502, "Microsoft account has no unique ID")
+    # Identity comes from the id_token's immutable (tid, oid) pair, never from
+    # Graph's tenant-scoped ``id`` or the mutable email claims.  This closes the
+    # nOAuth class where a tenant admin rewrites mail/UPN to a victim's address.
+    sub = _microsoft_identity_from_id_token(
+        str(token_data.get("id_token") or ""), tenant_id
+    )
 
     target = settings.base_url.rstrip("/") + "/"
     redirect = RedirectResponse(target, status_code=303)
@@ -414,12 +555,17 @@ async def app_microsoft_callback(
     await _resolve_user_and_login(
         db, redirect,
         provider="microsoft",
-        sub=userinfo["id"],
+        sub=sub,
         email=email,
         name=userinfo.get("displayName", ""),
         access_token=access_token,
         refresh_token=refresh_token,
         token_expiry=utcnow() + timedelta(seconds=expires_in),
+        allow_email_link=False,
+        # Releases before this one stored Graph's tenant-scoped ``id``.  Allow
+        # the same account (same provider + same email) to upgrade in place so
+        # existing Microsoft sign-ins keep working after this release.
+        legacy_subs=(str(userinfo.get("id") or ""),),
     )
 
     return redirect

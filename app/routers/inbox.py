@@ -17,6 +17,7 @@ from sqlalchemy import select, exists, update as sa_update
 
 from app.database import get_db
 from app.models import Inbox, CampaignInbox, QueueSlot, EmailLog, CampaignLead
+from app.security import resolve_and_check
 from app.schemas import (
     BeaconConnectFromInboxRequest,
     BeaconConnectRequest,
@@ -34,6 +35,25 @@ from app.time import utcnow
 log = logging.getLogger("quickly.routes")
 
 router = APIRouter(prefix="/api/inboxes", tags=["inboxes"])
+
+
+def _validate_outbound_http_url(url: str) -> str | None:
+    """Return an error string when *url* is unsafe as an outbound request target.
+
+    Blocks private/reserved destinations using a fresh DNS resolution (SSRF
+    guard) while preserving the existing support for plain-HTTP Beacon
+    instances on public hosts.  Call this immediately before the request.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return "URL scheme must be http or https"
+    hostname = (parsed.hostname or "").strip()
+    if not hostname:
+        return "URL must include a hostname"
+    safe, reason = resolve_and_check(hostname, strict_dns=True)
+    if not safe:
+        return reason
+    return None
 
 
 def _parse_beacon_setup_url(raw: str) -> tuple[str, str]:
@@ -64,14 +84,26 @@ async def _apply_beacon_connection(
     if not setup_token:
         raise HTTPException(422, "Missing Beacon setup token")
 
+    connect_url = f"{base}/api/v1/connect"
+    # *base* is user-supplied: re-resolve it right before the request and
+    # refuse private/reserved targets (SSRF guard).
+    blocked = _validate_outbound_http_url(connect_url)
+    if blocked:
+        log.warning(
+            "beacon_connect: refusing unsafe Beacon URL for inbox_id=%s base=%r: %s",
+            inbox.id,
+            base,
+            blocked,
+        )
+        raise HTTPException(422, f"Beacon URL not allowed: {blocked}")
+
     webhook_secret = secrets.token_urlsafe(32)
     quickly_base = (app_settings.base_url or "").strip().rstrip("/")
     if not quickly_base.startswith("http"):
         raise HTTPException(500, "BASE_URL is not configured")
 
-    connect_url = f"{base}/api/v1/connect"
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
             resp = await client.post(
                 connect_url,
                 json={
@@ -447,21 +479,31 @@ async def beacon_disconnect(inbox_id: int, db: AsyncSession = Depends(get_db)):
     base = (inbox.beacon_base_url or "").strip().rstrip("/")
     setup = inbox.beacon_setup_token
     if inbox.beacon_connected and base and setup:
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    f"{base}/api/v1/disconnect",
-                    json={"inbox_id": inbox_id},
-                    headers={"Authorization": f"Bearer {setup}"},
-                )
-                if resp.status_code >= 400:
-                    log.warning(
-                        "beacon_disconnect: Beacon returned HTTP %s for inbox_id=%s",
-                        resp.status_code,
-                        inbox_id,
+        disconnect_url = f"{base}/api/v1/disconnect"
+        blocked = _validate_outbound_http_url(disconnect_url)
+        if blocked:
+            log.warning(
+                "beacon_disconnect: refusing unsafe Beacon URL for inbox_id=%s (%s); "
+                "clearing local configuration only",
+                inbox_id,
+                blocked,
+            )
+        else:
+            try:
+                async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+                    resp = await client.post(
+                        disconnect_url,
+                        json={"inbox_id": inbox_id},
+                        headers={"Authorization": f"Bearer {setup}"},
                     )
-        except httpx.RequestError as e:
-            log.warning("beacon_disconnect: Beacon unreachable for inbox_id=%s: %s", inbox_id, e)
+                    if resp.status_code >= 400:
+                        log.warning(
+                            "beacon_disconnect: Beacon returned HTTP %s for inbox_id=%s",
+                            resp.status_code,
+                            inbox_id,
+                        )
+            except httpx.RequestError as e:
+                log.warning("beacon_disconnect: Beacon unreachable for inbox_id=%s: %s", inbox_id, e)
     inbox.beacon_base_url = None
     inbox.beacon_setup_token = None
     inbox.beacon_webhook_secret = None

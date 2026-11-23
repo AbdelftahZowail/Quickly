@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Webhook
 from app import time as time_provider
+from app.security import validate_webhook_url
 
 log = logging.getLogger("quickly.webhooks")
 
@@ -67,8 +68,19 @@ async def _post_webhook(wh: Webhook, event_type: str, data: dict[str, Any]) -> b
     timestamp = time_provider.utcnow().isoformat() + "Z"
     payload = {"event": event_type, "data": data, "timestamp": timestamp}
     headers = _build_headers(wh.secret)
+
+    # Re-validate and re-resolve right before the request: the URL was checked
+    # at save time, but DNS can be rebound to a private address afterwards.
+    guard_error = validate_webhook_url(wh.url, strict_dns=True)
+    if guard_error:
+        log.warning(
+            "webhook id=%s blocked before dispatch for event=%s: %s",
+            wh.id, event_type, guard_error,
+        )
+        return False
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
             resp = await client.post(wh.url, json=payload, headers=headers)
             if resp.status_code >= 400:
                 log.warning(

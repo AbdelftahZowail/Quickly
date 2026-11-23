@@ -49,6 +49,7 @@ from app.backup_restore_staging import (
 from app.backup_schedule import deliver_backup_payload, sync_scheduled_backup_job
 from app.database import db_url, get_db
 from app.scheduler import get_scheduler
+from app.security import validate_webhook_url
 
 log = logging.getLogger("quickly.backup.routes")
 
@@ -148,6 +149,10 @@ async def put_backup_settings(
             )
     if body.send_webhook and not (body.webhook_url or "").strip():
         raise HTTPException(status_code=400, detail="webhook_url is required when send_webhook is enabled")
+    if body.send_webhook:
+        url_error = validate_webhook_url(body.webhook_url.strip(), strict_dns=False)
+        if url_error:
+            raise HTTPException(status_code=400, detail=f"Invalid webhook_url: {url_error}")
 
     if body.save_local and not local_disk_backups_enabled():
         raise HTTPException(
@@ -258,6 +263,11 @@ async def run_backup_now(
         raise HTTPException(status_code=500, detail=str(e))
 
     cfg = await get_backup_config(db)
+    if cfg.get("send_webhook") and cfg.get("webhook_url"):
+        # Re-check immediately before delivery (DNS may have been rebound since save).
+        url_error = validate_webhook_url(cfg["webhook_url"], strict_dns=True)
+        if url_error:
+            raise HTTPException(status_code=400, detail=f"Backup webhook URL rejected: {url_error}")
     try:
         enc = bool(cfg.get("encrypt_backups") and (cfg.get("backup_encryption_password") or "").strip())
         manifest = await collect_backup_manifest(db, encrypted=enc)

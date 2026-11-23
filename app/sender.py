@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
 import random
 import re
 import traceback
@@ -69,10 +70,54 @@ class SendFailure:
         return False
 
 
-# ---- Gmail API file logger ----
+# ---- Mail debug file loggers ----
+# The ``logs/*_api.log`` dumps contain raw MIME (bodies), recipients and
+# subjects — i.e. personal data.  They are therefore opt-in: set
+# ``QUICKLY_DEBUG_MAIL_LOGS=1`` in the environment to enable them.  Off by
+# default, in which case nothing is written for any provider.
 _LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
-_LOG_DIR.mkdir(exist_ok=True)
 _GMAIL_LOG_PATH = _LOG_DIR / "gmail_api.log"
+
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_flag(name: str) -> bool:
+    """Return True when the environment variable *name* is set truthy."""
+    return os.environ.get(name, "").strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _mail_debug_logs_enabled() -> bool:
+    """True when raw mail debug logging is explicitly enabled.
+
+    Read at call time (not import time) so tests and operators can toggle it
+    without restarting the process layout, and so the default stays off.
+    """
+    return _env_flag("QUICKLY_DEBUG_MAIL_LOGS")
+
+
+def _mask_email(address: str) -> str:
+    """Mask an email address for operational log lines.
+
+    ``alice@example.com`` → ``a***@example.com``.  Keeps the domain (useful
+    for debugging provider issues) while dropping the local part.
+    """
+    if not address:
+        return ""
+    local, sep, domain = address.partition("@")
+    if not sep:
+        return "***"
+    return f"{local[:1]}***@{domain}"
+
+
+def _append_mail_log(path: Path, entry: dict) -> None:
+    """Append *entry* as JSON to *path*, creating the logs dir on demand."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, indent=2) + "\n---\n")
+    except OSError:
+        # Never include the entry (it holds PII) in the warning.
+        log.warning("Could not write to mail debug log file at %s", path)
 
 
 def _log_gmail_call(
@@ -86,7 +131,13 @@ def _log_gmail_call(
     response: str = "",
     error: Optional[str] = None,
 ) -> None:
-    """Append full raw email data for every Gmail API call to logs/gmail_api.log."""
+    """Append full raw email data for every Gmail API call to logs/gmail_api.log.
+
+    No-op unless ``QUICKLY_DEBUG_MAIL_LOGS`` is enabled: the entry contains the
+    full MIME body, recipient and subject.
+    """
+    if not _mail_debug_logs_enabled():
+        return
     entry = {
         "timestamp": time_provider.utcnow().isoformat() + "Z",
         "to": to_email,
@@ -102,11 +153,7 @@ def _log_gmail_call(
         entry["response"] = response
     if error:
         entry["error"] = error
-    try:
-        with open(_GMAIL_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, indent=2) + "\n---\n")
-    except OSError:
-        log.warning("Could not write to gmail log file at %s", _GMAIL_LOG_PATH)
+    _append_mail_log(_GMAIL_LOG_PATH, entry)
 
 
 _RANDOM_PREFIX_RE = re.compile(r"^\s*random\s*:\s*(.*)$", re.IGNORECASE | re.DOTALL)
@@ -598,7 +645,7 @@ def _send_via_gmail(
         access_token = gmail_account.access_token or ""
 
     if not access_token:
-        log.error("Gmail send: no access token for %s", from_email)
+        log.error("Gmail send: no access token for %s", _mask_email(from_email))
         return None
 
     # build credentials object; supplying refresh/secret info allows the
@@ -717,7 +764,7 @@ def _send_via_gmail(
         )
         log.info(
             "Gmail API: sent to=%s gmail_id=%s threadId=%s real_message_id=%s",
-            to_email,
+            _mask_email(to_email),
             gmail_msg_id,
             gmail_thread_id,
             real_message_id,
@@ -851,8 +898,8 @@ def send_email(
     if settings.test_mode:
         fake_id = make_msgid()
         log.info(
-            "TEST MODE: simulated send to=%s subject=%r from=%s — no email actually sent",
-            to_email, subject, from_email,
+            "TEST MODE: simulated send to=%s from=%s — no email actually sent",
+            _mask_email(to_email), _mask_email(from_email),
         )
         _log_gmail_call(
             to_email, from_email, subject,
@@ -869,7 +916,7 @@ def send_email(
 
     if provider == "smtp":
         if not smtp_account:
-            log.error("send_email: no SMTP credentials for %s", from_email)
+            log.error("send_email: no SMTP credentials for %s", _mask_email(from_email))
             return SendFailure(error_type="auth_failed", message="No SMTP credentials provided")
         return _send_via_smtp(
             to_email=to_email,
@@ -887,7 +934,7 @@ def send_email(
 
     if provider == "office365":
         if not office365_account:
-            log.error("send_email: no Office 365 credentials for %s", from_email)
+            log.error("send_email: no Office 365 credentials for %s", _mask_email(from_email))
             return SendFailure(error_type="auth_failed", message="No Office 365 credentials provided")
         return _send_via_office365(
             to_email=to_email,
@@ -910,7 +957,7 @@ def send_email(
 
     # Default: Gmail
     if not (gmail_access_token or gmail_account):
-        log.error("send_email: no gmail credentials for %s", from_email)
+        log.error("send_email: no gmail credentials for %s", _mask_email(from_email))
         return SendFailure(error_type="auth_failed", message="No Gmail credentials provided")
 
     return _send_via_gmail(
@@ -947,7 +994,13 @@ def _log_office365_call(
     response: str = "",
     error: Optional[str] = None,
 ) -> None:
-    """Append log entry for every Office 365 Graph API call."""
+    """Append log entry for every Office 365 Graph API call.
+
+    No-op unless ``QUICKLY_DEBUG_MAIL_LOGS`` is enabled (entry holds recipient
+    address and subject).
+    """
+    if not _mail_debug_logs_enabled():
+        return
     entry = {
         "timestamp": time_provider.utcnow().isoformat() + "Z",
         "to": to_email,
@@ -960,11 +1013,7 @@ def _log_office365_call(
         entry["response"] = response
     if error:
         entry["error"] = error
-    try:
-        with open(_O365_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, indent=2) + "\n---\n")
-    except OSError:
-        log.warning("Could not write to office365 log file at %s", _O365_LOG_PATH)
+    _append_mail_log(_O365_LOG_PATH, entry)
 
 
 def _send_via_office365(
@@ -994,12 +1043,12 @@ def _send_via_office365(
     restriction on header names.
     """
     if not office365_account:
-        log.error("Office 365 send: no account provided for %s", from_email)
+        log.error("Office 365 send: no account provided for %s", _mask_email(from_email))
         return SendFailure(error_type="auth_failed", message="No Office 365 account")
 
     access_token = office365_account.access_token
     if not access_token:
-        log.error("Office 365 send: no access token for %s", from_email)
+        log.error("Office 365 send: no access token for %s", _mask_email(from_email))
         return None
 
     # ── choose send strategy ────────────────────────────────────────────────
@@ -1124,7 +1173,7 @@ def _send_via_office365(
         )
         log.info(
             "Office 365 Graph API: sent to=%s message_id=%s conversationId=%s",
-            to_email, sent_message_id, sent_conversation_id,
+            _mask_email(to_email), sent_message_id, sent_conversation_id,
         )
         return SendResult(
             message_id=sent_message_id,
@@ -1215,7 +1264,13 @@ def _log_smtp_call(
     response: str = "",
     error: Optional[str] = None,
 ) -> None:
-    """Append a log entry for every SMTP send (mirrors the Gmail/O365 logs)."""
+    """Append a log entry for every SMTP send (mirrors the Gmail/O365 logs).
+
+    No-op unless ``QUICKLY_DEBUG_MAIL_LOGS`` is enabled (entry holds recipient
+    address and subject).
+    """
+    if not _mail_debug_logs_enabled():
+        return
     entry = {
         "timestamp": time_provider.utcnow().isoformat() + "Z",
         "to": to_email,
@@ -1228,11 +1283,7 @@ def _log_smtp_call(
         entry["response"] = response
     if error:
         entry["error"] = error
-    try:
-        with open(_SMTP_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, indent=2) + "\n---\n")
-    except OSError:
-        log.warning("Could not write to smtp log file at %s", _SMTP_LOG_PATH)
+    _append_mail_log(_SMTP_LOG_PATH, entry)
 
 
 def _send_via_smtp(
@@ -1256,7 +1307,7 @@ def _send_via_smtp(
     provider-specific thread API.
     """
     if not smtp_account:
-        log.error("SMTP send: no account provided for %s", from_email)
+        log.error("SMTP send: no account provided for %s", _mask_email(from_email))
         return SendFailure(error_type="auth_failed", message="No SMTP account")
     if not (smtp_account.smtp_host or "").strip():
         return SendFailure(error_type="auth_failed", message="SMTP host is not configured")
@@ -1312,7 +1363,7 @@ def _send_via_smtp(
             status="250 OK",
             response=json.dumps({"message_id": message_id, "thread_key": thread_key}),
         )
-        log.info("SMTP: sent to=%s message_id=%s thread_key=%s", to_email, message_id, thread_key)
+        log.info("SMTP: sent to=%s message_id=%s thread_key=%s", _mask_email(to_email), message_id, thread_key)
         # Clear any persisted failure so the inbox shows "ok" again.
         try:
             from app.smtp_utils import record_smtp_send_success

@@ -310,15 +310,20 @@ async def classify_reply(
         )
         return None
     except Exception as exc:
+        # Provider errors can echo the API key in their message — scrub it
+        # before it reaches logs, the settings table or a webhook payload.
+        exc_text = str(exc)
+        if api_key:
+            exc_text = exc_text.replace(api_key, "***")
         log.warning(
             "AI reply classification failed (provider=%s model=%s): %s: %s",
-            provider, model, type(exc).__name__, exc,
+            provider, model, type(exc).__name__, exc_text,
         )
         # Record failure for health monitoring and fire alert event
         try:
             from app.settings_manager import save_setting_to_db
             from app import time as _time
-            err_msg = f"{type(exc).__name__}: {exc}"[:500]
+            err_msg = f"{type(exc).__name__}: {exc_text}"[:500]
             await save_setting_to_db(db, "ai_reply_classifier_last_error", err_msg)
             await save_setting_to_db(db, "ai_reply_classifier_last_error_at", _time.utcnow().isoformat() + "Z")
             await db.commit()
@@ -353,9 +358,19 @@ async def verify_ai_key(
             messages=[{"role": "user", "content": "Say 'Hello'"}],
         )
         text = response.choices[0].message.content.strip()
-        print(f"Verification response: {text}, provider={provider}, model={model}, api_key={api_key}")
+        # Never log or print the API key.  Provider/model are enough to trace
+        # a failed verification; the response text is not logged either.
+        log.debug(
+            "verify_ai_key: provider=%s model=%s ok=%s",
+            provider, model, bool(text),
+        )
         if text:
             return {"ok": True}
         return {"ok": False, "error": "Empty response from model"}
     except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        # Some providers echo the submitted key in their error text — strip it
+        # before it can reach logs or the settings API response.
+        message = str(exc)
+        if api_key:
+            message = message.replace(api_key, "***")
+        return {"ok": False, "error": f"{type(exc).__name__}: {message}"}

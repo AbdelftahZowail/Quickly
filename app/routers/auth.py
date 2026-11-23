@@ -18,7 +18,7 @@ from fastapi import (
     status,
 )
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import (
@@ -50,13 +50,35 @@ from app.backup_restore_staging import (
 )
 from app.client_ip import client_ip_from_request
 from app.database import AsyncSessionLocal, get_db
+from app.login_rate_limit import (
+    LOGIN_RATE_LIMIT_DETAIL,
+    REGISTER_RATE_LIMIT_DETAIL,
+    check_login,
+    check_register,
+    clear_login,
+    clear_register,
+    record_login_failure,
+    record_register_failure,
+)
 from app.restore_preview_rate import allow_restore_preview
 from app.models import APIKey, User
+from app.settings_manager import settings
+from app.setup_code import clear_setup_code, log_setup_code, verify_setup_code
 from app.time import utcnow
 
 log = logging.getLogger("quickly.auth.routes")
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+# Shown to anyone who tries to claim the first admin (or restore) without the
+# code that was printed in the server logs.  Deliberately does not reveal it.
+SETUP_CODE_REQUIRED_DETAIL = "Invalid or missing setup code. Find it in the server logs."
+
+
+def _require_setup_code(code: str | None) -> None:
+    """Raise 403 unless *code* matches the active one-time setup code."""
+    if not verify_setup_code(code):
+        raise HTTPException(status_code=403, detail=SETUP_CODE_REQUIRED_DETAIL)
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +89,8 @@ class RegisterRequest(BaseModel):
     username: str = Field(min_length=3, max_length=150)
     email: str = Field(min_length=5, max_length=255)
     password: str = Field(min_length=8, max_length=128)
+    # Required only for the first user; ignored for admin-created accounts.
+    setup_code: str = ""
 
     @field_validator("username")
     @classmethod
@@ -162,9 +186,64 @@ class UserResponse(BaseModel):
 
 @router.get("/setup-status")
 async def setup_status(db: AsyncSession = Depends(get_db)):
-    """Check if initial setup (first user registration) is complete."""
+    """Public setup state plus which login providers are configured."""
     done = await is_setup_complete(db)
-    return {"setup_complete": done}
+    if not done:
+        # Surface the code when the login page loads, even if startup logging
+        # never ran (e.g. reloads, workers, or tests).
+        log_setup_code()
+    return {
+        "setup_complete": done,
+        "setup_code_required": not done,
+        "auth_providers": {
+            "google": bool(settings.google_client_id and settings.google_client_secret),
+            "microsoft": bool(
+                settings.office365_client_id and settings.office365_client_secret
+            ),
+        },
+    }
+
+
+class SetupCodeVerifyRequest(BaseModel):
+    code: str = Field(default="", max_length=64)
+
+
+@router.post("/setup-code/verify")
+async def verify_setup_code_endpoint(
+    body: SetupCodeVerifyRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Check the printed setup code before revealing the first-run forms.
+
+    The login page shows nothing but the code field until this succeeds. It
+    only confirms the code; it creates no user and consumes nothing, so the
+    real gates on ``/register``, OAuth authorize and the restore routes stay
+    authoritative. Rate-limited with the registration bucket so the code
+    cannot be brute-forced.
+    """
+    if await is_setup_complete(db):
+        raise HTTPException(
+            status_code=403,
+            detail="Setup already complete. Sign in to continue.",
+        )
+
+    client_ip = client_ip_from_request(request)
+    retry_after = check_register(client_ip)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=REGISTER_RATE_LIMIT_DETAIL,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    if not verify_setup_code(body.code):
+        record_register_failure(client_ip)
+        raise HTTPException(status_code=403, detail=SETUP_CODE_REQUIRED_DETAIL)
+
+    # A correct code earns a clean slate for the follow-up registration.
+    clear_register(client_ip)
+    return {"ok": True}
 
 
 STAGING_KIND_RESTORE_SETUP = "restore-setup"
@@ -172,12 +251,14 @@ STAGING_KIND_RESTORE_SETUP = "restore-setup"
 
 class RestoreSetupExecuteBody(BaseModel):
     restore_token: str = Field(..., min_length=10, max_length=256)
+    setup_code: str = ""
 
 
 @router.post("/restore-setup/metadata")
 async def restore_setup_metadata(
     request: Request,
     file: UploadFile = File(...),
+    setup_code: str = Form(""),
 ):
     """Backup summary from file only (no password); same rate limit as restore preview."""
     ip = client_ip_from_request(request) or "unknown"
@@ -192,6 +273,8 @@ async def restore_setup_metadata(
                 status_code=403,
                 detail="Setup already complete. Sign in and use Settings → Backup to restore.",
             )
+    # Gate before touching the uploaded file.
+    _require_setup_code(setup_code)
     raw = await file.read()
     if not raw or len(raw) < 32:
         raise HTTPException(status_code=400, detail="Invalid or empty backup file")
@@ -215,6 +298,7 @@ async def restore_setup_preview(
     request: Request,
     file: UploadFile = File(...),
     password: str = Form(""),
+    setup_code: str = Form(""),
 ):
     """Validate backup and return manifest + token; does not modify the database."""
     ip = client_ip_from_request(request) or "unknown"
@@ -229,6 +313,8 @@ async def restore_setup_preview(
                 status_code=403,
                 detail="Setup already complete. Sign in and use Settings → Backup to restore.",
             )
+    # Gate before touching the uploaded file.
+    _require_setup_code(setup_code)
     raw = await file.read()
     if not raw or len(raw) < 32:
         raise HTTPException(status_code=400, detail="Invalid or empty backup file")
@@ -268,6 +354,8 @@ async def restore_setup_execute(
                 status_code=403,
                 detail="Setup already complete. Sign in and use Settings → Backup to restore.",
             )
+    # Gate before consuming the staged restore token / invoking pg_restore.
+    _require_setup_code(body.setup_code)
     path = consume_staged_dump(body.restore_token, expected_kind=STAGING_KIND_RESTORE_SETUP)
     if path is None:
         raise HTTPException(
@@ -282,6 +370,7 @@ async def restore_setup_execute(
         raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         delete_staged_dump(path)
+    clear_setup_code()
     log.warning("Database restored from backup during pre-setup flow")
     response.headers["X-Quickly-Reload"] = "1"
     return {"ok": True, "detail": "Database restored; you can sign in or create an admin account."}
@@ -293,16 +382,38 @@ async def restore_setup_execute(
 
 
 @router.post("/register", response_model=UserResponse, status_code=201)
-async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(
+    data: RegisterRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """Register a new user. The first user automatically becomes admin.
     Subsequent registrations are closed and require an admin to create accounts.
     """
+    client_ip = client_ip_from_request(request)
+    # Throttle setup-code guessing per IP before any lookup or code check.
+    retry_after = check_register(client_ip)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=REGISTER_RATE_LIMIT_DETAIL,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     setup_done = await is_setup_complete(db)
     if setup_done:
         raise HTTPException(
             status_code=403,
             detail="Registration closed. Contact an admin to create new accounts.",
         )
+
+    # Proof of ownership: only whoever can read the server logs may create the
+    # first admin.  Checked before any user row is created.
+    try:
+        _require_setup_code(data.setup_code)
+    except HTTPException:
+        record_register_failure(client_ip)
+        raise
 
     # Check for existing username/email
     existing = await db.execute(
@@ -320,21 +431,54 @@ async def register(data: RegisterRequest, db: AsyncSession = Depends(get_db)):
     )
     db.add(user)
     await db.flush()
+    # Setup is done: this code must not work again, even if env-provided.
+    clear_setup_code()
+    clear_register(client_ip)
     log.info("First user registered: %s (admin)", user.username)
     return user
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
-    """Authenticate and return JWT tokens."""
-    result = await db.execute(select(User).where(User.username == data.username.lower()))
-    user = result.scalar_one_or_none()
+async def login(
+    data: LoginRequest,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticate with a username or email address and return JWT tokens."""
+    identifier = (data.username or "").strip().lower()
+    client_ip = client_ip_from_request(request)
+
+    # Locked buckets are rejected before the credential check so a lock can
+    # never confirm that a password was correct.
+    retry_after = check_login(client_ip, identifier)
+    if retry_after is not None:
+        raise HTTPException(
+            status_code=429,
+            detail=LOGIN_RATE_LIMIT_DETAIL,
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    result = await db.execute(
+        select(User).where(
+            or_(
+                func.lower(User.username) == identifier,
+                func.lower(User.email) == identifier,
+            )
+        )
+    )
+    user = result.scalars().first()
 
     if not user or not verify_password(data.password, user.password_hash):
+        # Count bad credentials against this IP and this account, then answer
+        # with the same generic 401 whether or not the account exists.
+        record_login_failure(client_ip, identifier)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if not user.is_active:
         raise HTTPException(status_code=403, detail="Account disabled")
+
+    clear_login(client_ip, identifier)
 
     access_token = create_access_token(user.id, user.role)
     refresh_token = create_refresh_token(user.id, user.role)

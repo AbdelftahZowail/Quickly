@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from collections import defaultdict
 from datetime import datetime
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
@@ -20,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import Inbox, GmailAccount, Office365Account, AppSetting, SmtpAccount
+from app.security import resolve_and_check
 from app.smtp_utils import derive_inbox_health
 
 log = logging.getLogger("quickly.system_health")
@@ -117,6 +119,25 @@ def _probe_o365(access_token: str) -> str:
     )
 
 
+def _outbound_url_error(url: str) -> str | None:
+    """Return an error string when *url* is unsafe as an outbound target.
+
+    Every URL probed here (tracking domain, Beacon base URL) comes from user
+    configuration, so it is re-resolved immediately before the request and
+    private/reserved destinations are refused.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return "URL scheme must be http or https"
+    hostname = (parsed.hostname or "").strip()
+    if not hostname:
+        return "URL must include a hostname"
+    safe, reason = resolve_and_check(hostname, strict_dns=True)
+    if not safe:
+        return reason
+    return None
+
+
 def _probe_tracking_domain(domain: str) -> str:
     """Return 'ok' if *domain* correctly serves the tracking-probe endpoint.
 
@@ -131,9 +152,13 @@ def _probe_tracking_domain(domain: str) -> str:
     if not domain:
         return "error"
     url = f"https://{domain}/api/tracking-probe"
+    blocked = _outbound_url_error(url)
+    if blocked:
+        log.warning("tracking domain probe blocked for %r: %s", domain, blocked)
+        return "error"
     for verify_ssl in (True, False):
         try:
-            with httpx.Client(timeout=15, follow_redirects=True, verify=verify_ssl) as client:
+            with httpx.Client(timeout=15, follow_redirects=False, verify=verify_ssl) as client:
                 resp = client.get(url)
             if resp.status_code == 200:
                 try:
@@ -160,10 +185,14 @@ def _fetch_beacon_health_payload(base_url: str, setup_token: str | None) -> tupl
         return "error", None
     base = base_url.strip().rstrip("/")
     url = f"{base}/api/v1/health"
+    blocked = _outbound_url_error(url)
+    if blocked:
+        log.warning("beacon health probe blocked for %r: %s", base_url, blocked)
+        return "error", None
     headers = {"Authorization": f"Bearer {setup_token.strip()}"}
     for verify_ssl in (True, False):
         try:
-            with httpx.Client(timeout=15, follow_redirects=True, verify=verify_ssl) as client:
+            with httpx.Client(timeout=15, follow_redirects=False, verify=verify_ssl) as client:
                 resp = client.get(url, headers=headers)
             if resp.status_code == 200:
                 try:

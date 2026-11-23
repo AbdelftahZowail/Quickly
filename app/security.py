@@ -95,6 +95,11 @@ def decrypt(ciphertext: str) -> str:
     """
     if _fernet is None or not ciphertext:
         return ciphertext
+    # Fast path for legacy plaintext rows and pre-restore dumps: a Fernet
+    # token always starts with ``gAAAAA``, so anything else is not ciphertext
+    # and must be returned unchanged (never lose an older stored value).
+    if not is_encrypted(ciphertext):
+        return ciphertext
     try:
         return _fernet.decrypt(ciphertext.encode()).decode()
     except (InvalidToken, Exception):
@@ -164,6 +169,14 @@ _BLOCKED_NETWORKS = [
     ipaddress.ip_network("ff00::/8"),          # Multicast
 ]
 
+# IPv6 transition / embedding prefixes that can smuggle an IPv4 target past a
+# naive check.  All of them are blocked wholesale — they are either deprecated
+# or only ever used to reach an embedded IPv4 address.
+_IPV4_COMPAT_NETWORK = ipaddress.ip_network("::/96")           # ::a.b.c.d (deprecated)
+_NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")          # NAT64 (RFC 6052)
+_NAT64_LOCAL_NETWORK = ipaddress.ip_network("64:ff9b:1::/48")  # NAT64 local-use (RFC 8215)
+_SIX_TO_FOUR_NETWORK = ipaddress.ip_network("2002::/16")       # 6to4 (RFC 3056)
+
 # Hostnames that should be blocked before DNS resolution (cloud metadata endpoints).
 _BLOCKED_HOSTNAMES = {
     "metadata.google.internal",
@@ -171,23 +184,78 @@ _BLOCKED_HOSTNAMES = {
     "169.254.169.254",
 }
 
+# Loopback hostnames.  Plain-HTTP webhooks are tolerated for these during
+# development only when QUICKLY_WEBHOOK_ALLOW_LOCALHOST is explicitly enabled.
+_LOOPBACK_HOSTNAMES = {"localhost", "127.0.0.1", "::1"}
+
+
+def _allow_localhost_webhook_targets() -> bool:
+    """Dev escape hatch: allow loopback webhook targets when explicitly enabled."""
+    return os.getenv("QUICKLY_WEBHOOK_ALLOW_LOCALHOST", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _is_blocked_ip(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Return True when *addr* is private/reserved or hides one behind a prefix."""
+    if isinstance(addr, ipaddress.IPv6Address):
+        # IPv4-mapped (::ffff:a.b.c.d) — inspect the embedded IPv4 address.
+        mapped = addr.ipv4_mapped
+        if mapped is not None:
+            return _is_blocked_ip(mapped)
+        # NAT64 — embeds an IPv4 address in the low 32 bits.
+        if addr in _NAT64_NETWORK or addr in _NAT64_LOCAL_NETWORK:
+            return True
+        # 6to4 — embeds an IPv4 address in bits 16..48; deprecated and
+        # unreachable in practice, so block the whole prefix.
+        if addr in _SIX_TO_FOUR_NETWORK:
+            return True
+        # Deprecated IPv4-compatible form ::a.b.c.d — unwrap and inspect.
+        if addr in _IPV4_COMPAT_NETWORK and int(addr) != 0:
+            return _is_blocked_ip(ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF))
+
+    if any(addr in net for net in _BLOCKED_NETWORKS):
+        return True
+    # Belt-and-braces: the stdlib flags ranges that the explicit list may miss.
+    return bool(
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
 
 def is_private_ip(ip_str: str) -> bool:
-    """Return True if *ip_str* is a private/reserved address."""
+    """Return True if *ip_str* is a private, reserved or otherwise unsafe address.
+
+    Handles IPv4-mapped IPv6 (``::ffff:127.0.0.1``), NAT64
+    (``64:ff9b::/96``), 6to4 (``2002::/16``) and IPv4-compatible (``::a.b.c.d``)
+    forms as well as the classic IPv4/IPv6 private and reserved ranges.
+    """
     try:
-        addr = ipaddress.ip_address(ip_str)
+        addr = ipaddress.ip_address(str(ip_str).strip())
     except ValueError:
         return True  # unparseable → block
-    return any(addr in net for net in _BLOCKED_NETWORKS)
+    return _is_blocked_ip(addr)
 
 
-def resolve_and_check(hostname: str) -> tuple[bool, str]:
+def resolve_and_check(hostname: str, *, strict_dns: bool = True) -> tuple[bool, str]:
     """Resolve *hostname* and return ``(safe, reason_or_ip)``.
 
-    Returns ``(False, reason)`` when the hostname points to a blocked address
-    or cannot be resolved.
+    Returns ``(False, reason)`` when the hostname points to a blocked address.
+    When *strict_dns* is true (the default) a DNS failure is also a rejection —
+    use it immediately before an outbound request.  When it is false (e.g.
+    validating a configured URL at save time) an unresolvable hostname is
+    allowed through: it cannot be a private target right now, and the
+    dispatch-time check will resolve it again.
     """
-    hostname = hostname.strip().lower()
+    hostname = (hostname or "").strip().lower().strip("[]").rstrip(".")
+    if not hostname:
+        return False, "Empty hostname"
     if hostname in _BLOCKED_HOSTNAMES:
         return False, f"Blocked hostname: {hostname}"
 
@@ -203,7 +271,9 @@ def resolve_and_check(hostname: str) -> tuple[bool, str]:
     try:
         results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
     except socket.gaierror:
-        return False, f"DNS resolution failed for {hostname}"
+        if strict_dns:
+            return False, f"DNS resolution failed for {hostname}"
+        return True, hostname
 
     for _family, _type, _proto, _canon, sockaddr in results:
         ip_str = sockaddr[0]
@@ -211,7 +281,9 @@ def resolve_and_check(hostname: str) -> tuple[bool, str]:
             return False, f"Hostname {hostname} resolves to private IP {ip_str}"
 
     if not results:
-        return False, f"No DNS results for {hostname}"
+        if strict_dns:
+            return False, f"No DNS results for {hostname}"
+        return True, hostname
     return True, results[0][4][0]
 
 
@@ -231,22 +303,40 @@ def validate_url_not_ssrf(url: str) -> tuple[bool, str]:
 # Webhook URL validator
 # ---------------------------------------------------------------------------
 
-def validate_webhook_url(url: str, allow_http_localhost: bool = True) -> str | None:
+def validate_webhook_url(
+    url: str,
+    allow_http_localhost: bool = True,
+    *,
+    strict_dns: bool = True,
+) -> str | None:
     """Return an error string if *url* is not an acceptable webhook target.
 
     Returns ``None`` when the URL is safe.
+
+    *strict_dns* controls whether a DNS lookup failure rejects the URL: pass
+    ``False`` for save-time validation (the host may not resolve yet) and keep
+    the default ``True`` immediately before an outbound request.
     """
-    parsed = urlparse(url)
+    parsed = urlparse(url if isinstance(url, str) else "")
     if parsed.scheme not in ("http", "https"):
         return "URL scheme must be http or https"
-    if not parsed.hostname:
+    hostname = (parsed.hostname or "").strip().lower()
+    if not hostname:
         return "URL must include a hostname"
+    is_loopback_host = hostname in _LOOPBACK_HOSTNAMES
     if parsed.scheme == "http":
-        if allow_http_localhost and parsed.hostname in ("localhost", "127.0.0.1", "::1"):
-            pass  # allow plain HTTP for localhost in dev
+        if allow_http_localhost and is_loopback_host:
+            pass  # existing dev exception: plain HTTP is tolerated for localhost
         else:
             return "Production webhooks must use https"
-    safe, reason = resolve_and_check(parsed.hostname)
+    if is_loopback_host:
+        # Loopback is an SSRF target even over http.  Development can opt back
+        # in with QUICKLY_WEBHOOK_ALLOW_LOCALHOST=true, in which case the
+        # scheme was already validated above and no DNS lookup is needed.
+        if not _allow_localhost_webhook_targets():
+            return "Localhost webhook targets are not allowed"
+        return None
+    safe, reason = resolve_and_check(hostname, strict_dns=strict_dns)
     if not safe:
         return reason
     return None

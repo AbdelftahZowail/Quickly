@@ -56,9 +56,10 @@ class User(Base):
     # OAuth identity (app login)
     oauth_provider = Column(String(32), nullable=True)   # "google" or "microsoft"
     oauth_sub = Column(String(255), nullable=True)        # provider's unique subject ID
-    # Notification email sending credentials (from OAuth login, separate from campaign inboxes)
-    notif_access_token = Column(Text, nullable=True)
-    notif_refresh_token = Column(Text, nullable=True)
+    # Notification email sending credentials (from OAuth login, separate from campaign inboxes).
+    # Encrypted at rest via EncryptedText (Fernet when QUICKLY_ENCRYPTION_KEY is set).
+    notif_access_token = Column(EncryptedText, nullable=True)
+    notif_refresh_token = Column(EncryptedText, nullable=True)
     notif_token_expiry = Column(DateTime, nullable=True)
     role = Column(String(32), default="user", nullable=False)  # admin or user (first user set explicitly to admin in router)
     is_active = Column(Boolean, default=True, nullable=False)
@@ -144,6 +145,10 @@ class Lead(Base):
     email_verification_status = Column(String(32), nullable=True, default=None, index=True)
     # Raw JSON result from the verification provider
     email_verification_result = Column(JSON, nullable=True, default=None)
+    # Pre-send hook outcome: allow, hold, deny, error_allow, error_hold, or null
+    pre_send_decision = Column(String(16), nullable=True, default=None)
+    # reason, reference, checked_at, retry_at, host
+    pre_send_check = Column(JSON, nullable=True, default=None)
     # Detected email hosting provider (e.g. "Google Workspace", "Office 365") via MX lookup
     provider = Column(String(64), nullable=True, default=None, index=True)
     created_at = Column(DateTime, default=_utcnow)

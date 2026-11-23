@@ -59,6 +59,23 @@ import app.scheduler as scheduler_mod
 async def lifespan(app: FastAPI):
     await init_db()
 
+    # First boot (zero users): print the one-time setup code required to
+    # create the first admin or restore before setup.  Never let this break
+    # startup — setup-status will log it again when the login page loads.
+    try:
+        from app.auth import is_setup_complete as _is_setup_complete
+        from app.database import AsyncSessionLocal as _SetupSession
+        from app.setup_code import log_setup_code as _log_setup_code
+
+        async with _SetupSession() as _setup_db:
+            if not await _is_setup_complete(_setup_db):
+                _log_setup_code()
+    except Exception:
+        logging.getLogger("quickly").warning(
+            "Could not determine initial setup state for the setup code",
+            exc_info=True,
+        )
+
     unibox_interval_minutes = 5
 
     from app.database import AsyncSessionLocal

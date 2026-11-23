@@ -14,6 +14,8 @@ from pathlib import Path
 
 import httpx
 
+from app.security import validate_webhook_url
+
 log = logging.getLogger("quickly.backup_pg")
 
 BACKUP_FILENAME_PREFIX = "quickly-backup-"
@@ -163,11 +165,22 @@ async def post_backup_webhook(
     authorization: str | None = None,
     timeout: float = 120.0,
 ) -> None:
-    """POST multipart file to webhook URL."""
+    """POST multipart file to webhook URL.
+
+    *url* is user-controlled: it is re-validated (with a fresh DNS resolution)
+    immediately before the request so a hostname that now points at a
+    private/reserved address is refused.  Raises :class:`BackupError` when the
+    target is not allowed.
+    """
+    blocked = validate_webhook_url(url, strict_dns=True)
+    if blocked:
+        log.error("Backup webhook URL rejected by SSRF guard: %r (%s)", url, blocked)
+        raise BackupError(f"Backup webhook URL rejected: {blocked}")
+
     headers = {}
     if authorization:
         headers["Authorization"] = authorization
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
         resp = await client.post(
             url,
             headers=headers,

@@ -22,6 +22,8 @@ export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [setupComplete, setSetupComplete] = useState(null);
+  const [setupCodeRequired, setSetupCodeRequired] = useState(null);
+  const [authProviders, setAuthProviders] = useState({ google: true, microsoft: true });
 
   const refreshToken = useCallback(async () => {
     try {
@@ -88,6 +90,13 @@ export function AuthProvider({ children }) {
       const res = await fetch('/api/auth/setup-status');
       const data = await res.json();
       setSetupComplete(data.setup_complete);
+      setSetupCodeRequired(!!data.setup_code_required);
+      if (data.auth_providers && typeof data.auth_providers === 'object') {
+        setAuthProviders({
+          google: !!data.auth_providers.google,
+          microsoft: !!data.auth_providers.microsoft,
+        });
+      }
       return data.setup_complete;
     } catch {
       return null;
@@ -117,6 +126,8 @@ export function AuthProvider({ children }) {
       user,
       loading,
       setupComplete,
+      setupCodeRequired,
+      authProviders,
       logout,
       refreshToken,
       checkSetup,
