@@ -510,7 +510,11 @@ async def set_pre_send_hook(
     if payload.clear_secret:
         await put_setting(db, PRE_SEND_HOOK_SECRET_KEY, "")
     elif (payload.secret or "").strip():
-        await put_setting(db, PRE_SEND_HOOK_SECRET_KEY, payload.secret.strip())
+        from app.security import encrypt
+
+        await put_setting(
+            db, PRE_SEND_HOOK_SECRET_KEY, encrypt(payload.secret.strip())
+        )
     await put_setting(db, PRE_SEND_HOOK_ON_ERROR_KEY, on_error)
     await put_setting(db, PRE_SEND_HOOK_SCOPE_KEY, scope)
     await put_setting(db, PRE_SEND_HOOK_FIELDS_KEY, fields)

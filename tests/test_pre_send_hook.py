@@ -22,6 +22,7 @@ from app.app_settings import (
     PRE_SEND_HOOK_FIELDS_KEY,
     PRE_SEND_HOOK_ON_ERROR_KEY,
     PRE_SEND_HOOK_SCOPE_KEY,
+    PRE_SEND_HOOK_SECRET_KEY,
     PRE_SEND_HOOK_URL_KEY,
     get_setting,
     put_setting,
@@ -64,6 +65,9 @@ def _hook_defaults(monkeypatch):
     monkeypatch.setattr(settings, "pre_send_hook_scope", "")
     monkeypatch.setattr(settings, "pre_send_hook_fields", "")
     monkeypatch.setattr(settings, "test_mode", False)
+    # The hook host does not resolve in tests; the dispatch-time SSRF check
+    # has its own test that overrides this.
+    monkeypatch.setattr(hook, "resolve_and_check", lambda host, strict_dns=True: (True, host))
     yield
     monkeypatch.setattr(hook, "_transport", None)
 
@@ -280,6 +284,22 @@ async def test_contact_fields_are_sent_when_configured(session, monkeypatch):
     assert body["campaign"] == {"id": campaign.id, "name": campaign.name}
 
 
+@pytest.mark.asyncio
+async def test_hook_target_is_re_checked_before_the_request(session, monkeypatch):
+    api = _mock(monkeypatch, _Hook(_reply("allow")))
+    monkeypatch.setattr(
+        hook, "resolve_and_check", lambda host, strict_dns=True: (False, "private address")
+    )
+    inbox = await _make_smtp_inbox(session)
+    slot, cl, lead, _ = await _make_due_slot(session, inbox)
+
+    sends, _ = await _run_slot(session, monkeypatch, slot.id)
+
+    assert api.calls == 0
+    assert len(sends) == 1
+    assert lead.pre_send_decision == "error_allow"
+
+
 # ── Settings API ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -308,6 +328,8 @@ async def test_settings_endpoint_round_trip(session, monkeypatch):
     assert await get_setting(session, PRE_SEND_HOOK_URL_KEY) == HOOK_URL
     assert await get_setting(session, PRE_SEND_HOOK_SCOPE_KEY) == "all"
     assert await get_setting(session, PRE_SEND_HOOK_FIELDS_KEY) == "contact"
+    stored_secret = await get_setting(session, PRE_SEND_HOOK_SECRET_KEY)
+    assert stored_secret and stored_secret != SECRET
 
     # Saving without a secret keeps the stored one; clear_secret removes it.
     await settings_routes.set_pre_send_hook(

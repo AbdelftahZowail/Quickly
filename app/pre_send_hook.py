@@ -34,6 +34,7 @@ from app.app_settings import (
     get_setting,
 )
 from app.models import Campaign, Lead
+from app.security import decrypt, resolve_and_check
 from app.settings_manager import settings
 
 log = logging.getLogger(__name__)
@@ -129,7 +130,11 @@ async def load_config(db: AsyncSession) -> HookConfig:
     if url and not url_allowed(url):
         log.warning("pre_send_hook: ignoring hook URL that is not https (or http to localhost)")
         url = ""
-    secret = _env_or_db(settings.pre_send_hook_secret, await get_setting(db, PRE_SEND_HOOK_SECRET_KEY))
+    secret = decrypt(
+        _env_or_db(
+            settings.pre_send_hook_secret, await get_setting(db, PRE_SEND_HOOK_SECRET_KEY)
+        )
+    )
     on_error = _env_or_db(settings.pre_send_hook_on_error, await get_setting(db, PRE_SEND_HOOK_ON_ERROR_KEY)).lower()
     if on_error not in (ON_ERROR_ALLOW, ON_ERROR_HOLD):
         on_error = ON_ERROR_ALLOW
@@ -184,6 +189,10 @@ async def ask(config: HookConfig, payload: dict[str, Any]) -> HookDecision:
     }
     if config.secret:
         headers["X-Quickly-Signature"] = sign(config.secret, timestamp, body)
+    if config.host not in ("localhost", "127.0.0.1", "::1"):
+        safe, reason = resolve_and_check(config.host, strict_dns=True)
+        if not safe:
+            return HookDecision("error", error=f"target not allowed: {reason}")
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(TIMEOUT), transport=_transport) as client:
             resp = await client.post(config.url, content=body, headers=headers)
