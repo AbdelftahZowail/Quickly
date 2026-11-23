@@ -13,10 +13,16 @@ but this module never sends a key and never writes anything.
 It is fail-open: it never raises into a request, keeps a short-lived in-process
 cache (``CACHE_SECONDS``), serves the last good copy when the hub is briefly
 unreachable, and otherwise reports ``unavailable: True`` with empty lists.
+
+Notices can be switched off independently of telemetry with
+``QUICKLY_NOTICES=false`` (default: enabled). This is deliberately *not* tied to
+``QUICKLY_TELEMETRY``: update and security notices keep reaching installs that
+opted out of anonymous usage telemetry but still want to hear about releases.
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 
@@ -28,6 +34,10 @@ log = logging.getLogger("quickly.notices")
 
 # Constant product filter. Nothing else about the install is part of the call.
 PRODUCT = "quickly"
+
+# Explicit notices opt-out. Separate from ``QUICKLY_TELEMETRY`` on purpose:
+# a user may disable usage telemetry and still receive update notices.
+NOTICES_ENV = "QUICKLY_NOTICES"
 
 REQUEST_TIMEOUT_SECONDS = 8.0
 # One product, one cache. A release/announcement feed changes at most a few
@@ -47,6 +57,20 @@ _cache: dict = {}
 def _reset_cache() -> None:
     """Drop the in-process cache (used by tests; also safe to call at runtime)."""
     _cache.clear()
+
+
+def notices_enabled() -> bool:
+    """True unless ``QUICKLY_NOTICES`` explicitly turns notices off.
+
+    Read per call so a runtime environment change takes effect immediately. Only
+    this switch gates the feed — telemetry settings never do.
+    """
+    return os.getenv(NOTICES_ENV, "true").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+        "off",
+    )
 
 
 def parse_version(name: object) -> tuple[int, int, int, str | None] | None:
@@ -173,7 +197,13 @@ async def get_notices() -> dict:
 
     Uses a ``CACHE_SECONDS`` in-process cache. On any error it serves the last
     good copy if one exists, otherwise empty lists with ``unavailable: True``.
+
+    When ``QUICKLY_NOTICES`` disables notices, this returns the empty payload
+    immediately: no HTTP call and no cached copy is served.
     """
+    if not notices_enabled():
+        return _empty(unavailable=True)
+
     now = time.monotonic()
     last_good = _cache.get("data")
     if last_good is not None and now - float(_cache.get("at", 0.0)) < CACHE_SECONDS:

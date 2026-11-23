@@ -50,6 +50,14 @@ class Settings:
         self.office365_client_id: str = os.getenv("OFFICE365_CLIENT_ID", "")
         self.office365_client_secret: str = os.getenv("OFFICE365_CLIENT_SECRET", "")
         self.office365_tenant_id: str = os.getenv("OFFICE365_TENANT_ID", "common")
+
+        # Pre-send decision hook (see app/pre_send_hook.py).  Empty means
+        # "use the app_setting row, else the default": off, fail open.
+        self.pre_send_hook_url: str = os.getenv("PRE_SEND_HOOK_URL", "")
+        self.pre_send_hook_secret: str = os.getenv("PRE_SEND_HOOK_SECRET", "")
+        self.pre_send_hook_on_error: str = os.getenv("PRE_SEND_HOOK_ON_ERROR", "")
+        self.pre_send_hook_scope: str = os.getenv("PRE_SEND_HOOK_SCOPE", "")
+        self.pre_send_hook_fields: str = os.getenv("PRE_SEND_HOOK_FIELDS", "")
         
         # Background job interval
         self.queue_check_interval_minutes: int = 1

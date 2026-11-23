@@ -563,3 +563,107 @@ async def test_telemetry_setting_is_opt_out_and_reloads_cache(session):
     finally:
         settings.telemetry_enabled = original_enabled
         settings.telemetry_env_enabled = original_env
+
+
+@pytest.mark.asyncio
+async def test_opt_out_sends_one_minimal_count(session, monkeypatch):
+    monkeypatch.setenv("QUICKLY_VERSION", "2.4.0")
+    _configure_telemetry()
+    monkeypatch.setattr(telemetry, "get_instance_id", _stub_instance_id)
+
+    sent: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append((request.url.path, json.loads(request.content)))
+        return httpx.Response(202, request=request)
+
+    transport = httpx.MockTransport(handler)
+    original_client = telemetry.httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", client_factory)
+
+    assert await telemetry.send_opt_out(session) is True
+    assert len(sent) == 1
+    path, payload = sent[0]
+    assert path == "/v1/telemetry/opt-out"
+    assert set(payload) == {
+        "schema_version",
+        "product",
+        "instance_id",
+        "app_version",
+        "seq",
+        "sent_at",
+    }
+    assert payload["product"] == "quickly"
+    assert await _stored_seq(session) == payload["seq"]
+
+
+@pytest.mark.asyncio
+async def test_opt_out_is_skipped_when_the_hub_lacks_the_endpoint(session, monkeypatch):
+    monkeypatch.setenv("QUICKLY_VERSION", "2.4.0")
+    _configure_telemetry()
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(404, request=request))
+    original_client = telemetry.httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", client_factory)
+
+    assert await telemetry.send_opt_out(session) is False
+    assert await _stored_seq(session) == 0
+
+
+@pytest.mark.asyncio
+async def test_opt_out_is_not_sent_when_the_environment_disables_telemetry(
+    session, monkeypatch
+):
+    monkeypatch.setenv("QUICKLY_VERSION", "2.4.0")
+    _configure_telemetry(env_enabled=False)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request expected")
+
+    transport = httpx.MockTransport(handler)
+    original_client = telemetry.httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(telemetry.httpx, "AsyncClient", client_factory)
+
+    assert await telemetry.send_opt_out(session) is False
+
+
+@pytest.mark.asyncio
+async def test_disabling_telemetry_in_the_app_queues_one_opt_out(session, monkeypatch):
+    from app.app_settings import set_telemetry_enabled
+    from app.routers import settings as settings_routes
+
+    await set_telemetry_enabled(session, True)
+    await session.commit()
+
+    queued: list[int] = []
+    monkeypatch.setattr(settings_routes, "_queue_opt_out_ping", lambda: queued.append(1))
+
+    await settings_routes.set_telemetry_endpoint(
+        settings_routes._TelemetryPayload(telemetry_enabled=False),
+        db=session,
+        _admin=None,
+    )
+    assert queued == [1]
+
+    # Already off: no second count.
+    await settings_routes.set_telemetry_endpoint(
+        settings_routes._TelemetryPayload(telemetry_enabled=False),
+        db=session,
+        _admin=None,
+    )
+    assert queued == [1]

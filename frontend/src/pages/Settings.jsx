@@ -17,6 +17,7 @@ import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/Button';
 import { FileUploadArea } from '../components/ui/FileUploadArea';
 import { Card } from '../components/ui/Card';
+import Markdown from '../components/Markdown';
 import EmailVerificationSettings from '../components/EmailVerificationSettings';
 
 const SETTINGS_TABS = [
@@ -47,6 +48,7 @@ const SECTIONS_BY_TAB = {
   integrating: [
     { id: 'api-keys', label: 'API keys' },
     { id: 'webhooks', label: 'Webhooks' },
+    { id: 'pre-send-hook', label: 'Pre-send hook' },
     { id: 'mcp', label: 'MCP' },
   ],
   dev: [{ id: 'test-mode', label: 'Test mode' }],
@@ -136,6 +138,14 @@ export default function Settings() {
   const [newWh, setNewWh] = useState({ url: '', secret: '', description: '', events: [], active: true });
   const [editingId, setEditingId] = useState(null);
   const [editForm, setEditForm] = useState({});
+
+  // Pre-send decision hook
+  const [preSendHook, setPreSendHook] = useState({
+    url: '', secret_set: false, on_error: 'allow', scope: 'first', fields: 'minimal',
+  });
+  const [preSendSecret, setPreSendSecret] = useState('');
+  const [preSendClearSecret, setPreSendClearSecret] = useState(false);
+  const [preSendBusy, setPreSendBusy] = useState(false);
 
   // AI settings — keyed by feature id
   const [aiFeatures, setAiFeatures] = useState({});
@@ -307,7 +317,7 @@ export default function Settings() {
   /* ── load data ── */
   const loadAll = useCallback(async () => {
     try {
-      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData] = await Promise.all([
+      const [stratData, tmData, whList, evtData, aiData, provData, ipData, keysData, notifData, gmailSyncData, mcpData, telData, noticesData, preSendData] = await Promise.all([
         api.get('/settings/scheduling-strategy'),
         api.get('/settings/test-mode'),
         api.get('/settings/webhooks'),
@@ -321,11 +331,13 @@ export default function Settings() {
         api.get('/settings/mcp-setup').catch(() => null),
         api.get('/settings/telemetry').catch(() => null),
         api.get('/notices').catch(() => null),
+        api.get('/settings/pre-send-hook').catch(() => null),
       ]);
       setStrategy(stratData.scheduling_strategy || 'priority');
       setTestMode(tmData.test_mode || false);
       if (telData) setTelemetryEnabled(telData.telemetry_enabled !== false);
       if (noticesData) setNotices(noticesData);
+      if (preSendData) setPreSendHook(preSendData);
       setWebhooks(whList || []);
       setEventTypes(evtData.events || []);
       // default new webhook events = all
@@ -602,6 +614,28 @@ export default function Settings() {
       const updated = await api.patch(`/settings/webhooks/${id}`, { active: !current });
       setWebhooks(prev => prev.map(w => (w.id === id ? updated : w)));
     } catch (e) { notify({ type: 'error', message: e.message }); }
+  };
+
+  const savePreSendHook = async () => {
+    setPreSendBusy(true);
+    try {
+      const updated = await api.post('/settings/pre-send-hook', {
+        url: preSendHook.url,
+        secret: preSendSecret || undefined,
+        clear_secret: preSendClearSecret,
+        on_error: preSendHook.on_error,
+        scope: preSendHook.scope,
+        fields: preSendHook.fields,
+      });
+      setPreSendHook(updated);
+      setPreSendSecret('');
+      setPreSendClearSecret(false);
+      notify('Pre-send hook saved', 'success');
+    } catch (e) {
+      notify(e.message, 'error');
+    } finally {
+      setPreSendBusy(false);
+    }
   };
 
   /* ── API Keys ── */
@@ -1067,9 +1101,10 @@ export default function Settings() {
                         )}
                       </div>
                       {release.body && (
-                        <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-gray-600 dark:text-gray-300">
-                          {release.body}
-                        </p>
+                        <Markdown
+                          text={release.body}
+                          className="mt-1 text-xs leading-relaxed text-gray-600 dark:text-gray-300"
+                        />
                       )}
                       {noticeDate(release.published_at) && (
                         <p className="mt-1 text-[10px] text-gray-400">
@@ -1115,9 +1150,10 @@ export default function Settings() {
                             </span>
                           </div>
                           {announcement.body && (
-                            <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-gray-600 dark:text-gray-300">
-                              {announcement.body}
-                            </p>
+                            <Markdown
+                              text={announcement.body}
+                              className="mt-1 text-xs leading-relaxed text-gray-600 dark:text-gray-300"
+                            />
                           )}
                           {noticeDate(announcement.published_at) && (
                             <p className="mt-1 text-[10px] text-gray-400">
@@ -1138,8 +1174,8 @@ export default function Settings() {
             <div className="rounded-lg border border-gray-200 dark:border-gray-700 p-4">
               <div className="text-sm font-medium">Usage data</div>
               <p className="text-xs text-gray-500 dark:text-gray-400 mb-2">
-                A coarse heartbeat that never identifies you or your leads — uncheck to opt
-                out, and nothing is sent.
+                A coarse heartbeat that never identifies you or your leads. Uncheck to opt
+                out: one anonymous count is sent, then nothing.
               </p>
               <label className="flex items-center gap-2">
                 <input
@@ -2246,6 +2282,88 @@ export default function Settings() {
               )}
             </Card>
           ))}
+        </section>
+
+        {/* ──────────────── Pre-send hook ──────────────── */}
+        <section id="settings-pre-send-hook" className="mb-10 scroll-mt-6">
+          <h2 className="text-lg font-semibold mb-1 border-b pb-2">Pre-send hook</h2>
+          <p className="text-xs text-gray-500 mb-4">
+            Ask your endpoint for allow, hold or deny before sending. Off while the URL is empty.
+            Contract: <code className="text-[10px] bg-gray-100 dark:bg-gray-800 px-1 rounded">docs/PRE_SEND_HOOK.md</code>.
+          </p>
+          <Card className="space-y-3">
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Endpoint URL</label>
+              <input
+                type="text"
+                placeholder="https://hooks.example.com/pre-send"
+                value={preSendHook.url}
+                onChange={e => setPreSendHook(prev => ({ ...prev, url: e.target.value }))}
+                className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Signing secret</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                placeholder={preSendHook.secret_set ? 'Saved — leave blank to keep' : 'Optional'}
+                value={preSendSecret}
+                onChange={e => setPreSendSecret(e.target.value)}
+                className="block w-full border rounded-lg p-2 text-sm focus:outline-none focus:ring-2 focus:ring-teal-300"
+              />
+              {preSendHook.secret_set && (
+                <label className="mt-1 flex items-center gap-2 text-xs text-gray-500">
+                  <input
+                    type="checkbox"
+                    checked={preSendClearSecret}
+                    onChange={e => setPreSendClearSecret(e.target.checked)}
+                  />
+                  Remove saved secret
+                </label>
+              )}
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">If the hook fails</label>
+                <select
+                  value={preSendHook.on_error}
+                  onChange={e => setPreSendHook(prev => ({ ...prev, on_error: e.target.value }))}
+                  className="block w-full border rounded-lg p-2 text-sm"
+                >
+                  <option value="allow">Send anyway</option>
+                  <option value="hold">Hold and retry</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Check</label>
+                <select
+                  value={preSendHook.scope}
+                  onChange={e => setPreSendHook(prev => ({ ...prev, scope: e.target.value }))}
+                  className="block w-full border rounded-lg p-2 text-sm"
+                >
+                  <option value="first">First email only</option>
+                  <option value="all">Every email</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">Send fields</label>
+                <select
+                  value={preSendHook.fields}
+                  onChange={e => setPreSendHook(prev => ({ ...prev, fields: e.target.value }))}
+                  className="block w-full border rounded-lg p-2 text-sm"
+                >
+                  <option value="minimal">Minimal (id, email, campaign)</option>
+                  <option value="contact">Contact details (name, company, custom)</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button onClick={savePreSendHook} disabled={preSendBusy}>
+                {preSendBusy ? 'Saving…' : 'Save'}
+              </Button>
+            </div>
+          </Card>
         </section>
 
         {/* ──────────────── MCP (AI agents) ──────────────── */}

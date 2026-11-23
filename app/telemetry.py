@@ -15,8 +15,10 @@ IP addresses, or any lead/person content. ``build_payload`` is the single source
 of truth for the wire format; ``tests/test_telemetry.py`` pins the key allowlist.
 
 Disable:
-  * in the app  — Settings toggle (DB setting ``telemetry_enabled``)
-  * environment — ``QUICKLY_TELEMETRY=false`` (wins over the toggle)
+  * in the app  — Settings toggle (DB setting ``telemetry_enabled``). Turning
+    it off sends one count of the install id and version, then nothing.
+  * environment — ``QUICKLY_TELEMETRY=false`` (wins over the toggle; sends
+    nothing at all)
 Both default to enabled (opt-out); an unset URL/key also prevents sending.
 Point it at a hub (dev/testing):
   ``QUICKLY_TELEMETRY_URL`` / ``QUICKLY_TELEMETRY_KEY``
@@ -114,6 +116,18 @@ def telemetry_url() -> str:
 
 def telemetry_key() -> str:
     return (settings.telemetry_key or DEFAULT_TELEMETRY_KEY).strip()
+
+
+async def build_opt_out_payload(db: AsyncSession) -> dict:
+    """The one signal sent when the user turns telemetry off: just the id."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "product": "quickly",
+        "instance_id": await get_instance_id(db),
+        "app_version": app_version(),
+        "seq": await _next_seq(db) + 1,
+        "sent_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
+    }
 
 
 def telemetry_active() -> bool:
@@ -238,6 +252,53 @@ async def build_payload(db: AsyncSession) -> dict:
         "events": await telemetry_rollup.activation_events(db),
         "features": await telemetry_rollup.feature_flags(db),
     }
+
+
+async def send_opt_out(db: AsyncSession) -> bool:
+    """Send one anonymous "telemetry disabled" count. Never raises.
+
+    Called when the settings toggle is turned off, so opted-out installs are
+    still visible in the hub totals. Nothing is sent again afterwards. An
+    environment-level disable (``QUICKLY_TELEMETRY=false``) sends nothing.
+    """
+    if not settings.telemetry_env_enabled:
+        return False
+    if not (telemetry_url() and telemetry_key()):
+        return False
+    version = app_version()
+    if not _VERSION_RE.match(version):
+        return False
+
+    async with _SEND_LOCK:
+        try:
+            payload = await build_opt_out_payload(db)
+            await db.commit()
+        except Exception:
+            log.debug("telemetry: could not build opt-out payload", exc_info=True)
+            return False
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                follow_redirects=False,
+            ) as client:
+                resp = await client.post(
+                    f"{telemetry_url()}/v1/telemetry/opt-out",
+                    json=payload,
+                    headers={"X-Quickly-Key": telemetry_key()},
+                )
+            if resp.status_code == 404:
+                log.debug("telemetry: hub does not accept opt-out signals")
+                return False
+            if not 200 <= resp.status_code < 300:
+                log.debug("telemetry: opt-out returned HTTP %s", resp.status_code)
+                return False
+            await _save_seq(db, int(payload["seq"]))
+            await db.commit()
+            return True
+        except Exception:
+            log.debug("telemetry: opt-out send failed", exc_info=True)
+            return False
 
 
 async def send_telemetry(db: AsyncSession) -> bool:

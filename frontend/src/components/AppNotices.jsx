@@ -8,12 +8,12 @@ import {
   RiShieldLine,
 } from 'react-icons/ri';
 import { api } from '../api';
+import Markdown from './Markdown';
 
 // localStorage keys (stable, shared across sessions/tabs).
 const DISMISSED_ANNOUNCEMENTS_KEY = 'dismissedAnnouncementIds';
 const DISMISSED_VERSION_KEY = 'dismissedVersion';
 const MAX_DISMISSED_ANNOUNCEMENTS = 50;
-const BODY_TRUNCATE = 800;
 
 // security > warning > info; anything unknown ranks last.
 const LEVEL_RANK = { security: 0, warning: 1, info: 2 };
@@ -42,12 +42,6 @@ function readDismissedVersion() {
   } catch {
     return null;
   }
-}
-
-function truncate(text, max) {
-  if (!text) return '';
-  const value = String(text);
-  return value.length > max ? `${value.slice(0, max).trimEnd()}…` : value;
 }
 
 /** Highest-priority un-dismissed announcement: security > warning > info, then newest. */
@@ -148,9 +142,10 @@ export default function AppNotices() {
               <div className={`text-xs font-medium ${style.title}`}>{style.label}</div>
               <div className="mt-0.5 text-xs font-medium text-gray-900 dark:text-gray-100">{announcement.title}</div>
               {announcement.body && (
-                <div className="mt-0.5 whitespace-pre-line text-xs leading-relaxed text-gray-600 dark:text-gray-300">
-                  {announcement.body}
-                </div>
+                <Markdown
+                  text={announcement.body}
+                  className="mt-0.5 text-xs leading-relaxed text-gray-600 dark:text-gray-300"
+                />
               )}
             </>
           ) : (
@@ -171,9 +166,9 @@ export default function AppNotices() {
                   <summary className="cursor-pointer text-[10px] text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200">
                     What&apos;s new
                   </summary>
-                  <div className="mt-1 max-h-40 overflow-auto whitespace-pre-line text-[10px] leading-relaxed text-gray-600 dark:text-gray-300">
+                  <div className="mt-1 max-h-40 overflow-auto text-[10px] leading-relaxed text-gray-600 dark:text-gray-300">
                     {release.title && <div className="mb-1 font-medium text-gray-900 dark:text-gray-100">{release.title}</div>}
-                    {release.body && <div>{truncate(release.body, BODY_TRUNCATE)}</div>}
+                    {release.body && <Markdown text={release.body} />}
                   </div>
                 </details>
               )}

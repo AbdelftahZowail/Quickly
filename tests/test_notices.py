@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from app import notices
+from app.settings_manager import settings
 
 HUB = "https://hub.example"
 # Captured before any monkeypatching, so repeated patches in one test still wrap
@@ -28,6 +29,8 @@ def _clear_notices_cache():
 @pytest.fixture(autouse=True)
 def _configure(monkeypatch):
     monkeypatch.setattr(notices, "telemetry_url", lambda: HUB)
+    # Default-on unless a test opts out explicitly, regardless of the shell.
+    monkeypatch.delenv(notices.NOTICES_ENV, raising=False)
 
 
 def _patch_transport(monkeypatch, handler):
@@ -113,6 +116,97 @@ async def test_cache_serves_last_good_copy_on_failure(monkeypatch):
     fallback = await notices.get_notices()
     assert fallback["unavailable"] is False
     assert fallback["latest_version"] == "2.5.0"
+
+
+# ---------------------------------------------------------------------------
+# Opt-out switch (QUICKLY_NOTICES) — independent of telemetry
+# ---------------------------------------------------------------------------
+
+def _request_spy(monkeypatch):
+    """Patch the transport and record any request; a request is a test failure.
+
+    ``get_notices`` is fail-open and swallows ``Exception``, so an
+    ``AssertionError`` raised inside the handler would not fail the test. The
+    recorded list is asserted to be empty instead.
+    """
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        raise AssertionError(f"unexpected hub request: {request.url}")
+
+    _patch_transport(monkeypatch, handler)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_notices_disabled_makes_no_http_request(monkeypatch):
+    monkeypatch.setenv("QUICKLY_NOTICES", "false")
+    seen = _request_spy(monkeypatch)
+
+    result = await notices.get_notices()
+
+    assert seen == [], "disabled notices must not touch the network"
+    assert result["unavailable"] is True
+    assert result["announcements"] == []
+    assert result["versions"] == []
+    assert result["latest_version"] is None
+    assert result["update_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_notices_disabled_does_not_serve_cached_copy(monkeypatch):
+    monkeypatch.setattr(notices, "app_version", lambda: "2.4.0")
+    _patch_transport(
+        monkeypatch,
+        _feed_handler(versions=[{"name": "2.5.0", "tag": "v2.5.0", "prerelease": False}]),
+    )
+    good = await notices.get_notices()
+    assert good["latest_version"] == "2.5.0"
+
+    # Even with a cached copy present, opting out returns the empty payload.
+    monkeypatch.setattr(notices, "CACHE_SECONDS", 0)
+    monkeypatch.setenv("QUICKLY_NOTICES", "false")
+    seen = _request_spy(monkeypatch)
+    result = await notices.get_notices()
+
+    assert seen == []
+    assert result["unavailable"] is True
+    assert result["latest_version"] is None
+
+
+@pytest.mark.asyncio
+async def test_notices_still_fetch_when_telemetry_is_off(monkeypatch):
+    """Update notices must reach users who opted out of telemetry."""
+    monkeypatch.setenv("QUICKLY_TELEMETRY", "false")
+    monkeypatch.setattr(settings, "telemetry_env_enabled", False)
+    monkeypatch.setattr(settings, "telemetry_enabled", False)
+    monkeypatch.setattr(notices, "app_version", lambda: "2.4.0")
+    _patch_transport(monkeypatch, _feed_handler(versions=VERSIONS, announcements=ANNOUNCEMENTS))
+
+    result = await notices.get_notices()
+
+    assert result["unavailable"] is False
+    assert result["announcements"] == ANNOUNCEMENTS
+    assert result["latest_version"] == "2.5.0"
+    assert result["update_available"] is True
+
+
+@pytest.mark.parametrize("value", ["false", "FALSE", "0", "no", "off"])
+def test_notices_switch_accepts_falsy_values(monkeypatch, value):
+    monkeypatch.setenv("QUICKLY_NOTICES", value)
+    assert notices.notices_enabled() is False
+
+
+@pytest.mark.parametrize("value", ["true", "TRUE", "1", "yes", "on", ""])
+def test_notices_switch_stays_on_otherwise(monkeypatch, value):
+    monkeypatch.setenv("QUICKLY_NOTICES", value)
+    assert notices.notices_enabled() is True
+
+
+def test_notices_enabled_by_default(monkeypatch):
+    monkeypatch.delenv("QUICKLY_NOTICES", raising=False)
+    assert notices.notices_enabled() is True
 
 
 # ---------------------------------------------------------------------------
